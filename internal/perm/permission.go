@@ -43,13 +43,19 @@ const (
 	MailAccess
 	// AdminMail 允许后台管理收件域名与全局收件视图。
 	AdminMail
+	// AdminUnbind 允许审核邮箱地址解绑申请。
+	//
+	// 独立于 AdminMail：域名配置是日常设置，解绑审核是逐条表态的动作。一个
+	// 能改域名的管理员未必该有权删掉别人已注册的地址——那会让外部发信人
+	// 立刻收到退信，而误删的代价不由管理员承担。
+	AdminUnbind
 )
 
 // All 是全部已定义权限的并集。
 const All Bit = Upload | Download | Preview | Share | Pickup | ManageOwnNodes |
 	BypassQuota | AdminFiles | AdminUsers | AdminGroups | AdminAnnouncements |
 	AdminInvites | AdminStorage | AdminSystem | AdminAudit |
-	MailAccess | AdminMail
+	MailAccess | AdminMail | AdminUnbind
 
 // Has 判断掩码中是否包含指定权限。
 func Has(mask int64, bit Bit) bool {

@@ -152,6 +152,15 @@ const routes: RouteRecordRaw[] = [
         meta: { auth: true, perm: Perm.AdminAudit, title: "审计" },
       },
       {
+        // 解绑与注销：审核用户提交的邮箱地址解绑申请。权限位是 AdminUnbind
+        // 而不是 AdminMail —— 改域名是日常设置，删别人已注册的地址是逐条表态，
+        // 后者的代价由外部发信人承担。
+        path: "unbind",
+        name: "admin-unbind",
+        component: () => import("@/views/admin/MailUnbindView.vue"),
+        meta: { auth: true, perm: Perm.AdminUnbind, title: "解绑与注销" },
+      },
+      {
         path: "settings",
         name: "admin-settings",
         component: () => import("@/views/admin/SettingsView.vue"),

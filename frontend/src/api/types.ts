@@ -65,6 +65,7 @@ export const Perm = {
   AdminAudit: 1 << 14,
   MailAccess: 1 << 15,
   AdminMail: 1 << 16,
+  AdminUnbind: 1 << 17,
 } as const;
 
 /** 权限位的展示名，用于用户组编辑界面。 */
@@ -86,6 +87,7 @@ export const PERM_LABELS: ReadonlyArray<{ bit: number; label: string; group: str
   { bit: Perm.AdminAudit, label: "查看流量与审计", group: "管理" },
   { bit: Perm.MailAccess, label: "访问邮件（收件箱 / 阅读）", group: "邮件" },
   { bit: Perm.AdminMail, label: "管理收件域名与全局邮件", group: "邮件" },
+  { bit: Perm.AdminUnbind, label: "审核邮箱解绑申请", group: "邮件" },
 ];
 
 export function hasPerm(mask: number, bit: number): boolean {
@@ -826,6 +828,32 @@ export interface MailAddress {
   status: "active" | "frozen";
   createdAt: number;
   updatedAt: number;
+}
+
+/** 邮箱地址解绑申请。地址是快照：批准后该地址即被删除，单子仍留存。 */
+export interface MailUnbindRequest {
+  id: number;
+  address: string;
+  userId: number;
+  account: string;
+  status: "pending" | "approved" | "rejected";
+  reason: string;
+  note: string;
+  reviewedBy: number;
+  createdAt: number;
+  reviewedAt: number;
+}
+
+export interface MailUnbindStats {
+  pending: number;
+  approved: number;
+  rejected: number;
+  todayPending: number;
+}
+
+export interface MailUnbindListResult {
+  items: MailUnbindRequest[];
+  stats: MailUnbindStats;
 }
 
 // ---------------------------------------------------------------- M5 全局邮件管理

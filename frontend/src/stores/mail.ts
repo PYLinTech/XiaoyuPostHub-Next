@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 import { mailApi } from "@/api/endpoints";
-import type { MailAddress, MailboxCounters, MyMailDomain } from "@/api/types";
+import type { MailAddress, MailboxCounters, MailUnbindRequest, MyMailDomain } from "@/api/types";
 import { describeError } from "@/lib/async";
 import { useToasts } from "@/stores/toast";
 
@@ -34,16 +34,22 @@ interface MailShellState {
    * 用户侧只负责在允许的范围里选，不提供任何编辑入口。
    * 空数组 = 管理员还没配域名，或该域名的收件被关掉了。
    */
-  domains: MyMailDomain[];
-}
+    domains: MyMailDomain[];
+    /**
+     * 我提交过的**待审**解绑申请，按地址索引。弹层用它决定每个地址右侧
+     * 显示"申请解绑"还是"待审核 / 撤销"——不必为此给每个地址单开一个查询。
+     */
+    unbinds: Record<string, MailUnbindRequest>;
+  }
 
 const state = reactive<MailShellState>({
   unreadInbox: 0,
   addrOpen: false,
   addresses: [],
-  addressesLoaded: false,
-  domains: [],
-});
+    addressesLoaded: false,
+    domains: [],
+    unbinds: {},
+  });
 
 function setCounters(counters: MailboxCounters): void {
   state.unreadInbox = counters.unreadInbox;
@@ -69,6 +75,8 @@ async function openAddresses(): Promise<void> {
       const res = await mailApi.listAddresses();
       state.addresses = res.items;
       state.addressesLoaded = true;
+      const unb = await mailApi.listUnbinds();
+      state.unbinds = indexPendingUnbinds(unb.items);
     }
   } catch (err) {
     state.addrOpen = false;
@@ -87,6 +95,34 @@ async function createAddress(localPart: string, domain: string): Promise<void> {
   state.addressesLoaded = true;
 }
 
+/**
+ * 提交解绑申请。
+ *
+ * 申请不等于删除：地址一旦消失，外部发信人立刻收到退信，而这个代价由不在场
+ * 的人承担。所以后端只落一条待审单，真正生效要等管理员点头。
+ */
+async function requestUnbind(address: string, reason: string): Promise<void> {
+  const created = await mailApi.requestUnbind(address, reason);
+  state.unbinds[address] = created;
+}
+
+/** 撤销自己的待审申请。撤销后可再次申请。 */
+async function cancelUnbind(address: string): Promise<void> {
+  const pending = state.unbinds[address];
+  if (!pending) return;
+  await mailApi.cancelUnbind(pending.id);
+  delete state.unbinds[address];
+}
+
+/** indexPendingUnbinds 只保留待审的：已处理的单子对按钮状态没有意义。 */
+function indexPendingUnbinds(items: MailUnbindRequest[]): Record<string, MailUnbindRequest> {
+  const out: Record<string, MailUnbindRequest> = {};
+  for (const it of items) {
+    if (it.status === "pending") out[it.address] = it;
+  }
+  return out;
+}
+
 export function useMailShell() {
   return {
     state,
@@ -95,5 +131,7 @@ export function useMailShell() {
     openAddresses,
     closeAddresses,
     createAddress,
+    requestUnbind,
+    cancelUnbind,
   };
 }

@@ -597,13 +597,15 @@ CREATE INDEX IF NOT EXISTS idx_mailboxes_stats ON mailboxes(status, is_read, is_
   -- 且地址可被别人重新申请注册。误删的代价由别人承担，所以这一动作需要一个人
   -- 明确点头的环节。
   --
-  -- 申请单在地址被删后仍保留（外键指向的是地址，但审核通过时地址行本身也一并
-  -- 删除——见服务层的处理顺序），用于事后追溯"这个地址为何消失"。
+  -- 申请单在地址被删后仍保留，用于事后追溯"这个地址为何消失"。
   CREATE TABLE IF NOT EXISTS mail_unbind_requests (
       -- 代理主键：地址随时可能被删（审核通过即删），申请单本身要能长期留存
       -- 以便追溯"这个地址当初为什么消失"。
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      address     TEXT NOT NULL REFERENCES mail_addresses(address),
+      -- 地址是快照而非外键：审核通过的动作就是删掉 mail_addresses 里那一行，
+      -- 带外键时 NO ACTION 会当场挡住删除，CASCADE 又会把申请单一并带走。
+      -- 详见 migrations/0001_mail_unbind.sql 里的同一段说明。
+      address     TEXT NOT NULL,
       user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
       reason      TEXT NOT NULL DEFAULT '',

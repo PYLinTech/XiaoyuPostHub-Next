@@ -105,6 +105,9 @@ const adminGroups: Array<{ label: string; items: NavItem[] }> = [
     items: [
       { label: "流量", to: "/admin/traffic", icon: "activity", perm: Perm.AdminAudit },
       { label: "审计", to: "/admin/audit", icon: "list", perm: Perm.AdminAudit },
+      // 解绑与注销独立于 AdminMail：它是逐条表态的审核动作，代价由外部
+      // 发信人承担，不该跟"改收件域名"共用一个权限位。
+      { label: "解绑与注销", to: "/admin/unbind", icon: "logout", perm: Perm.AdminUnbind },
     ],
   },
   {

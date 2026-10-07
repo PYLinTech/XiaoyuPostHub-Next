@@ -78,6 +78,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/mail/addresses", s.userMailOnly(s.handleMailListAddresses))
 	mux.HandleFunc("POST /api/mail/addresses", s.userMailOnly(s.handleMailCreateAddress))
 	mux.HandleFunc("POST /api/mail/parts/{id}/delivery", s.userMailOnly(s.handleMailPartDelivery))
+	// 邮箱解绑：用户侧只需 MailAccess，与创建地址同一道门。
+	mux.HandleFunc("GET /api/mail/unbind-requests", s.userMailOnly(s.handleUnbindList))
+	mux.HandleFunc("POST /api/mail/unbind-requests", s.userMailOnly(s.handleUnbindRequest))
+	mux.HandleFunc("DELETE /api/mail/unbind-requests/{id}", s.userMailOnly(s.handleUnbindCancel))
 
 	// ---- 归档（登录用户只操作自己的批次） ----
 	mux.HandleFunc("GET /api/archive", s.handleListArchive)
@@ -98,6 +102,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/admin/groups/{name}", s.handleAdminDeleteGroup)
 	mux.HandleFunc("GET /api/admin/traffic", s.handleAdminTraffic)
 	mux.HandleFunc("GET /api/admin/audit", s.handleAdminAudit)
+	// 邮箱解绑审核。权限位是 AdminUnbind，不复用 AdminMail：改域名是日常
+	// 设置，删别人已注册的地址是逐条表态，后者的代价由外部发信人承担。
+	mux.HandleFunc("GET /api/admin/unbind-requests", s.handleAdminUnbindList)
+	mux.HandleFunc("POST /api/admin/unbind-requests/{id}/approve", s.handleAdminUnbindApprove)
+	mux.HandleFunc("POST /api/admin/unbind-requests/{id}/reject", s.handleAdminUnbindReject)
 	mux.HandleFunc("GET /api/admin/announcements", s.handleAdminListAnnouncements)
 	mux.HandleFunc("POST /api/admin/announcements", s.handleAdminSaveAnnouncement)
 	mux.HandleFunc("DELETE /api/admin/announcements/{id}", s.handleAdminDeleteAnnouncement)

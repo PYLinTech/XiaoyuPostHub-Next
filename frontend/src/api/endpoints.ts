@@ -21,6 +21,8 @@ import type {
   ListResult,
   ListNode,
   MailAddress,
+  MailUnbindRequest,
+  MailUnbindListResult,
   MyMailDomain,
   MailDetail,
   MailListResult,
@@ -330,6 +332,14 @@ export const mailApi = {
       method: "POST",
       body: { clientPublicKey },
     }),
+  listUnbinds: () => request<{ items: MailUnbindRequest[] }>("/api/mail/unbind-requests"),
+  requestUnbind: (address: string, reason: string) =>
+    request<MailUnbindRequest>("/api/mail/unbind-requests", {
+      method: "POST",
+      body: { address, reason },
+    }),
+  cancelUnbind: (id: number) =>
+    request<{ id: number }>(`/api/mail/unbind-requests/${id}`, { method: "DELETE" }),
 };
 
 export const adminApi = {
@@ -479,6 +489,20 @@ export const adminApi = {
     request<{ ok: boolean }>(`/api/admin/mail/mailboxes/${id}/restore`, { method: "POST" }),
   adminPurgeMail: (id: number) =>
     request<{ ok: boolean }>(`/api/admin/mail/mailboxes/${id}/purge`, { method: "POST" }),
+
+  // ---- 邮箱解绑审核（权限位 AdminUnbind）----
+  listUnbinds: (query: { status?: string; address?: string; search?: string } = {}) =>
+    request<MailUnbindListResult>("/api/admin/unbind-requests", { query: { ...query } }),
+  approveUnbind: (id: number, note = "") =>
+    request<MailUnbindRequest>(`/api/admin/unbind-requests/${id}/approve`, {
+      method: "POST",
+      body: { note },
+    }),
+  rejectUnbind: (id: number, note = "") =>
+    request<MailUnbindRequest>(`/api/admin/unbind-requests/${id}/reject`, {
+      method: "POST",
+      body: { note },
+    }),
 };
 
 // ---------------------------------------------------------------- 直链取密文

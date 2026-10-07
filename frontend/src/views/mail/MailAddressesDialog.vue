@@ -20,6 +20,12 @@ const newLocalPart = ref("");
 const addrBusy = ref(false);
 const selectedDomain = ref("");
 
+/** 正在申请解绑的地址；空串表示申请弹窗没开。 */
+const unbindTarget = ref("");
+const unbindReason = ref("");
+/** 正在提交/撤销的地址，用来只锁住被点的那一行。 */
+const unbindBusy = ref("");
+
 // 域名不再从已有地址回填：它由管理员按组配置，弹层打开时从
 // /api/mail/domains 取，用户侧只读。回填会让"我原来在哪个域下建过地址"
 // 变成域名的来源，管理员改了绑定之后界面上还留着旧值。
@@ -36,6 +42,46 @@ watch(domainOptions, (options) => {
   }
   selectedDomain.value = options[0]?.value ?? "";
 });
+
+/** 打开解绑申请弹窗。重开时清掉上次的理由。 */
+function openUnbind(address: string): void {
+  unbindTarget.value = address;
+  unbindReason.value = "";
+}
+
+/**
+ * 提交解绑申请。
+ *
+ * 成功后不关外层弹层：用户还要看到"这个地址现在待审核"，关掉等于要重新打开
+ * 才能确认刚才那一下生效了。
+ */
+async function submitUnbind(): Promise<void> {
+  const target = unbindTarget.value;
+  if (!target) return;
+  unbindBusy.value = target;
+  try {
+    await mail.requestUnbind(target, unbindReason.value.trim());
+    unbindTarget.value = "";
+    toasts.success("解绑申请已提交，等待管理员审核");
+  } catch (err) {
+    toastApiError(toasts, err);
+  } finally {
+    unbindBusy.value = "";
+  }
+}
+
+/** 撤销自己的待审申请。撤销后可再次申请。 */
+async function cancelUnbind(address: string): Promise<void> {
+  unbindBusy.value = address;
+  try {
+    await mail.cancelUnbind(address);
+    toasts.success("已撤销解绑申请");
+  } catch (err) {
+    toastApiError(toasts, err);
+  } finally {
+    unbindBusy.value = "";
+  }
+}
 
 async function createAddress(): Promise<void> {
   const local = newLocalPart.value.trim();
@@ -68,6 +114,19 @@ async function createAddress(): Promise<void> {
           <span class="badge" :class="a.status === 'active' ? 'ok' : ''">{{
             a.status === "active" ? "可用" : "已冻结"
           }}</span>
+          <!-- 冻结地址不给申请：它本来就不收信，删不删没有区别，
+               让用户在这种状态下提交只会制造一张没有标的的单子。 -->
+          <template v-if="a.status === 'active'">
+            <!-- 已有待审单就显示状态并允许撤销，而不是再放一个「申请」按钮：
+                 后端会拒绝重复申请，界面上给一个点了必失败的按钮更糟。 -->
+            <template v-if="mail.state.unbinds[a.address]">
+              <span class="badge warn">待审核</span>
+              <button class="link-btn" :disabled="unbindBusy === a.address" @click="cancelUnbind(a.address)">
+                撤销
+              </button>
+            </template>
+            <button v-else class="link-btn" @click="openUnbind(a.address)">申请解绑</button>
+          </template>
         </li>
       </ul>
       <div v-else-if="!mail.state.addressesLoaded" class="table-state">
@@ -101,6 +160,31 @@ async function createAddress(): Promise<void> {
       <p v-if="selectedDomain" class="mv-addr-tip">
         域名由管理员按用户组分配，只能在已分配的域名中选择。
       </p>
+
+      <!-- 申请解绑：申请不等于删除。通过后地址立刻失效，发往它的邮件会被退信，
+           已经收到的邮件全部保留——归属记在账号上，不在地址上。 -->
+      <AppModal
+        v-if="unbindTarget"
+        :open="unbindTarget !== ''"
+        title="申请解绑邮箱地址"
+        @close="unbindTarget = ''"
+      >
+        <div class="stack">
+          <p class="mv-addr-tip">
+            即将申请解绑 <strong>{{ unbindTarget }}</strong>
+          </p>
+          <p class="mv-addr-tip">
+            管理员审核通过后该地址会被删除，发往它的邮件将收到退信；你已经收到的邮件会全部保留。
+          </p>
+          <label class="mv-addr-tip">
+            申请理由（选填）
+            <input v-model="unbindReason" type="text" maxlength="200" placeholder="例如：不再使用这个地址" />
+          </label>
+          <AppButton size="sm" :loading="unbindBusy === unbindTarget" @click="submitUnbind">
+            提交申请
+          </AppButton>
+        </div>
+      </AppModal>
     </div>
   </AppModal>
 </template>
