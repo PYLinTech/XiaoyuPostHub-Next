@@ -44,12 +44,13 @@ func TestFreshDatabaseAtCurrentVersion(t *testing.T) {
 	}
 }
 
-// TestSchemaInitIsIdempotentAndStateless 覆盖 initSchema 现在唯一的契约：
-// 执行最终结构脚本 + 戳版本，没有分支、没有迁移、没有版本判断。
-// 同一个库文件反复打开都应成功，版本始终落在 currentSchemaVersion 上，
-// 缺失的对象被幂等补齐——这是"重复执行 CREATE ... IF NOT EXISTS"的结果，
-// 不是任何兼容逻辑。
-func TestSchemaInitIsIdempotentAndStateless(t *testing.T) {
+// TestSchemaInitSteersOnVersion 覆盖 initSchema 的分派契约。
+//
+// 库结构的推进只有两条路：全新库直建基表，老库逐代跑迁移。版本号一致时
+// 什么都不做——不重跑基表，也不做"缺失对象补齐"这类兜底。结构少了东西
+// 属于运维事故，正解是加一代迁移补建，不是靠启动时顺手 CREATE IF NOT
+// EXISTS 蒙混过去。
+func TestSchemaInitSteersOnVersion(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)
 	path := db.Path()
@@ -57,11 +58,11 @@ func TestSchemaInitIsIdempotentAndStateless(t *testing.T) {
 		t.Fatalf("关库失败: %v", err)
 	}
 
-	// 连开三次：每次都应成功，且版本号稳定。
+	// 连开三次：每次都应成功，版本始终落在 currentSchemaVersion 上。
 	for i := 0; i < 3; i++ {
 		reopened, err := Open(path)
 		if err != nil {
-			t.Fatalf("第 %d 次重开应成功（schema.sql 幂等）: %v", i+1, err)
+			t.Fatalf("第 %d 次重开应成功: %v", i+1, err)
 		}
 		var version int
 		if err := reopened.R().QueryRowContext(ctx,
@@ -71,19 +72,14 @@ func TestSchemaInitIsIdempotentAndStateless(t *testing.T) {
 		if version != currentSchemaVersion {
 			t.Fatalf("第 %d 次重开后版本 = %d，应为 %d", i+1, version, currentSchemaVersion)
 		}
-		// 缺索引时应被幂等补建——这正是"不写版本分支"的代价与好处。
-		var idxSQL string
-		if err := reopened.R().QueryRowContext(ctx,
-			`SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_mailboxes_purge'`).Scan(&idxSQL); err != nil {
-			t.Fatalf("第 %d 次重开后归档索引应存在: %v", i+1, err)
-		}
 		if err := reopened.Close(); err != nil {
 			t.Fatalf("第 %d 次关库失败: %v", i+1, err)
 		}
 	}
 
-	// 删掉一个对象后重开：应被补回来，证明恢复能力来自 schema.sql 而非
-	// 任何针对特定版本的修补分支。
+	// 版本一致时不碰结构：手工删掉一个索引，重开也不会被补回来。
+	// 这条断言是为了把"不兜底"钉成契约——将来若有人顺手在
+	// case from == current 里加回 runSchemaScript()，这里会红。
 	setup, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -94,18 +90,18 @@ func TestSchemaInitIsIdempotentAndStateless(t *testing.T) {
 	if err := setup.Close(); err != nil {
 		t.Fatal(err)
 	}
-	healed, err := Open(path)
+	untouched, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = healed.Close() })
+	t.Cleanup(func() { _ = untouched.Close() })
 	var n int
-	if err := healed.R().QueryRowContext(ctx,
+	if err := untouched.R().QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_mailboxes_purge'`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatal("缺失索引应在重开时被幂等补建")
+	if n != 0 {
+		t.Fatal("版本一致时不应执行任何结构语句")
 	}
 }
 

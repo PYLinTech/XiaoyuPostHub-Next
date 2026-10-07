@@ -1,23 +1,16 @@
-// 结构版本标记。
+// 结构版本调度：决定这个库文件该被建、被升级，还是该拒绝启动。
 //
-// 库结构只有一种形态：schema.sql 里的最终结构。启动时执行它并把
-// PRAGMA user_version 戳成当前版本，就结束了——没有迁移、没有版本分支、
-// 没有"这是旧库吗"的判断。
+// 结构演进现在走两条路径：
 //
-// schema.sql 全部是 CREATE ... IF NOT EXISTS，所以重复执行是幂等的：
-// 全新库得到完整结构，同一个库文件反复打开不产生任何变化。
+//	v = 0        全新库。跑 schema.sql 直建终版结构。
+//	0 < v < cur   老库。逐代执行 migrations/ 里的增量。
+//	v = cur       已是最新，什么都不做。
+//	v > cur       库比程序新。拒绝启动。
 //
-// 但幂等只覆盖**缺失的对象**，不覆盖**改过的定义**：CREATE TABLE IF NOT
-// EXISTS 遇到同名表会原样跳过，因此把一张已有表的列改掉之后，旧库文件里
-// 仍是老结构，而且不会报错——它会安静地在缺列上失败。所以改动已有表的
-// 结构时，唯一正确的做法是**重建库文件**，本项目不为此提供任何迁移脚本。
-//
-// currentSchemaVersion 的用途是**标记**：让运维看一眼就知道这个库文件是
-// 哪一版结构创建的。它不参与任何控制流，也不承担"兼容旧结构"的职责。
-// 结构变了就直接改这个数字，程序假定库文件与它同源——开发期反复重建库
-// 文件本来就是常态，为"从旧结构平滑升上来"保留一套判断逻辑，换来的是
-// 零收益的复杂度，以及一个必须永远维护正确的兼容分支。
-
+// 第四种情况是这套机制里最要紧的一条。旧库可以直接换新程序升上来，
+// 但新库不能配旧程序跑——那会让旧代码在缺列上安静地失败，而"安静"
+// 意味着它会继续处理业务直到某条数据损坏。真要在旧库文件上回退代码，
+// 必须先把 PRAGMA user_version 拨回它认识的版本。
 package store
 
 import (
@@ -26,31 +19,71 @@ import (
 	"time"
 )
 
-// currentSchemaVersion 是当前代码期望的结构版本，与 schema.sql 同步演进。
+// currentSchemaVersion 是当前代码期望的结构版本，与 schema.sql 和
+// migrations/ 同步演进。
 //
-// 恒为 1：库结构从零直建、从零演进，没有第二个版本，也就没有需要平滑升上来
-// 的旧结构。发信链路（mail_senders、direction、reply_to 等）移除时随库文件
-// 一起重建，不占用版本号。
-const currentSchemaVersion = 1
+// 1 是基线：首批建库直起的结构。v1 → v2 是邮箱地址解绑申请表。
+const currentSchemaVersion = 2
 
-const schemaVersionOpTimeout = 60 * time.Second
+const schemaVersionOpTimeout = 120 * time.Second
 
-// initSchema 执行最终结构脚本并戳记结构版本。
+// initSchema 读当前版本，按上面的四种情况分派。
 func (db *DB) initSchema() error {
 	ctx, cancel := context.WithTimeout(context.Background(), schemaVersionOpTimeout)
 	defer cancel()
 
-	if err := db.runSchemaScript(); err != nil {
+	from, err := db.readUserVersion(ctx)
+	if err != nil {
 		return err
 	}
+
+	switch {
+	case from == 0:
+		// 全新库：基表已是终版结构，直接盖章。不跑迁移——那只会重复建表。
+		if err := db.runSchemaScript(); err != nil {
+			return err
+		}
+		return db.writeUserVersion(ctx, currentSchemaVersion)
+
+	case from < currentSchemaVersion:
+		// 老库：逐代升级。任一代失败即返回错误，服务拒绝启动——
+		// 结构不对却照常跑业务，比拒绝启动糟糕得多。
+		if err := db.runMigrations(ctx, from, currentSchemaVersion); err != nil {
+			return err
+		}
+		return db.writeUserVersion(ctx, currentSchemaVersion)
+
+	case from == currentSchemaVersion:
+		return nil
+
+	default:
+		return fmt.Errorf(
+			"数据库结构版本 v%d 高于本程序支持的 v%d，请升级程序；"+
+				"若确需用旧版本运行，请先确认旧代码认识的结构版本",
+			from, currentSchemaVersion)
+	}
+}
+
+// readUserVersion 读 PRAGMA user_version。空库返回 0（SQLite 的默认值）。
+func (db *DB) readUserVersion(ctx context.Context) (int, error) {
+	var v int
+	if err := db.write.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v); err != nil {
+		return 0, fmt.Errorf("读取结构版本失败: %w", err)
+	}
+	return v, nil
+}
+
+// writeUserVersion 单独写版本号。逐代迁移里版本号由 applyMigration 在同一
+// 事务内写入，这里只服务于"全新库建完"与"迁移全部跑完"两个收尾场景。
+func (db *DB) writeUserVersion(ctx context.Context, v int) error {
 	if _, err := db.write.ExecContext(ctx,
-		fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
+		fmt.Sprintf("PRAGMA user_version = %d", v)); err != nil {
 		return fmt.Errorf("写入结构版本失败: %w", err)
 	}
 	return nil
 }
 
-// runSchemaScript 读取并执行内嵌的最终结构脚本。
+// runSchemaScript 读取并执行内嵌的终版结构脚本。
 func (db *DB) runSchemaScript() error {
 	schema, err := schemaFS.ReadFile("schema.sql")
 	if err != nil {

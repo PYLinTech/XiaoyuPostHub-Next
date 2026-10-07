@@ -588,3 +588,31 @@ CREATE INDEX IF NOT EXISTS idx_mailboxes_purge ON mailboxes(status, purge_at);
 -- 列全在这个索引里，SQLite 可以只扫索引不回表。代价是每次写归属行都要多维护
 -- 一条索引——邮件量级远小于文件，这个交换是划算的。
 CREATE INDEX IF NOT EXISTS idx_mailboxes_stats ON mailboxes(status, is_read, is_starred, user_id);
+
+  -- ---------------------------------------------------------------- 解绑申请
+
+  -- 邮箱地址解绑申请：用户对**自己名下**的地址发起解绑，管理员审核后删除该地址。
+  --
+  -- 为什么要有申请单而不是直接删：地址一旦删除，外部发信人立刻收到 550 退信，
+  -- 且地址可被别人重新申请注册。误删的代价由别人承担，所以这一动作需要一个人
+  -- 明确点头的环节。
+  --
+  -- 申请单在地址被删后仍保留（外键指向的是地址，但审核通过时地址行本身也一并
+  -- 删除——见服务层的处理顺序），用于事后追溯"这个地址为何消失"。
+  CREATE TABLE IF NOT EXISTS mail_unbind_requests (
+      -- 代理主键：地址随时可能被删（审核通过即删），申请单本身要能长期留存
+      -- 以便追溯"这个地址当初为什么消失"。
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      address     TEXT NOT NULL REFERENCES mail_addresses(address),
+      user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+      reason      TEXT NOT NULL DEFAULT '',
+      note        TEXT NOT NULL DEFAULT '',
+      reviewed_by INTEGER NOT NULL DEFAULT 0,
+      created_at  INTEGER NOT NULL,
+      reviewed_at INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
+
+  CREATE INDEX IF NOT EXISTS idx_mail_unbind_status ON mail_unbind_requests(status, created_at);
+
+  CREATE INDEX IF NOT EXISTS idx_mail_unbind_address ON mail_unbind_requests(address);

@@ -215,11 +215,11 @@ func GetAdminNodeStats(ctx context.Context, q Querier) (AdminNodeStats, error) {
 		return AdminNodeStats{}, err
 	}
 	stats := AdminNodeStats{
-		NodeTotal:        fileNodes + folderNodes,
-		FileNodes:        fileNodes,
-		FolderNodes:      folderNodes,
-		FileObjectTotal:  fileObjects,
-		MailObjectTotal:  mailObjects,
+		NodeTotal:       fileNodes + folderNodes,
+		FileNodes:       fileNodes,
+		FolderNodes:     folderNodes,
+		FileObjectTotal: fileObjects,
+		MailObjectTotal: mailObjects,
 		ObjectsByStatus: make(map[string]int64, len(byStatus)),
 	}
 	for st, n := range byStatus {
