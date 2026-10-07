@@ -538,7 +538,9 @@ export interface AdminNodeStats {
   nodeTotal: number;
   fileNodes: number;
   folderNodes: number;
-  objectTotal: number;
+  /** 内容池对象按入库来源拆分，不提供合计。 */
+  fileObjectTotal: number;
+  mailObjectTotal: number;
   /** 键与 store.FileStatus.String() 一致：uploading/normal/disabled/archive/purged。 */
   objectsByStatus: Record<string, number>;
 }

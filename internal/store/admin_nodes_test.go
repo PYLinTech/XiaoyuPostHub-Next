@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -30,15 +31,23 @@ func seedAdminNodes(t *testing.T, db *DB) {
 		t.Fatal(err)
 	}
 
-	insFile := func(ck string, status int, size int64) {
-		mustExec(t, db, `INSERT INTO files (checksum, size_plain, pan_object_name, pan_size_wire,
-		                 enc_algo, enc_chunk_log2, enc_nonce_prefix, enc_salt, dek_envelope, kek_key_id,
-		                 status, ref_count, created_at, updated_at)
-			VALUES (?, ?, 'p/' || ?, 90, 'AES-256-GCM', 20, 1, x'00', x'00', 'k1', ?, 1, 1, 1)`,
-			ck, size, ck, status)
+	// 用命名参数而不是混排 ?：SQLite 允许 ?NNN 复用位置，VALUES 里连续的
+	// 字面 1 会被当成 ?1 占位符，导致 created_by 静默取错值（created_by=0
+	// 传 0 时，前面的 ref_count=1 正好顶上了 ?1，测试会以"拆分不生效"的形式
+	// 失败，而不是报错，极难定位）。
+	insFile := func(ck string, status int, size int64, createdBy int64) {
+		mustExec(t, db, `INSERT INTO files (
+		                 checksum, size_plain, pan_object_name, pan_size_wire,
+		                 enc_algo, enc_chunk_log2, enc_nonce_prefix, enc_salt,
+		                 dek_envelope, kek_key_id,
+		                 status, ref_count, created_by, created_at, updated_at)
+			VALUES (:ck, :size, 'p/' || :ck, 90, 'AES-256-GCM', 20, 1,
+		                x'00', x'00', 'k1', :status, 1, :created_by, 1, 1)`,
+			sql.Named("ck", ck), sql.Named("size", size),
+			sql.Named("status", status), sql.Named("created_by", createdBy))
 	}
-	insFile("ck-report", int(FileNormal), 500)
-	insFile("ck-secret", int(FileDisabled), 900)
+	insFile("ck-report", int(FileNormal), 500, 1)
+	insFile("ck-secret", int(FileDisabled), 900, 0)
 
 	// 文件夹没有 file_checksum（表上的 CHECK 约束会拒绝）。
 	mustExec(t, db, `INSERT INTO user_nodes (user_id, logical_path, node_type, name, parent_path,
@@ -217,9 +226,11 @@ func TestGetAdminNodeStatsCountsNodesAndObjectsSeparately(t *testing.T) {
 		t.Fatalf("节点口径应 3/1/4，得 %d/%d/%d",
 			stats.FileNodes, stats.FolderNodes, stats.NodeTotal)
 	}
-	// 2 个对象：ck-report 虽被引用两次，内容池里只有一行。
-	if stats.ObjectTotal != 2 {
-		t.Fatalf("对象总数应为 2，得 %d", stats.ObjectTotal)
+	// 2 个对象按来源拆开：ck-report 是用户上传(created_by=1)，
+	// ck-secret 是系统入库(created_by=0，邮件正文走的就是这条路)。
+	if stats.FileObjectTotal != 1 || stats.MailObjectTotal != 1 {
+		t.Fatalf("对象来源口径应 1/1，得 %d/%d",
+			stats.FileObjectTotal, stats.MailObjectTotal)
 	}
 	if stats.ObjectsByStatus["normal"] != 1 || stats.ObjectsByStatus["disabled"] != 1 {
 		t.Fatalf("对象状态分布不对: %+v", stats.ObjectsByStatus)
@@ -235,7 +246,8 @@ func TestGetAdminNodeStatsCountsNodesAndObjectsSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("空库统计失败: %v", err)
 	}
-	if empty.NodeTotal != 0 || empty.ObjectTotal != 0 || empty.ObjectsByStatus == nil {
+	if empty.NodeTotal != 0 || empty.FileObjectTotal != 0 || empty.MailObjectTotal != 0 ||
+		empty.ObjectsByStatus == nil {
 		t.Fatalf("空库统计应全零且 map 非 nil: %+v", empty)
 	}
 }

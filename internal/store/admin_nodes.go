@@ -166,8 +166,13 @@ type AdminNodeStats struct {
 	NodeTotal   int64 `json:"nodeTotal"`
 	FileNodes   int64 `json:"fileNodes"`
 	FolderNodes int64 `json:"folderNodes"`
-	// ObjectTotal 是 files 表的行数，即内容池里去重后的份数。
-	ObjectTotal int64 `json:"objectTotal"`
+	// FileObjectTotal / MailObjectTotal 是 files 表按入库来源拆开的两份口径。
+	//
+	// 不提供合计字段是刻意的：管理员真正要回答的问题是"文件占多少、邮件占
+	// 多少"，给一个总数反而会让人去和下面的节点表对账（对不上，因为两者
+	// 本来就不是同一批东西）。两个值不重叠且覆盖全表，需要总量时自行相加。
+	FileObjectTotal int64 `json:"fileObjectTotal"`
+	MailObjectTotal int64 `json:"mailObjectTotal"`
 	// ObjectsByStatus 是内容池对象的状态分布。
 	ObjectsByStatus map[string]int64 `json:"objectsByStatus"`
 }
@@ -201,19 +206,44 @@ func GetAdminNodeStats(ctx context.Context, q Querier) (AdminNodeStats, error) {
 	if err != nil {
 		return AdminNodeStats{}, err
 	}
+	fileObjects, mailObjects, err := CountFilesByOrigin(ctx, q)
+	if err != nil {
+		return AdminNodeStats{}, err
+	}
 	byStatus, err := CountFilesByStatus(ctx, q)
 	if err != nil {
 		return AdminNodeStats{}, err
 	}
 	stats := AdminNodeStats{
-		NodeTotal:       fileNodes + folderNodes,
-		FileNodes:       fileNodes,
-		FolderNodes:     folderNodes,
+		NodeTotal:        fileNodes + folderNodes,
+		FileNodes:        fileNodes,
+		FolderNodes:      folderNodes,
+		FileObjectTotal:  fileObjects,
+		MailObjectTotal:  mailObjects,
 		ObjectsByStatus: make(map[string]int64, len(byStatus)),
 	}
 	for st, n := range byStatus {
 		stats.ObjectsByStatus[st.String()] = n
-		stats.ObjectTotal += n
 	}
 	return stats, nil
+}
+
+// CountFilesByOrigin 按入库来源统计内容池对象，两个返回值不重叠且覆盖全表。
+//
+// created_by>0 是用户主动上传：走上传会话，有明确的用户主体。
+// created_by=0 是系统自动入库：邮件正文与附件走 IngestPlaintext 时显式传 0，
+// 将来邮件草稿同样走这条原语（它没有上传会话，也没有用户主体），会自动
+// 落进同一口径，不需要为此加字段或改判断。
+func CountFilesByOrigin(ctx context.Context, q Querier) (fileObjects, mailObjects int64, err error) {
+	// COALESCE 兜住空表：SUM 在无行时返回 NULL，直接 Scan 进 int64 会报
+	// "converting NULL to int64 is unsupported"。
+	err = q.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(CASE WHEN created_by > 0 THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN created_by = 0 THEN 1 ELSE 0 END), 0)
+		FROM files`).
+		Scan(&fileObjects, &mailObjects)
+	if err != nil {
+		return 0, 0, fmt.Errorf("统计对象入库来源失败: %w", err)
+	}
+	return fileObjects, mailObjects, nil
 }

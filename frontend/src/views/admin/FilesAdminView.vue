@@ -54,7 +54,8 @@ const EMPTY_STATS: AdminNodeStats = {
   nodeTotal: 0,
   fileNodes: 0,
   folderNodes: 0,
-  objectTotal: 0,
+  fileObjectTotal: 0,
+  mailObjectTotal: 0,
   objectsByStatus: {},
 };
 
@@ -72,9 +73,14 @@ const statItems = computed<StatItem[]>(() => [
     hint: `与下方表格同一批：${stats.value.fileNodes} 个文件、${stats.value.folderNodes} 个文件夹`,
   },
   {
-    label: "内容池对象",
-    value: stats.value.objectTotal,
-    hint: "去重后的份数；同一份内容被多人各存一次仍只算一份",
+    label: "文件对象",
+    value: stats.value.fileObjectTotal,
+    hint: "用户上传去重后的份数",
+  },
+  {
+    label: "邮件对象",
+    value: stats.value.mailObjectTotal,
+    hint: "邮件内容入库去重后的份数",
   },
   ...STATUS_ORDER.filter((key) => stats.value.objectsByStatus[key] !== undefined).map((key) => ({
     label: STATUS_META[key].label,
