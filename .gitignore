@@ -1,0 +1,37 @@
+# 运行期产物与本地数据。
+#
+# data/ 里是 master.key 与数据库本身：master.key 保护着全部文件内容的密钥，
+# 丢了就解不开已加密的敏感配置，而把它提交进仓库等于公开它。这一条不是洁癖。
+
+/data/
+/bin/
+
+# 构建产物。dist/ 是 build.sh 的输出目录（可执行文件在 dist/，前端产物在
+# frontend/dist 与 internal/webui/dist 两处）。
+/dist/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+# vite 的 dev 期中间产物（Service Worker 单独编译的落点）
+frontend/node_modules/.xph/
+
+# 被 go:embed 内嵌进二进制的前端产物：由 build.sh 从 frontend/dist 同步而来。
+# .gitkeep 是占位，必须提交——go:embed 要求被内嵌的目录在编译时存在，
+# 没有它就没跑过前端构建的人连 go build 都执行不了。
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+
+# 环境变量：只提交 .env.example
+#
+# 用 `.env*` 一网打尽再把 .env.example 反选回来。只逐个列 .env / .env.local
+# 看着清楚，但漏一个环境名就是一个泄露口：.env.production、.env.staging 这类
+# 不会命中 .env 这条精确规则，凭据会被无声无息地提交上去。
+.env*
+!.env.example
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

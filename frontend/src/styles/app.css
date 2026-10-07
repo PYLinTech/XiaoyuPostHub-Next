@@ -1,0 +1,1819 @@
+@import "./tokens.css";
+
+/* ---------------------------------------------------------------- 基础 */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+}
+
+/* 弹窗打开时锁住背景滚动。
+ *
+ * 用类名而不是内联 style：内联的 overflow 会盖掉别处对 body 的设置，
+ * 而"关掉内层弹窗却把外层也解锁了"这类问题的根因是没计数——AppModal
+ * 自己维护引用计数，只有计数归零才摘掉这个类。 */
+body.modal-open {
+  overflow: hidden;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+a {
+  color: var(--c-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+code,
+kbd,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--c-accent-weak);
+}
+
+/* ---------------------------------------------------------------- 布局骨架 */
+
+/* 壳自己占满视口、不滚动：滚动的是顶栏下面那块内容区，
+   自绘滚动条因此只附着在那块区域上。 */
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.shell__sidebar {
+  background: var(--c-surface);
+  border-right: 1px solid var(--c-border);
+  display: flex;
+  flex-direction: column;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding-bottom: var(--sp-4);
+  /* 壳不滚动：品牌区与底部账号区固定，只有中间的菜单层滚动。
+     指示条挂在 .shell__sidebar-mid（滚动层的兄弟）上——放进滚动容器的话，
+     绝对定位子元素会跟着内容一起被滚走，位置永远对不上实际滚动。 */
+}
+
+/* 菜单滚动层的定位壳：flex 撑满品牌区与底部区之间，同时作为指示条的
+   包含块——指示条的活动范围就只有真正在滚的这一段。 */
+.shell__sidebar-mid {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 滚动层：只装菜单；原生滚动条隐藏，滚动由自绘指示条表达。 */
+.shell__sidebar-scroll {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  scrollbar-width: none;
+}
+
+.shell__sidebar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.shell__main {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell__topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-topbar);
+  min-height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: color-mix(in srgb, var(--c-surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--c-border);
+}
+
+/* 内容区是唯一的纵向滚动容器（壳自己不滚）。宽度上限与内边距因此挂在内层
+   包装上，而不是滚动容器本身——否则窄栏居中时自绘滚动条会飘在屏幕中间。
+   外面这层只负责给滑块定位（见"自绘滚动条"一节），自己不滚。 */
+.shell__scroll {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.shell__content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.shell__content > .route-anim {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--sp-5) var(--sp-4) var(--sp-10);
+}
+
+/* 管理中心：内容有明确的阅读宽度与节奏，页面组件只负责填充内容。 */
+.shell--admin {
+  background: var(--c-bg);
+}
+
+.shell--admin .shell__sidebar {
+  background: color-mix(in srgb, var(--c-surface) 94%, var(--c-accent-weak));
+}
+
+.shell--admin .shell__content > .route-anim {
+  max-width: var(--admin-content-max);
+  padding: clamp(24px, 3vw, 40px) clamp(20px, 3vw, 48px) 64px;
+}
+
+/* 邮件页：邮件列表与内容管理页一样宽，横向预算与管理壳齐平。
+   侧栏配色与用户壳一致——邮件是普通页面，不换壳。 */
+.shell--mail .shell__content > .route-anim {
+  max-width: var(--admin-content-max);
+}
+
+.admin-page {
+  width: 100%;
+  max-width: 1240px;
+  margin: 0 auto;
+  gap: var(--sp-5);
+}
+
+.admin-page > .card,
+.admin-page > section.card {
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.admin-two-col {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
+  gap: var(--sp-4);
+}
+
+@media (max-width: 960px) {
+  .admin-two-col {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.admin-sticky-actions {
+  position: sticky;
+  bottom: var(--sp-4);
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--c-surface) 92%, transparent);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(10px);
+}
+
+@media (max-width: 980px) {
+  .admin-two-col {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell--admin .shell__content > .route-anim {
+    padding: var(--sp-5) var(--sp-3) 48px;
+  }
+}
+
+/* 窄屏：侧栏变成抽屉，内容占满。 */
+@media (max-width: 880px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell__sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(80vw, var(--sidebar-w));
+    height: 100dvh;
+    z-index: var(--z-drawer);
+    transform: translateX(-102%);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .shell__sidebar--open {
+    transform: translateX(0);
+  }
+
+  .shell__content > .route-anim {
+    padding: var(--sp-4) var(--sp-3) var(--sp-10);
+  }
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.45);
+  z-index: var(--z-scrim);
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+@media (min-width: 881px) {
+  .scrim {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 通用排版 */
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-5);
+}
+
+.page-head__title {
+  font-size: var(--fs-xl);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.page-head__sub {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  margin-top: var(--sp-1);
+}
+
+.section__title {
+  font-size: var(--fs-md);
+  font-weight: 620;
+  margin-bottom: var(--sp-3);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: var(--c-text-muted);
+}
+
+.faint {
+  color: var(--c-text-faint);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* .truncate 挂在 inline 的 <span> 上时不会截断——ellipsis 需要一个块级盒。
+   TrafficView 与 AuditView 为此各补了一条 display: block 的 scoped 补丁，
+   这里提成工具类，两页只留自己那条 max-width 的差异。 */
+.truncate--block {
+  display: block;
+  max-width: 320px;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------- 容器 */
+
+.card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.card__head {
+  padding: var(--sp-4);
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.card__body {
+  padding: var(--sp-4);
+}
+
+.card__body--flush {
+  padding: 0;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.stack--tight {
+  gap: var(--sp-2);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.row--between {
+  justify-content: space-between;
+}
+
+.row--end {
+  justify-content: flex-end;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* ------------------------------------------------------ 自绘滚动条 */
+
+/* 原生滚动条（系统"始终显示"时）会占掉一条宽度、样式也跟着系统走，所以站内滚动
+   容器都把它藏掉，改由 useOverlayScroll 定位一条浮在内容上的滑块。
+
+   轨道不能挂在滚动容器里：绝对定位的盒子跟着内容一起滚，一滚就跑出可视区。
+   所以外面再包一层不滚动的宿主（.ovscroll-layer）提供定位上下文，轨道的高度
+   就等于滚动视口——只覆盖真正滚动的那块区域，不跨到顶栏，也不占内容宽度。 */
+
+.ovscroll-layer {
+  position: relative;
+}
+
+.ovscroll {
+  scrollbar-width: none;
+}
+
+.ovscroll::-webkit-scrollbar {
+  display: none;
+}
+
+.ovscroll__track {
+  position: absolute;
+  z-index: 3;
+  opacity: 0;
+  transition: opacity 0.16s ease;
+  /* 只让滑块接事件，轨道本身不挡内容。 */
+  pointer-events: none;
+}
+
+.ovscroll__track--on {
+  opacity: 1;
+}
+
+.ovscroll-layer--x > .ovscroll__track {
+  left: 0;
+  right: 0;
+  bottom: 1px;
+  height: 6px;
+}
+
+.ovscroll-layer--y > .ovscroll__track {
+  top: 0;
+  bottom: 0;
+  right: 1px;
+  width: 6px;
+}
+
+.ovscroll__thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--c-text-muted) 55%, transparent);
+  pointer-events: auto;
+}
+
+.ovscroll-layer--y .ovscroll__thumb {
+  right: 0;
+}
+
+.ovscroll-layer--x .ovscroll__thumb {
+  bottom: 0;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 34px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--c-border-strong);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--c-hover);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: #fff;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+  border-color: var(--c-accent-hover);
+}
+
+.btn--danger {
+  background: var(--c-danger);
+  border-color: var(--c-danger);
+  color: #fff;
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--c-danger-hover);
+  border-color: var(--c-danger-hover);
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--c-hover);
+}
+
+.btn--sm {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-xs);
+}
+
+/* 小号按钮里的转圈跟着小号图标（14px）走：用默认的 16px 会把按钮撑宽 2px，
+   "图标 ⇄ 转圈"一切换，同一排按钮就整体抖一下。 */
+.btn--sm .spinner {
+  width: 14px;
+  height: 14px;
+}
+
+.btn--block {
+  width: 100%;
+}
+
+@media (max-width: 640px) {
+  .btn {
+    min-height: var(--tap);
+  }
+
+  /* sm 按钮不吃上面的触摸目标高度：它和同一排的输入框共用 --control-h-sm，
+     这条必须排在 .btn 之后，否则两者就差一截（一行里一高一低）。 */
+  .btn--sm {
+    min-height: var(--control-h-sm);
+  }
+}
+
+/* 图标工具按钮：侧栏底部（公告、主题）这类只有图标的小按钮。 */
+.toolbtn {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-faint);
+  cursor: pointer;
+}
+
+/* 悬停只变图标颜色，不铺灰底：侧栏里"安静的图标按钮"多，
+   每个都浮起一块底色会显得躁。 */
+.toolbtn:hover {
+  color: var(--c-text);
+}
+
+.toolbtn__dot {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--c-danger);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- 表单 */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.field__label {
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.field__hint {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.field__error {
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--c-border-strong);
+  background: var(--c-surface);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--c-accent);
+  box-shadow: 0 0 0 3px var(--c-accent-weak);
+}
+
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  background: var(--c-surface-sunken);
+  color: var(--c-text-muted);
+}
+
+.textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--c-text-muted) 50%),
+    linear-gradient(135deg, var(--c-text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 16px) 15px, calc(100% - 11px) 15px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: var(--sp-8);
+}
+
+@media (max-width: 640px) {
+  .input,
+  .select,
+  .textarea {
+    min-height: var(--tap);
+    font-size: 16px; /* 小于 16px 会让 iOS 在聚焦时自动放大页面。 */
+  }
+}
+
+/* 小号下拉：与 .btn--sm 同高同字号，用于分页这种"一行里全是小控件"的地方。
+   默认的 .select 是 36px / 14px（窄屏 40px / 16px），和旁边的小按钮并排会
+   明显高低不齐——宽度、字号、内边距、箭头位置都要跟着一起改。
+   这条必须写在上面那些 .select 规则之后，否则会被它们覆盖。 */
+.select--sm {
+  width: auto;
+  min-height: 28px;
+  padding: 0 var(--sp-6) 0 var(--sp-3);
+  font-size: var(--fs-xs);
+  background-position: calc(100% - 14px) 11px, calc(100% - 9px) 11px;
+}
+
+@media (max-width: 640px) {
+  .select--sm {
+    min-height: 32px;
+    font-size: var(--fs-xs);
+    background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px;
+  }
+}
+
+/* 自定义勾选框：接管原生外观，勾选态 = 强调色底 + 反色对勾。
+   对勾用 clip-path 画而不是字符，任何字体环境下形状一致；
+   :indeterminate（全选半选）用横杠表达。隐藏式开关（switch__input）
+   自己负责隐藏，特异性更高，不受这里影响。 */
+input[type="checkbox"] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1.5px solid var(--c-border-strong);
+  border-radius: calc(var(--r-sm) / 2);
+  background: var(--c-surface);
+  cursor: pointer;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+input[type="checkbox"]::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background: var(--c-text-inverse);
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  transform: scale(0);
+  transition: transform 0.1s ease;
+}
+
+input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--c-accent);
+}
+
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="checkbox"]:indeterminate::before {
+  transform: scale(1);
+  clip-path: polygon(0 42%, 100% 42%, 100% 58%, 0 58%);
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 开关：滑块式复选框，不用原生复选框（原生样式跨平台差异大且不可控）。
+   真实复选框保留在无障碍树里，只做视觉隐藏。 */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  user-select: none;
+}
+
+.switch__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.switch__track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: var(--r-pill);
+  background: var(--c-border-strong);
+  flex: none;
+  transition: background 0.16s ease;
+}
+
+.switch__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.18s cubic-bezier(0.2, 0.9, 0.25, 1);
+}
+
+.switch__input:checked + .switch__track {
+  background: var(--c-accent);
+}
+
+.switch__input:checked + .switch__track .switch__knob {
+  transform: translateX(18px);
+}
+
+.switch__input:focus-visible + .switch__track {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.switch__label {
+  min-width: 0;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  min-height: 28px;
+}
+
+.check input {
+  margin: 3px 0 0;
+}
+
+.check__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.form-grid {
+  display: grid;
+  gap: var(--sp-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+}
+
+.form-grid--full {
+  grid-column: 1 / -1;
+}
+
+/* 折叠筛选区里的说明文字：讲清"这些条件搜的是哪一层"，
+   放进全局是因为槽内容编译在调用页的作用域里，写在 FilterBar 的
+   scoped 样式里根本不会命中。 */
+.filterbar__hint {
+  flex: 1 1 100%;
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+  line-height: 16px;
+}
+
+/* ---------------------------------------------------------------- 徽标 */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  font-weight: 550;
+  background: var(--c-surface-sunken);
+  color: var(--c-text-muted);
+  white-space: nowrap;
+}
+
+.badge--accent {
+  background: var(--c-accent-weak);
+  color: var(--c-accent);
+}
+
+.badge--danger {
+  background: var(--c-danger-weak);
+  color: var(--c-danger);
+}
+
+.badge--success {
+  background: var(--c-success-weak);
+  color: var(--c-success);
+}
+
+.badge--warn {
+  background: var(--c-warn-weak);
+  color: var(--c-warn);
+}
+
+/* ---------------------------------------------------------------- 表格 */
+
+.table-wrap {
+  overflow-x: auto;
+  border-radius: var(--r-md);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--c-border);
+  vertical-align: middle;
+}
+
+.table th {
+  font-weight: 600;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  text-transform: none;
+  background: var(--c-surface-2);
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table tbody tr:hover {
+  background: var(--c-surface-2);
+}
+
+.table td.num,
+.table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.table .actions {
+  display: flex;
+  gap: var(--sp-1);
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* 窄屏：表格转成卡片。
+ * 横向滚动的表格在手机上可用性很差——用户看到的是"半截行"，而且很难判断
+ * 哪一列对应哪个字段。转成"字段名: 值"的卡片可以完整读完一条记录。 */
+@media (max-width: 720px) {
+  .table--cards thead {
+    display: none;
+  }
+
+  .table--cards,
+  .table--cards tbody,
+  .table--cards tr,
+  .table--cards td {
+    display: block;
+    width: 100%;
+  }
+
+  .table--cards tr {
+    border: 1px solid var(--c-border);
+    border-radius: var(--r-md);
+    margin-bottom: var(--sp-3);
+    background: var(--c-surface);
+    padding: var(--sp-2) 0;
+  }
+
+  .table--cards td {
+    border: 0;
+    display: grid;
+    grid-template-columns: 40% 1fr;
+    gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-4);
+  }
+
+  .table--cards td::before {
+    content: attr(data-label);
+    color: var(--c-text-muted);
+    font-size: var(--fs-xs);
+  }
+
+  /* 右对齐列在卡片模式下改回左对齐：否则标签在左、值被顶到最右，
+     这一行会和上面几行看起来不像同一套版式。 */
+  .table--cards td.num {
+    text-align: left;
+  }
+
+  /* 空态 / 加载态那一行不是"字段 → 值"，别套两栏网格：套上之后提示文字会被
+     塞进右侧那一栏，看起来是偏的（整块既不居中也不占满）。 */
+  .table--cards td.table__state {
+    display: block;
+  }
+
+  /* 徽标与单独一个按钮不该被拉伸：网格项默认撑满整格，一个"有效"徽标会变成
+     一条横贯整行的色块，看起来像进度条。 */
+  .table--cards td > .badge,
+  .table--cards td > .btn {
+    justify-self: start;
+  }
+
+  /* 操作列独占整行：默认的 40%/60% 分栏会把四五个按钮挤成两三行小格子。 */
+  .table--cards td.table__cell--actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .table--cards td.table__cell--actions::before {
+    align-self: center;
+  }
+
+  .table--cards td.table__cell--actions .actions {
+    justify-content: flex-start;
+  }
+}
+
+/* ---------------------------------------------------------------- 悬停提示 */
+
+/* 纯图标按钮自绘 tooltip：原生 title 要悬停约一秒才出现，几乎等于没有。
+   元素上挂 data-tip="文案" 即用；固定出现在上方、水平居中。 */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+  z-index: var(--z-tooltip);
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  background: rgba(16, 24, 40, 0.92);
+  color: #fff;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* ---------------------------------------------------------------- 弹窗 */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+}
+
+.modal__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(16, 24, 40, 0.5);
+  border: 0;
+  padding: 0;
+}
+
+.modal__panel {
+  position: relative;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
+  width: min(560px, 100%);
+  max-height: min(88dvh, 900px);
+  display: flex;
+  flex-direction: column;
+}
+
+.modal__panel--wide {
+  width: min(880px, 100%);
+}
+
+/* 面板是 tabindex="-1" 的兜底落点：弹窗打开时由脚本聚焦，好让键盘用户
+   从弹窗内部开始 Tab。但那不是一次用户发起的聚焦，画出整圈描边只会让人
+   以为整个弹窗被选中了。真正的键盘入口（标题、关闭按钮、输入框）仍照常
+   显示 :focus-visible 描边。 */
+.modal__panel:focus {
+  outline: none;
+}
+
+/* 小窗：比普通弹窗更紧凑（更窄、上限更矮），给"随手看一眼"的内容用，
+   不把大半屏占掉。 */
+.modal--compact {
+  align-items: center;
+}
+
+.modal__panel--compact {
+  width: min(440px, 100%);
+  max-height: min(76dvh, 620px);
+}
+
+/* 小窗的正文区定高：窗口尺寸只由这块高度决定，与里面装什么无关。
+   空态、加载态、列表彼此高度不一样，若让正文随内容伸缩，窗口就会一刷新
+   变高变矮——而它还是垂直居中的，整窗会跟着跳。内容超出就在这块里滚动。 */
+.modal__panel--compact .modal__body {
+  height: 320px;
+}
+
+.modal__head {
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--c-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+/* 右上角那一组：标题之外的操作与关闭按钮。标题允许被挤压，这组不换行。 */
+.modal__head-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+.modal__title {
+  font-size: var(--fs-md);
+  font-weight: 620;
+}
+
+.modal__body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+}
+
+.modal__foot {
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--c-border);
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* 面板底部区域（通常是分页）。
+ *
+ * 放在全局样式表而不是 components/admin/Panel.vue 的 :global() 里：
+ * 内容是调用页 slot 编译进来的，组件 scoped 样式本来就命中不到，而一个
+ * 只在组件样式块里定义、在 app.css 里搜不到的全局类，用起来像是碰运气。
+ * 它原先在四个列表页里各抄了一份，现在六页共用这一条。 */
+.panel-foot {
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--c-border-line);
+}
+
+/* 窄屏不再切贴底抽屉：表单、查看器、确认框一律保持居中。滚动着的下半屏里
+   填长表单很难受，而且"换个视口换一副形态"本身就是不一致。正文超高时在
+   .modal__body 里滚动。 */
+@media (max-width: 640px) {
+  .modal {
+    padding: var(--sp-3);
+  }
+
+  .modal__panel {
+    max-height: 94dvh;
+  }
+}
+
+/* 正文宿主：夹在头部与底栏之间、占据面板剩余高度。正文在里面滚，
+   自绘滑块的轨道贴着宿主（见"自绘滚动条"一节），只覆盖正文这一段。 */
+.modal__bodywrap {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.modal__body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---------------------------------------------------------------- 提示 */
+
+/* 全局通知：顶部居中，一次只显示一条。
+   锚层铺满整宽但不接收指针事件，提示短暂悬浮在顶栏上方也不会挡住底下的点击。 */
+.toast-anchor {
+  position: fixed;
+  top: var(--sp-3);
+  left: 0;
+  right: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.toast-anchor .toast {
+  pointer-events: auto;
+  max-width: min(480px, calc(100vw - 32px));
+}
+
+/* 新到顶掉旧条：旧条上隐、新条落下，out-in 保证任意时刻最多一条。
+   进入比离开略长一档，离开要快得不构成等待。 */
+.toast-enter-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.toast-leave-active {
+  transition: opacity 0.09s ease, transform 0.09s ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+/* 通知本体：悬浮在内容上方的独立小卡。语义色由图标芯片承担，
+   不用左色条——顶部居中的浮条就在正文视线里，色条显得突兀。 */
+.toast {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-md);
+  font-size: var(--fs-sm);
+}
+
+.toast__icon {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-accent-weak);
+  color: var(--c-accent);
+}
+
+.toast--success .toast__icon {
+  background: var(--c-success-weak);
+  color: var(--c-success);
+}
+
+.toast--error .toast__icon {
+  background: var(--c-danger-weak);
+  color: var(--c-danger);
+}
+
+.toast__body {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+  padding: var(--sp-1) 0;
+}
+
+/* 副行：通用标题之下那条"具体原因"。
+   错误提示接上后端 detail 后，这里可能是一句较长的中文说明——
+   body 上的 min-width/word-break 保证它在 480px 宽度内换行而不是撑破。 */
+.toast__detail {
+  margin-top: 2px;
+  color: var(--c-text-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.toast__close {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--c-text-faint);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toast__close:hover {
+  background: var(--c-hover);
+  color: var(--c-text);
+}
+
+/* ---------------------------------------------------------------- 进度 */
+
+.progress {
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--c-surface-sunken);
+  overflow: hidden;
+}
+
+.progress__bar {
+  height: 100%;
+  background: var(--c-accent);
+  transition: width 0.2s ease;
+}
+
+.progress__bar--indeterminate {
+  width: 40%;
+  animation: slide 1.2s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--c-border-strong);
+  border-top-color: var(--c-accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex: none;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 品牌跳动：把 logo 交给 .logo-hop，就得到一个循环跳跃的加载指示。
+   用在整屏等待这类没有进度可言的场合——细圈转在品牌页面上显得空，
+   跳动的 logo 本身就在说明"是它还没好"。
+   舞台是必需的：图标要跳到 20px 高，而 transform 不参与布局，没有这段
+   固定高度，跳跃会溢出去压到上方内容；align-items 把地面定在舞台底边。 */
+.logo-hop {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: 96px;
+}
+
+.logo-hop__icon {
+  width: 56px;
+  height: 56px;
+  display: block;
+  transform-origin: 50% 50%;
+  will-change: transform;
+  backface-visibility: hidden;
+  animation: logo-hop 3s infinite;
+}
+
+/* 连续动效没有"减速播放"这回事：减动效下直接停成一张静态图标。 */
+@media (prefers-reduced-motion: reduce) {
+  .logo-hop__icon {
+    animation: none;
+  }
+}
+
+/* 持续动效：两次轻跳 → 两次边转边跳 → 短暂停顿，3s 一轮。
+   自然 + 跟得上手的三个要点：
+     ① 落地瞬间（触地那一帧）才开始压扁，紧接着快速回弹，压扁不再被摊到整个下落过程里；
+     ② 上升减速、下落加速，滞空时间短，整个人是"轻快"的；
+     ③ 压扁与拉伸成对出现，峰值处回到正常比例。 */
+@keyframes logo-hop {
+  /* —— 两次原地小跳：起跳压扁 → 最高点拉长 → 落地回弹，带一点倾斜的惯性 —— */
+  0% {
+    transform: translateY(0) rotate(0deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+  3% {
+    transform: translateY(2px) rotate(-3deg) scale(1.04, 0.93);
+    animation-timing-function: cubic-bezier(0.12, 0.84, 0.28, 1);
+  }
+  10% {
+    transform: translateY(-16px) rotate(3deg) scale(0.97, 1.04);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.85, 0.55);
+  }
+  17% {
+    transform: translateY(0) rotate(0deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.45, 1);
+  }
+  19.5% {
+    transform: translateY(0) rotate(0deg) scale(1.06, 0.93);
+    animation-timing-function: cubic-bezier(0.3, 1.1, 0.55, 1);
+  }
+  24% {
+    transform: translateY(0) rotate(0deg) scale(0.99, 1.01);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+  27% {
+    transform: translateY(0) rotate(0deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+
+  /* —— 第二跳略高 —— */
+  30% {
+    transform: translateY(2px) rotate(3deg) scale(1.04, 0.93);
+    animation-timing-function: cubic-bezier(0.12, 0.84, 0.28, 1);
+  }
+  37% {
+    transform: translateY(-18px) rotate(-3deg) scale(0.97, 1.04);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.85, 0.55);
+  }
+  44% {
+    transform: translateY(0) rotate(0deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.45, 1);
+  }
+  46.5% {
+    transform: translateY(0) rotate(0deg) scale(1.06, 0.93);
+    animation-timing-function: cubic-bezier(0.3, 1.1, 0.55, 1);
+  }
+  50% {
+    transform: translateY(0) rotate(0deg) scale(0.99, 1.01);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+  53% {
+    transform: translateY(0) rotate(0deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+
+  /* —— 两次空翻跳：翻转集中在滞空段完成，落地时正好回正——
+       绝不让图标以倒立姿态触地。旋转速度跟随抛物线：离地渐快、
+       最高点最快、下落减速，落地后的压扁恰好吸收最后几度。 —— */
+  56% {
+    transform: translateY(2px) rotate(0deg) scale(1.04, 0.93);
+    animation-timing-function: cubic-bezier(0.12, 0.84, 0.28, 1);
+  }
+  63% {
+    transform: translateY(-20px) rotate(190deg) scale(0.97, 1.04);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.85, 0.55);
+  }
+  70% {
+    transform: translateY(0) rotate(345deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.45, 1);
+  }
+  72.5% {
+    transform: translateY(0) rotate(360deg) scale(1.05, 0.94);
+    animation-timing-function: cubic-bezier(0.3, 1.1, 0.55, 1);
+  }
+  76% {
+    transform: translateY(0) rotate(360deg) scale(0.99, 1.01);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+  79% {
+    transform: translateY(0) rotate(360deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.36, 0, 0.66, 1);
+  }
+  82% {
+    transform: translateY(2px) rotate(360deg) scale(1.04, 0.93);
+    animation-timing-function: cubic-bezier(0.12, 0.84, 0.28, 1);
+  }
+  89% {
+    transform: translateY(-20px) rotate(550deg) scale(0.97, 1.04);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.85, 0.55);
+  }
+  95% {
+    transform: translateY(0) rotate(705deg) scale(1, 1);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.45, 1);
+  }
+
+  /* —— 收势：压扁吸收最后 15°，720° 与 0° 同姿，循环无跳变 —— */
+  97.5%,
+  100% {
+    transform: translateY(0) rotate(720deg) scale(1, 1);
+  }
+}
+
+/* ---------------------------------------------------------------- 空态 */
+
+.empty {
+  padding: var(--sp-10) var(--sp-4);
+  text-align: center;
+  color: var(--c-text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.empty__title {
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+/* 表格的加载/空态行。原先 AppTable 与 AnnouncementsButton 各抄了一份逐行相同
+   的 scoped 规则（后者只多一个 flex: 1），靠类名巧合才长得一样。 */
+.table-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6);
+  color: var(--c-text-muted);
+  flex: 1;
+}
+
+/* ---------------------------------------------------------------- 进出场动画 */
+
+/* 路由页进入：轻量落定淡入。只做进入、不做离开——离开动画会让每次导航
+   都要等前一页退场，页面切换的爽快感比仪式感重要。
+   方向是自上方落定而非自下上浮：整屏页恰好一屏高，向下偏移会把文档
+   撑高 8px，动画期间闪出一条页面滚动条；向上偏移不产生滚动溢出。 */
+.route-anim-enter-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.route-anim-enter-from {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+/* 弹窗：整体淡入淡出，面板附加轻微上浮；离开比进入短，关闭要干脆。 */
+.modal-enter-active {
+  transition: opacity 0.18s ease;
+}
+
+.modal-leave-active {
+  transition: opacity 0.14s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+.modal-enter-active .modal__panel {
+  transition: transform 0.18s ease;
+}
+
+.modal-leave-active .modal__panel {
+  transition: transform 0.14s ease;
+}
+
+.modal-enter-from .modal__panel {
+  transform: translateY(14px) scale(0.98);
+}
+
+.modal-leave-to .modal__panel {
+  transform: translateY(10px) scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-anim-enter-active,
+  .modal-enter-active,
+  .modal-leave-active,
+  .modal-enter-active .modal__panel,
+  .modal-leave-active .modal__panel {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 面包屑 */
+
+/* ---------------------------------------------------------------- 页签 */
+
+.tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--c-border);
+  overflow-x: auto;
+}
+
+.tab {
+  border: 0;
+  background: transparent;
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+
+.tab--active {
+  color: var(--c-accent);
+  border-bottom-color: var(--c-accent);
+}
+
+/* ---------------------------------------------------------------- 导航项 */
+
+/* 侧栏导航项的全局定义：用户壳与管理壳共用。选中态用实色强调胶囊——
+   侧栏里唯一被填充的元素，不需要指示条视线就知道自己在哪；
+   悬停加深一档让填充胶囊仍有"可按"的手感。 */
+.nav__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: 550;
+  cursor: pointer;
+  text-align: left;
+  min-height: 36px;
+  position: relative;
+}
+
+.nav__item:hover {
+  background: var(--c-hover);
+  color: var(--c-text);
+}
+
+.nav__item--active,
+.nav__item--active:hover {
+  background: var(--c-accent);
+  color: var(--c-text-inverse);
+}
+
+@media (max-width: 880px) {
+  .nav__item {
+    min-height: var(--tap);
+  }
+}
+
+/* ---------------------------------------------------------------- 分页 */
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  flex-wrap: wrap;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+  /* 它是列表下方的页脚条：没有分隔线时，最后一行与翻页控件会糊在一起。 */
+  border-top: 1px solid var(--c-border);
+}
+
+/* ---------------------------------------------------------------- 滚动公告 */
+
+.ticker {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-accent-weak);
+  color: var(--c-accent);
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--c-border);
+  overflow: hidden;
+}
+
+.ticker__label {
+  font-weight: 650;
+  flex: none;
+}
+
+.ticker__viewport {
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 无缝跑马灯：内容渲染 N 份（N 由组件按「铺满视口 + 1」算出），
+   轨道每次位移恰好一份的宽度（--ticker-step，含接缝间隔）就复位。
+   位移单位必须是内容自身宽度：用 -50% 这类比例在"内容比视口短"时会露出空白。 */
+.ticker__track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: ticker-scroll 22s linear infinite;
+  will-change: transform;
+}
+
+.ticker__item {
+  flex: none;
+  padding-right: 3em;
+}
+
+.ticker:hover .ticker__track {
+  animation-play-state: paused;
+}
+
+@keyframes ticker-scroll {
+  to {
+    transform: translateX(calc(-1 * var(--ticker-step, 100%)));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker__track {
+    animation: none;
+    display: block;
+  }
+
+  .ticker__item {
+    white-space: normal;
+    padding-right: 0;
+  }
+
+  /* 静止版式下第二份内容纯属噪音，直接隐藏。 */
+  .ticker__item + .ticker__item {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 入场动画 */
+
+/* 整屏页（登录 / 注册 / 取件码 / 初始化）共用的三个关键帧：
+   卡片浮入、标识轻微放大、表单元素依次跟上。
+   只动 opacity 与 transform，不参与布局计算，因此不会引起回流或位移抖动。
+   具体延迟由各页面自己定（字段数量不同），使用方需在
+   prefers-reduced-motion 下关掉动画。 */
+@keyframes enter-page {
+  from {
+    opacity: 0;
+    transform: translateY(22px) scale(0.97);
+  }
+}
+
+@keyframes enter-mark {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.68);
+  }
+}
+
+@keyframes enter-item {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+/* ---------------------------------------------------------------- 其它 */
+
+.notice {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  border: 1px solid transparent;
+  line-height: 1.6;
+}
+
+.notice--info {
+  background: var(--c-info-weak);
+  border-color: var(--c-border);
+}
+
+.notice--warn {
+  background: var(--c-warn-weak);
+  border-color: var(--c-warn);
+  color: var(--c-warn);
+}
+
+.notice--danger {
+  background: var(--c-danger-weak);
+  border-color: var(--c-danger);
+  color: var(--c-danger);
+}
+
+.notice--success {
+  background: var(--c-success-weak);
+  border-color: var(--c-success);
+  color: var(--c-success);
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) 1fr;
+  gap: var(--sp-1) var(--sp-4);
+  font-size: var(--fs-sm);
+}
+
+.kv dt {
+  color: var(--c-text-muted);
+}
+
+.kv dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.meter {
+  height: 8px;
+  background: var(--c-surface-sunken);
+  border-radius: var(--r-pill);
+  overflow: hidden;
+}
+
+/* 侧栏配额条：纵向空间紧，比常规进度条细 3px。
+   此前它是 AppSideNav 里的 scoped `.meter { height: 5px }`，靠特异性压过上面
+   这条全局规则且没有任何注释——读代码的人只会以为写错了。 */
+.meter--slim {
+  height: 5px;
+}
+
+.meter__fill {
+  height: 100%;
+  background: var(--c-accent);
+}
+
+.meter__fill--warn {
+  background: var(--c-warn);
+}
+
+.meter__fill--danger {
+  background: var(--c-danger);
+}

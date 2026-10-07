@@ -1,0 +1,149 @@
+/* 设计令牌。
+ *
+ * 手写而不是引 UI 库，是因为这个站点的界面几乎全是"列表 + 表单 + 少量弹窗"，
+ * 引入组件库带来的体积与主题对抗成本，远高于直接写一层薄薄的样式。
+ *
+ * 宽窄屏用同一套令牌：尺寸随视口由 clamp() 连续变化，只在"布局需要换形态"的
+ * 少数几个点上用媒体查询（侧栏抽屉化、表格转卡片）。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* 表面 */
+  --c-bg: #f5f6f8;
+  --c-surface: #ffffff;
+  --c-surface-2: #fafbfc;
+  --c-surface-sunken: #f0f2f5;
+  /* 悬停叠加色。浅色下要更深、深色下要更浅——直接用"下沉色"会在深色主题里
+     把按钮越悬停越黑，看起来像被按下去。 */
+  --c-hover: #eef0f4;
+  --c-border: #e2e5ea;
+  --c-border-strong: #cbd2db;
+  /* 半透明描边。卡片外框与分隔线是两种角色，却曾各自在三个 scoped 块里
+     手写一遍完整的 color-mix——同一语义散在三处、百分比还各有出入。
+     从 --c-border 派生，深色模式只要改 --c-border 一处就跟着走。 */
+  --c-border-card: color-mix(in srgb, var(--c-border) 62%, transparent);
+  --c-border-line: color-mix(in srgb, var(--c-border) 55%, transparent);
+
+  /* 文本 */
+  --c-text: #1b1f24;
+  --c-text-muted: #667085;
+  --c-text-faint: #98a2b3;
+  --c-text-inverse: #ffffff;
+
+  /* 语义色。涨跌语义不适用，这里只表达状态。 */
+  --c-accent: #2f6fed;
+  --c-accent-hover: #2560d8;
+  --c-accent-weak: #eaf1ff;
+  --c-danger: #d92d20;
+  --c-danger-hover: #b42318;
+  --c-danger-weak: #fef3f2;
+  --c-success: #12805c;
+  --c-success-weak: #e9f8f2;
+  --c-warn: #b54708;
+  --c-warn-weak: #fff6ed;
+  --c-info-weak: #eef4ff;
+  /* 文件类型色。视频/音频曾各自写死一个 hex，于是深色主题下不跟随，
+     而同文件其余五种类型都用令牌——同一个组件里两套规矩。 */
+  --c-video: #8b5cf6;
+  --c-audio: #d97706;
+
+  /* 排版 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-base: 14px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+  --fs-xl: 22px;
+  --fs-2xl: 28px;
+
+  /* 间距与形状 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 4px 14px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 18px 48px rgba(16, 24, 40, 0.18);
+
+  /* 布局 */
+  --sidebar-w: 248px;
+  --topbar-h: 56px;
+  --content-max: 1440px;
+  --admin-content-max: 1480px;
+  /* 触控目标下限：窄屏上按钮变小会让误触率显著上升。 */
+  --tap: 40px;
+  /* 小号控件的高度：.btn--sm 与同排的输入框共用这一个值，一起变才不会
+     一高一低（输入框默认按触摸目标给 36/40px，比按钮高出一截）。 */
+  --control-h-sm: 28px;
+
+  /* 层叠次序。此前全是裸数字散在十余处，只有浮层组件里两条一模一样的
+     行内注释在解释"高于模态框、低于 toast"——而改层级的人不会先去看
+     那两个组件。集中在这里后，层级关系本身成了可查的约定。 */
+  --z-sticky: 1; /* 表头吸顶 */
+  --z-topbar: 20; /* 顶栏 */
+  --z-scrim: 50; /* 遮罩 */
+  --z-drawer: 60; /* 窄屏侧栏抽屉 */
+  --z-modal: 80; /* 弹窗 */
+  --z-popover: 85; /* 锚点浮层（下拉、日期面板） */
+  --z-tooltip: 90; /* data-tip 提示层 */
+  --z-toast: 100; /* 全局通知 */
+}
+
+@media (max-width: 640px) {
+  :root {
+    --control-h-sm: 32px;
+  }
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --c-bg: #101216;
+  --c-surface: #181b21;
+  --c-surface-2: #1d2128;
+  --c-surface-sunken: #14171c;
+  /* 深色下悬停比卡片底色更亮一档，才像"浮起来"。 */
+  --c-hover: #262e3a;
+  --c-border: #282e37;
+  --c-border-strong: #3a424e;
+
+  --c-text: #e8ebf0;
+  --c-text-muted: #9aa4b2;
+  --c-text-faint: #6f7a89;
+  --c-text-inverse: #101216;
+
+  --c-accent: #5b8dff;
+  --c-accent-hover: #7ba3ff;
+  --c-accent-weak: #1b2a48;
+  --c-danger: #f97066;
+  --c-danger-hover: #fda29b;
+  --c-danger-weak: #3a1d1b;
+  --c-success: #48b48a;
+  --c-success-weak: #16302a;
+  --c-warn: #f0a35e;
+  --c-warn-weak: #3a2a17;
+  --c-info-weak: #1b2740;
+  /* 深色下同色相提亮一档，否则会维持浅色模式下的饱和度、在深底上发闷。
+     音频特意避开 --c-warn 的取值：两者都是琥珀色，撞成同一个色相就分不出
+     "这是音频文件"和"这里有个告警"了。 */
+  --c-video: #a78bfa;
+  --c-audio: #f59e0b;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.6);
+}
