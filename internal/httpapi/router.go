@@ -78,6 +78,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/mail/addresses", s.userMailOnly(s.handleMailListAddresses))
 	mux.HandleFunc("POST /api/mail/addresses", s.userMailOnly(s.handleMailCreateAddress))
 	mux.HandleFunc("POST /api/mail/parts/{id}/delivery", s.userMailOnly(s.handleMailPartDelivery))
+	mux.HandleFunc("POST /api/mail/messages/{id}/external-resource", s.userMailOnly(s.handleMailExternalResource))
 	// 邮箱解绑：用户侧只需 MailAccess，与创建地址同一道门。
 	mux.HandleFunc("GET /api/mail/unbind-requests", s.userMailOnly(s.handleUnbindList))
 	mux.HandleFunc("POST /api/mail/unbind-requests", s.userMailOnly(s.handleUnbindRequest))

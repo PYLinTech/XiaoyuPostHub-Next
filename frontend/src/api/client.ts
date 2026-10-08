@@ -183,6 +183,39 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   return (data ?? ({} as T)) as T;
 }
 
+/** Raw resource request for authenticated same-origin mail proxy responses. */
+export interface BlobResponse {
+  blob: Blob;
+  contentLocation: string;
+}
+
+export async function requestBlob(path: string, body: unknown, signal?: AbortSignal): Promise<BlobResponse> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let response: Response;
+  try {
+    response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body), signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new ApiError(0, "网络连接失败，请检查网络后重试", String(err));
+  }
+  if (!response.ok) {
+    if (response.status === 401 && onUnauthorized && !unauthorizedFired) {
+      unauthorizedFired = true;
+      try { onUnauthorized(); } catch { /* 保留原始 API 错误。 */ }
+    }
+    const text = await response.text();
+    let payload: ApiEnvelope<unknown> | null = null;
+    try { payload = text ? JSON.parse(text) as ApiEnvelope<unknown> : null; } catch { payload = null; }
+    const shape: ApiErrorShape | undefined = payload?.error;
+    throw new ApiError(response.status, shape?.message ?? defaultMessageFor(response.status), shape?.detail);
+  }
+  return {
+    blob: await response.blob(),
+    contentLocation: response.headers.get("Content-Location") ?? "",
+  };
+}
+
 /** 二进制上传专用请求：XHR 提供 fetch 尚不支持的上传进度事件。 */
 export function requestWithUploadProgress<T>(
   path: string,

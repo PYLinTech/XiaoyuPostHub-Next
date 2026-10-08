@@ -140,6 +140,14 @@ func (s *Service) GetMail(ctx context.Context, actor auth.Principal, id string) 
 	return &MailDetail{Box: box, Message: msg, Recipients: rs, Parts: ps}, nil
 }
 
+// CheckMailAccess verifies ownership without marking the message read or
+// recording another mail-view event. Used by auxiliary resources requested
+// while rendering an already-open message.
+func (s *Service) CheckMailAccess(ctx context.Context, actor auth.Principal, id string) error {
+	_, err := s.ownedMail(ctx, actor, id)
+	return err
+}
+
 // MarkMailRead 显式设置已读（工具栏用）。
 func (s *Service) MarkMailRead(ctx context.Context, actor auth.Principal, id string, read bool) error {
 	box, err := s.ownedMail(ctx, actor, id)

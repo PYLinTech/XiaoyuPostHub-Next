@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/service"
 )
@@ -204,4 +206,61 @@ func (s *Server) handleMailPartDelivery(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeData(w, plan)
+}
+
+type mailExternalResourceRequest struct {
+	BatchID string `json:"batchId"`
+	URL     string `json:"url"`
+	Kind    string `json:"kind"`
+}
+
+// handleMailExternalResource proxies one failed resource after the reader has
+// explicitly confirmed the fallback. The message ownership check keeps this
+// endpoint inside the caller's mailbox; the gateway then applies egress limits.
+func (s *Server) handleMailExternalResource(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var req mailExternalResourceRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "外部资源请求无效", "")
+		return
+	}
+	req.URL = strings.TrimSpace(req.URL)
+	if len(req.BatchID) < 16 || len(req.BatchID) > 64 {
+		writeErr(w, http.StatusBadRequest, "代理批次无效", "")
+		return
+	}
+	if req.URL == "" || len(req.URL) > 4096 {
+		writeErr(w, http.StatusBadRequest, "外部资源地址无效", "")
+		return
+	}
+	if req.Kind != "image" && req.Kind != "style" && req.Kind != "font" {
+		writeErr(w, http.StatusBadRequest, "外部资源类型不支持", "")
+		return
+	}
+	if err := s.Svc.CheckMailAccess(r.Context(), p, pathParam(r, "id")); err != nil {
+		fail(w, err)
+		return
+	}
+	mailSettings := s.Settings.Runtime(r.Context()).Mail
+	resource, err := s.mailResources.Fetch(
+		r.Context(), p.UserID(), req.BatchID, req.URL, req.Kind,
+		mailSettings.ExternalResourceMaxItem, mailSettings.ExternalResourceMaxTotal,
+	)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "外部资源代理加载失败", "请检查资源地址和资源类型后重试")
+		return
+	}
+	w.Header().Set("Content-Type", resource.ContentType)
+	w.Header().Set("Content-Location", resource.SourceURL)
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	_, _ = w.Write(resource.Body)
 }

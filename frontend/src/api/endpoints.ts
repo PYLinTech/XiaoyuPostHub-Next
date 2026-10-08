@@ -1,4 +1,4 @@
-import { getToken, request, requestWithUploadProgress } from "./client";
+import { getToken, request, requestBlob, requestWithUploadProgress } from "./client";
 import type {
   AdminMailListResult,
   AdminMailQuery,
@@ -309,6 +309,17 @@ export const mailApi = {
   list: (query: MailListQuery) =>
     request<MailListResult>("/api/mail/messages", { query: { ...query } }),
   detail: (id: string) => request<MailDetail>(`/api/mail/messages/${encodeURIComponent(id)}`),
+  proxyExternalResource: (
+    messageId: string,
+    batchId: string,
+    url: string,
+    kind: "image" | "style" | "font",
+    signal?: AbortSignal,
+  ) => requestBlob(
+    `/api/mail/messages/${encodeURIComponent(messageId)}/external-resource`,
+    { batchId, url, kind },
+    signal,
+  ),
   star: (id: string, starred: boolean) =>
     request<{ ok: boolean }>(`/api/mail/messages/${encodeURIComponent(id)}/star`, {
       method: "POST",

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { createRequestGate, toastApiError } from "@/lib/async";
 import AppButton from "@/components/ui/AppButton.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
@@ -13,8 +13,8 @@ import { formatBytes, formatTime } from "@/lib/format";
 // 邮件详情：信头 + 安全渲染的 HTML 正文 + 附件下载。
 //
 // 安全模型（务必同时满足，缺一条都可能变成 XSS / 追踪像素通道）：
-//  1. iframe sandbox="" —— 连同源都不给，脚本/弹窗/表单/插件全禁；
-//  2. CSP default-src 'none'，图片只放行 blob:/data: —— 远程图片默认拦截；
+//  1. iframe sandbox 只开脚本，以运行受 nonce 保护的资源错误监听器；不授予同源、弹窗、表单权限；
+//  2. CSP default-src 'none'，邮件外链仅允许图像、样式、字体和媒体；
 //  3. cid: 内嵌图在注入 srcdoc 之前替换为本地 blob URL；
 //  4. <base target="_blank"> 让正文里的链接在新标签打开，外层文档不参与导航。
 
@@ -36,9 +36,28 @@ const inlineParts = computed<MailPart[]>(() =>
 
 const iframeEl = ref<HTMLIFrameElement | null>(null);
 const rendering = ref(false);
+const externalPromptOpen = ref(false);
+const externalProxyBusy = ref(false);
+const failedExternalResources = ref<ExternalResourceFailure[]>([]);
+// 与代理接口的每用户每分钟请求上限保持一致，避免失败外链把队列和弹窗撑大。
+const maxTrackedExternalResources = 60;
 let blobUrls: string[] = [];
+let externalPromptTimer: ReturnType<typeof setTimeout> | null = null;
+let activeMonitorChannel = "";
+let activeProxyController: AbortController | null = null;
 /** 正文渲染的序号守卫：只有最新一次调用可以写 srcdoc（切信会连开好几次）。 */
 const renderGate = createRequestGate();
+
+interface ExternalResourceFailure {
+  url: string;
+  kind: "image" | "style" | "font";
+}
+const externalPromptDetail = computed(() => {
+  const domains = [...new Set(failedExternalResources.value.map((item) => {
+    try { return new URL(item.url).hostname; } catch { return "外部站点"; }
+  }))];
+  return `资源来源：${domains.join("、")}。代理只重试本次失败的资源，并受管理员设置的单项和总量上限约束。`;
+});
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => {
@@ -57,15 +76,74 @@ function escapeHtml(s: string): string {
   });
 }
 
-// srcDoc 把邮件 HTML 封进一个无脚本、无远程资源的文档。
-// style-src 'unsafe-inline' 是给邮件自带样式留的唯一口子（没有外链 CSS）。
-function buildSrcDoc(html: string): string {
+function newMonitorNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(18));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// 允许浏览器直接尝试邮件外链；仅注入带随机 nonce 的错误监视器，邮件自身
+// 脚本仍被 CSP 拦截。iframe 保持 opaque origin，外层无法读取邮件 DOM。
+function buildSrcDoc(html: string, cspNonce: string, channel: string): string {
+  const monitor = `<script nonce="${cspNonce}">
+document.currentScript?.removeAttribute("nonce");
+(() => {
+  const send = (url, kind) => {
+    try {
+      const parsed = new URL(url, document.baseURI);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        parent.postMessage({ type: "xph-mail-resource-error", channel: "${channel}", url: parsed.href, kind }, "*");
+      }
+    } catch { /* 忽略无效和非 HTTP(S) 地址。 */ }
+  };
+  document.addEventListener("error", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLImageElement) send(target.currentSrc || target.src, "image");
+    else if (target instanceof HTMLLinkElement && target.relList.contains("stylesheet")) send(target.href, "style");
+  }, true);
+  document.fonts.addEventListener("loadingerror", () => {
+    let foundFontURL = false;
+    for (const entry of performance.getEntriesByType("resource")) {
+      if (/\\.(woff2?|ttf|otf)(?:[?#]|$)/i.test(entry.name)) {
+        foundFontURL = true;
+        send(entry.name, "font");
+      }
+    }
+    // 字体引用常驻在外链样式表里；同时代理样式表，才能把其中的字体 URL
+    // 改成已获准的同批代理地址，解决字体 CORS 失败。
+    if (foundFontURL) {
+      for (const link of document.querySelectorAll('link[rel~="stylesheet"]')) send(link.href, "style");
+    }
+  });
+  addEventListener("message", (event) => {
+    if (event.source !== parent || event.data?.type !== "xph-mail-proxy-resources" || event.data.channel !== "${channel}") return;
+    for (const item of event.data.resources || []) {
+      for (const image of document.images) {
+        if (image.currentSrc === item.original || image.src === item.original) image.src = item.proxy;
+      }
+      for (const link of document.querySelectorAll('link[rel~="stylesheet"]')) {
+        if (link.href === item.original) link.href = item.proxy;
+      }
+      for (const style of document.querySelectorAll("style, [style]")) {
+        if (style.tagName === "STYLE" && style.textContent) {
+          style.textContent = style.textContent.split(item.original).join(item.proxy);
+        }
+        const inline = style.getAttribute("style");
+        if (inline) style.setAttribute("style", inline.split(item.original).join(item.proxy));
+      }
+    }
+  });
+})();
+</scr${"ipt"}>`;
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
     '<meta http-equiv="Content-Security-Policy" content="' +
-    "default-src 'none'; img-src blob: data:; style-src 'unsafe-inline'; " +
+    `default-src 'none'; script-src 'nonce-${cspNonce}'; img-src blob: data: http: https:; ` +
+    "style-src 'unsafe-inline' blob: http: https:; font-src blob: data: http: https:; " +
+    "media-src blob: data: http: https:; connect-src 'none'; object-src 'none'; frame-src 'none'; " +
     "base-uri 'none'; form-action 'none'\">" +
-    '<base target="_blank"></head><body>' +
+    '<base target="_blank"></head>' +
+    monitor +
+    '<body>' +
     html +
     "</body></html>"
   );
@@ -139,7 +217,8 @@ async function renderBody(): Promise<void> {
     // 复制一份再清空 mine，之后任何兜底回收都不会 revoke 到 iframe 正在用的 URL。
     blobUrls = [...mine];
     mine.length = 0;
-    el.srcdoc = buildSrcDoc(html);
+    activeMonitorChannel = newMonitorNonce();
+    el.srcdoc = buildSrcDoc(html, newMonitorNonce(), activeMonitorChannel);
   } catch (err) {
     dropMine();
     if (!renderGate.isCurrent(token)) return;
@@ -147,6 +226,135 @@ async function renderBody(): Promise<void> {
   } finally {
     if (renderGate.isCurrent(token)) rendering.value = false;
   }
+}
+
+function onExternalResourceMessage(event: MessageEvent): void {
+  if (event.source !== iframeEl.value?.contentWindow || !event.data ||
+      event.data.type !== "xph-mail-resource-error" || event.data.channel !== activeMonitorChannel) return;
+  const kind = event.data.kind as ExternalResourceFailure["kind"];
+  if (kind !== "image" && kind !== "style" && kind !== "font") return;
+  let parsed: URL;
+  try {
+    parsed = new URL(String(event.data.url));
+  } catch {
+    return;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  if (failedExternalResources.value.some((item) => item.url === parsed.href) ||
+      failedExternalResources.value.length >= maxTrackedExternalResources) return;
+  failedExternalResources.value = [...failedExternalResources.value, { url: parsed.href, kind }];
+  // 把同一轮打开时近乎同时失败的资源合并成一个确认，避免一封邮件弹出多次。
+  if (!externalPromptTimer) {
+    externalPromptTimer = setTimeout(() => {
+      externalPromptTimer = null;
+      externalPromptOpen.value = failedExternalResources.value.length > 0;
+    }, 700);
+  }
+}
+
+function absolutizeCSSResources(css: string, stylesheetURL: string): string {
+  const resolve = (raw: string): string => {
+    const value = raw.trim();
+    if (!value || /^(?:data:|blob:|cid:|#)/i.test(value)) return value;
+    try {
+      const url = new URL(value, stylesheetURL);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.href : value;
+    } catch {
+      return value;
+    }
+  };
+  let result = css.replace(/(@import\s+)(["'])([^"']+)\2/gi, (_all, prefix: string, quote: string, url: string) =>
+    prefix + quote + resolve(url) + quote,
+  );
+  result = result.replace(/url\(\s*(?:(["'])(.*?)\1|([^)]*?))\s*\)/gi, (_all, _quote: string | undefined, quoted: string | undefined, bare: string | undefined) => {
+    const value = resolve(quoted ?? bare ?? "");
+    const escaped = value.replace(/["\\\r\n]/g, (char) => "\\" + char);
+    return 'url("' + escaped + '")';
+  });
+  return result;
+}
+
+async function proxyFailedExternalResources(): Promise<void> {
+  if (externalProxyBusy.value || failedExternalResources.value.length === 0) return;
+  const messageId = props.detail.message.id;
+  const monitorChannel = activeMonitorChannel;
+  const batchId = crypto.randomUUID();
+  const controller = new AbortController();
+  const resources = [...failedExternalResources.value];
+  externalProxyBusy.value = true;
+  activeProxyController = controller;
+  const stagedURLs: string[] = [];
+  let adoptedURLs = false;
+  try {
+    const fetched: PromiseSettledResult<{
+      resource: ExternalResourceFailure;
+      body: Blob;
+      contentLocation: string;
+    }>[] = [];
+    // 同一确认批次按序请求，服务端据此精确累计总量，不会因并行预留额度
+    // 把尚未使用的空间提前占满。
+    for (const resource of resources) {
+      if (controller.signal.aborted) break;
+      try {
+        const response = await mailApi.proxyExternalResource(
+          messageId, batchId, resource.url, resource.kind, controller.signal,
+        );
+        fetched.push({
+          status: "fulfilled",
+          value: { resource, body: response.blob, contentLocation: response.contentLocation },
+        });
+      } catch (reason) {
+        fetched.push({ status: "rejected", reason });
+      }
+    }
+    if (props.detail.message.id !== messageId || activeMonitorChannel !== monitorChannel) return;
+    const successful = fetched.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    const failed = fetched.filter((result) => result.status === "rejected");
+    // 先为成功取回的非 CSS 资源建 Blob 地址，再改写代理 CSS 中指向它们的 URL。
+    const mappings: Array<{ original: string; proxy: string }> = [];
+    const mappingByURL = new Map<string, string>();
+    for (const { resource, body } of successful) {
+      if (resource.kind === "style") continue;
+      const proxy = URL.createObjectURL(body);
+      stagedURLs.push(proxy);
+      mappingByURL.set(resource.url, proxy);
+      mappings.push({ original: resource.url, proxy });
+    }
+    for (const { resource, body, contentLocation } of successful) {
+      if (resource.kind !== "style") continue;
+      let css = absolutizeCSSResources(await body.text(), contentLocation || resource.url);
+      for (const [original, proxy] of mappingByURL) css = css.split(original).join(proxy);
+      const proxy = URL.createObjectURL(new Blob([css], { type: "text/css" }));
+      stagedURLs.push(proxy);
+      mappingByURL.set(resource.url, proxy);
+      mappings.push({ original: resource.url, proxy });
+    }
+    if (props.detail.message.id === messageId && activeMonitorChannel === monitorChannel && mappings.length > 0) {
+      blobUrls.push(...stagedURLs);
+      adoptedURLs = true;
+      iframeEl.value?.contentWindow?.postMessage({
+        type: "xph-mail-proxy-resources", channel: activeMonitorChannel, resources: mappings,
+      }, "*");
+    }
+    if (props.detail.message.id !== messageId || activeMonitorChannel !== monitorChannel) return;
+    const proxiedURLs = new Set(mappings.map((item) => item.original));
+    failedExternalResources.value = failedExternalResources.value.filter((item) => !proxiedURLs.has(item.url));
+    externalPromptOpen.value = false;
+    if (failed.length > 0) {
+      toasts.error(String(failed.length) + " 个外部资源仍未能通过代理加载");
+    }
+  } finally {
+    if (!adoptedURLs) stagedURLs.forEach((url) => URL.revokeObjectURL(url));
+    if (activeProxyController === controller) {
+      activeProxyController = null;
+      externalProxyBusy.value = false;
+    }
+  }
+}
+
+function dismissExternalResourcePrompt(): void {
+  externalPromptOpen.value = false;
+  failedExternalResources.value = [];
 }
 
 async function downloadAttachment(part: MailPart): Promise<void> {
@@ -215,11 +423,32 @@ async function confirmPurge(): Promise<void> {
 
 watch(
   () => props.detail.message.id,
-  () => void renderBody(),
+  async () => {
+    activeProxyController?.abort();
+    activeProxyController = null;
+    externalProxyBusy.value = false;
+    if (externalPromptTimer) clearTimeout(externalPromptTimer);
+    externalPromptTimer = null;
+    externalPromptOpen.value = false;
+    failedExternalResources.value = [];
+    activeMonitorChannel = "";
+    // immediate watcher 在 setup 阶段同步触发，模板里的 iframe 此时还没挂载。
+    // 等一个渲染周期后再取 ref，否则 renderBody 会静默返回、正文永远空白。
+    await nextTick();
+    await renderBody();
+  },
   { immediate: true },
 );
 
+window.addEventListener("message", onExternalResourceMessage);
+
 onBeforeUnmount(() => {
+  renderGate.next();
+  activeProxyController?.abort();
+  activeProxyController = null;
+  window.removeEventListener("message", onExternalResourceMessage);
+  activeMonitorChannel = "";
+  if (externalPromptTimer) clearTimeout(externalPromptTimer);
   blobUrls.forEach((u) => URL.revokeObjectURL(u));
   blobUrls = [];
 });
@@ -341,7 +570,7 @@ const spfLabel: Record<string, string> = {
     <iframe
       ref="iframeEl"
       title="邮件正文"
-      sandbox=""
+      sandbox="allow-scripts"
       referrerpolicy="no-referrer"
       class="md__frame"
     ></iframe>
@@ -368,6 +597,17 @@ const spfLabel: Record<string, string> = {
       :loading="purgeBusy"
       @confirm="confirmPurge"
       @cancel="purgeOpen = false"
+    />
+
+    <ConfirmDialog
+      :open="externalPromptOpen"
+      title="加载未验证的外部资源？"
+      message="部分邮件样式或图片未能直接加载。是否使用本站代理重试？"
+      :detail="externalPromptDetail"
+      confirm-text="代理加载"
+      :loading="externalProxyBusy"
+      @confirm="proxyFailedExternalResources"
+      @cancel="dismissExternalResourcePrompt"
     />
   </div>
 </template>

@@ -117,6 +117,10 @@ const (
 	KeyMailAddressesDefault Key = "mail.addresses_default"
 	// KeyMailArchiveRetention 用户邮件归档暂存时长。
 	KeyMailArchiveRetention Key = "mail.archive_retention"
+	// KeyMailExternalResourceMaxItem 单个外部邮件资源代理大小上限。
+	KeyMailExternalResourceMaxItem Key = "mail.external_resource_max_item"
+	// KeyMailExternalResourceMaxTotal 单次确认代理外部邮件资源总量上限。
+	KeyMailExternalResourceMaxTotal Key = "mail.external_resource_max_total"
 
 	// ---- 运维 ----
 
@@ -406,6 +410,16 @@ var registry = []Descriptor{
 		Help: "用户删除邮件后在归档暂存的时长，期间可恢复；到期后释放邮件存储配额。",
 		Kind: KindDuration, Default: "720h", Min: 3600, Scope: ScopeHot,
 	},
+	{
+		Key: KeyMailExternalResourceMaxItem, Section: "mail", Title: "邮件外部资源单项上限",
+		Help: "用户确认通过本站代理加载时，单张图片、样式表或字体允许代理的最大大小。",
+		Kind: KindSize, Default: "50M", Min: 1, Scope: ScopeHot,
+	},
+	{
+		Key: KeyMailExternalResourceMaxTotal, Section: "mail", Title: "邮件外部资源单次总量上限",
+		Help: "用户每次确认代理一封邮件的外部资源时，所有资源合计允许代理的最大大小；同批次请求共享此上限。",
+		Kind: KindSize, Default: "100M", Min: 1, Scope: ScopeHot,
+	},
 
 	// ---- 运维 ----
 }
@@ -657,12 +671,14 @@ func (r Runtime) MailAvailable() bool {
 
 // MailRuntime 是邮件收发相关配置。
 type MailRuntime struct {
-	ReceiveEnabled   bool
-	Listen           string
-	MaxMessageSize   int64
-	SPFPolicy        string
-	AddressesDefault int
-	ArchiveRetention time.Duration
+	ReceiveEnabled           bool
+	Listen                   string
+	MaxMessageSize           int64
+	ExternalResourceMaxItem  int64
+	ExternalResourceMaxTotal int64
+	SPFPolicy                string
+	AddressesDefault         int
+	ArchiveRetention         time.Duration
 }
 
 // archiveRetention 解析归档留存期，解析失败或不小于下限时使用兜底默认值。
@@ -739,6 +755,8 @@ func buildRuntime(overlays map[Key]string) Runtime {
 	maxFileSize := sizeOrInvalid(KeyUploadMaxFileSize)
 	maxStagingBytes := sizeOrInvalid(KeyUploadMaxStagingBytes)
 	maxVolumeBytes := sizeOrInvalid(KeyUploadMaxVolumeBytes)
+	mailExternalItem := sizeOrInvalid(KeyMailExternalResourceMaxItem)
+	mailExternalTotal := sizeOrInvalid(KeyMailExternalResourceMaxTotal)
 	chunkSize := defaultUploadChunkSize
 	if n, err := ParseSize(get(KeyUploadChunkSize)); err == nil && n > 0 {
 		chunkSize = n
@@ -838,12 +856,14 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			AdminRetention: archiveRetention(get(KeyArchiveAdminRetention), 2160*time.Hour),
 		},
 		Mail: MailRuntime{
-			ReceiveEnabled:   boolean(KeyMailReceiveEnabled),
-			Listen:           get(KeyMailListen),
-			MaxMessageSize:   sizeOrInvalid(KeyMailMaxMessageSize),
-			SPFPolicy:        get(KeyMailSPFPolicy),
-			AddressesDefault: int(num(KeyMailAddressesDefault)),
-			ArchiveRetention: archiveRetention(get(KeyMailArchiveRetention), 720*time.Hour),
+			ReceiveEnabled:           boolean(KeyMailReceiveEnabled),
+			Listen:                   get(KeyMailListen),
+			MaxMessageSize:           sizeOrInvalid(KeyMailMaxMessageSize),
+			ExternalResourceMaxItem:  mailExternalItem,
+			ExternalResourceMaxTotal: mailExternalTotal,
+			SPFPolicy:                get(KeyMailSPFPolicy),
+			AddressesDefault:         int(num(KeyMailAddressesDefault)),
+			ArchiveRetention:         archiveRetention(get(KeyMailArchiveRetention), 720*time.Hour),
 		},
 		Ops: OpsRuntime{
 			MaintenanceInterval: defaultOpsMaintenanceInterval,
