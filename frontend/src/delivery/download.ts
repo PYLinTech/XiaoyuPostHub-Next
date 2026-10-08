@@ -111,10 +111,11 @@ export async function settleQuietly(plan: DeliveryPlan): Promise<void> {
  */
 export function cipherSourceUrl(plan: DeliveryPlan): string {
   if (plan.mode === "direct") {
-    if (!plan.url) {
+    if (!plan.url && !plan.parts?.length) {
       throw new Error("交付计划声明为直链，但没有提供直链地址");
     }
-    return plan.url;
+    // 多卷直链没有单一 URL；调用方应通过 fetchCipherPlanRange 按偏移取数。
+    return plan.url ?? "";
   }
   if (plan.mode === "proxy") {
     if (!plan.streamUrl) {
@@ -123,6 +124,19 @@ export function cipherSourceUrl(plan: DeliveryPlan): string {
     return streamUrlWithToken(plan.streamUrl);
   }
   throw new Error(`交付模式 ${plan.mode} 不应走密文接收路径`);
+}
+
+/** 按逻辑密文区间读取交付计划，自动跨越一个或多个物理卷。 */
+export function fetchCipherPlanRange(
+  plan: DeliveryPlan,
+  start: number,
+  endInclusive: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  if (plan.mode === "direct" && plan.parts?.length) {
+    return fetchCipherPartsRange(plan.parts, start, endInclusive, signal);
+  }
+  return fetchCipherRange(cipherSourceUrl(plan), start, endInclusive, signal);
 }
 
 async function receiveCiphertext(
@@ -139,12 +153,8 @@ async function receiveCiphertext(
   // 密文有两个来源，处理路径完全一致——区别只在 URL：
   //   direct：123 直链绝对地址，跨域、只带 Range 头；
   //   proxy ：本机中转地址（纯反向代理），同源、票据与令牌走查询串。
-  const url = cipherSourceUrl(plan);
   const fetchRange = (start: number, endExclusive: number) => {
-    if (!plan.parts?.length) {
-      return fetchCipherRange(url, start, endExclusive - 1, signal);
-    }
-    return fetchCipherPartsRange(plan.parts, start, endExclusive - 1, signal);
+    return fetchCipherPlanRange(plan, start, endExclusive - 1, signal);
   };
 
   // 先取文件头：块大小、明文长度、nonce 前缀都在里面，而它们必须与交付元数据

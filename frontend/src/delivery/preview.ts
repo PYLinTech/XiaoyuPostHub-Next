@@ -1,8 +1,8 @@
-import { fetchCipherRange, streamUrlWithToken } from "@/api/endpoints";
+import { streamUrlWithToken } from "@/api/endpoints";
 import type { DeliveryPlan } from "@/api/types";
 import { createClientKeyPair, encryptionSupported, resolveContentKey, type ClientKeyPair } from "@/crypto/clientkey";
 import { bytesToBase64, decryptAll, importContentKey, parseXphHeader, HEADER_SIZE } from "@/crypto/xph";
-import { assertHeaderMatchesMeta, cipherSourceUrl, settleQuietly, type DeliverySource } from "./download";
+import { assertHeaderMatchesMeta, cipherSourceUrl, fetchCipherPlanRange, settleQuietly, type DeliverySource } from "./download";
 
 // 预览的取数通道。
 //
@@ -121,7 +121,7 @@ async function buildHandle(
   // 没有 SW 时的兜底：整份解密成 Blob。对视频意味着"先等整份下完"，
   // 因此界面上会明确提示走的是兜底通道。
   const key = await importContentKey(dek);
-  const headerBytes = await fetchCipherRange(cipherUrl, 0, HEADER_SIZE - 1, options.signal);
+  const headerBytes = await fetchCipherPlanRange(plan, 0, HEADER_SIZE - 1, options.signal);
   const header = parseXphHeader(headerBytes);
   // 对象与记录的一致性校验：下载路径一直有，预览原先没有。缺了它，
   // 一旦拿到的密文与计划里的记录对不上，唯一的症状就是 GCM 认证失败——
@@ -131,7 +131,7 @@ async function buildHandle(
   await decryptAll(
     key,
     header,
-    (start, endExclusive) => fetchCipherRange(cipherUrl, start, endExclusive - 1, options.signal),
+    (start, endExclusive) => fetchCipherPlanRange(plan, start, endExclusive - 1, options.signal),
     (plain) => {
       parts.push(plain);
     },
@@ -173,7 +173,7 @@ async function registerStreamSession(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const active = registration.active;
-  if (!active || !cipherUrl) {
+  if (!active || (!cipherUrl && !plan.parts?.length)) {
     return null;
   }
   const channel = new MessageChannel();
@@ -201,6 +201,7 @@ async function registerStreamSession(
         {
           type: "xph:register",
           cipherUrl,
+          cipherParts: plan.parts,
           dek: bytesToBase64(dek),
           mimeType: plan.mimeType,
           fileName: plan.fileName,

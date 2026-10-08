@@ -32,6 +32,7 @@ const STREAM_PREFIX = "/__xph/";
 
 interface StreamSession {
   cipherUrl: string;
+  cipherParts?: Array<{ url: string; offset: number; size: number }>;
   key: CryptoKey;
   header: XphHeader;
   mimeType: string;
@@ -49,6 +50,7 @@ const BATCH_BLOCKS = 8;
 interface RegisterMessage {
   type: "xph:register";
   cipherUrl: string;
+  cipherParts?: Array<{ url: string; offset: number; size: number }>;
   dek: string;
   mimeType: string;
   fileName: string;
@@ -89,7 +91,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
 });
 
 async function registerSession(message: RegisterMessage): Promise<string> {
-  const headerBytes = await fetchCipherBytes(message.cipherUrl, 0, HEADER_SIZE - 1);
+  const headerBytes = await fetchSessionCipherBytes(message, 0, HEADER_SIZE - 1);
   const header = parseXphHeader(headerBytes);
   const key = await importContentKey(base64ToBytes(message.dek));
 
@@ -105,6 +107,7 @@ async function registerSession(message: RegisterMessage): Promise<string> {
   const id = randomId();
   sessions.set(id, {
     cipherUrl: message.cipherUrl,
+    cipherParts: message.cipherParts,
     key,
     header,
     mimeType: message.mimeType || "application/octet-stream",
@@ -186,7 +189,7 @@ async function respondRange(
     return new Response(null, { status: 204 });
   }
 
-  const cipher = await fetchCipherBytes(session.cipherUrl, cipherStart, cipherEnd - 1);
+  const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1);
   const plain = await decryptCipherRange(
     session.key,
     session.header,
@@ -214,7 +217,6 @@ async function respondFull(session: StreamSession): Promise<Response> {
   const total = session.header.plainSize;
   const header = session.header;
   const key = session.key;
-  const cipherUrl = session.cipherUrl;
   const blockCount = header.blockCount;
 
   const stream = new ReadableStream<Uint8Array>({
@@ -224,7 +226,7 @@ async function respondFull(session: StreamSession): Promise<Response> {
           const last = Math.min(first + BATCH_BLOCKS, blockCount) - 1;
           const cipherStart = blockCipherOffset(header, first);
           const cipherEnd = blockCipherOffset(header, last) + blockCipherLen(header, last);
-          const cipher = await fetchCipherBytes(cipherUrl, cipherStart, cipherEnd - 1);
+          const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1);
           const from = first * header.blockSize;
           const plain = await decryptCipherRange(
             key,
@@ -317,6 +319,36 @@ async function fetchCipherBytes(url: string, start: number, endInclusive: number
     throw new Error(`密文长度不符：期望 ${expected}，实得 ${buffer.byteLength}`);
   }
   return new Uint8Array(buffer);
+}
+
+async function fetchSessionCipherBytes(
+  source: { cipherUrl: string; cipherParts?: Array<{ url: string; offset: number; size: number }> },
+  start: number,
+  endInclusive: number,
+): Promise<Uint8Array> {
+  const endExclusive = endInclusive + 1;
+  if (!source.cipherParts?.length) {
+    return fetchCipherBytes(source.cipherUrl, start, endInclusive);
+  }
+  const hits = source.cipherParts.filter((part) => part.offset < endExclusive && part.offset + part.size > start);
+  if (!hits.length || hits[0].offset > start || hits[hits.length - 1].offset + hits[hits.length - 1].size < endExclusive) {
+    throw new Error("分卷清单无法覆盖所请求的密文区间");
+  }
+  const blocks = await Promise.all(hits.map((part) => {
+    const from = Math.max(start, part.offset);
+    const to = Math.min(endExclusive, part.offset + part.size);
+    return fetchCipherBytes(part.url, from - part.offset, to - part.offset - 1);
+  }));
+  const out = new Uint8Array(endExclusive - start);
+  let offset = 0;
+  for (const block of blocks) {
+    out.set(block, offset);
+    offset += block.byteLength;
+  }
+  if (offset !== out.byteLength) {
+    throw new Error("分卷响应长度与逻辑密文区间不一致");
+  }
+  return out;
 }
 
 function randomId(): string {
