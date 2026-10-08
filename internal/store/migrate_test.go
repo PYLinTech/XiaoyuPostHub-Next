@@ -135,40 +135,79 @@ func normalizeSQL(s string) string {
 	return strings.ToUpper(string(out))
 }
 
-// TestMigrationFromBaseline 把一个「停在 v1」的库升到当前版本。
+// rewindToBaselineSchema 把全新库降回已发布的 v2 结构，供测试完整上传平台迁移。
+func rewindToBaselineSchema(t *testing.T, db *DB) {
+	t.Helper()
+	for _, stmt := range []string{
+		`DROP TABLE upload_job_parts`,
+		`DROP TABLE upload_stream_state`,
+		`DROP TABLE upload_staging_chunks`,
+		`DROP TABLE upload_staging_reservations`,
+		`ALTER TABLE upload_tasks DROP COLUMN volume_size`,
+		`ALTER TABLE upload_tasks DROP COLUMN streaming`,
+		`DROP INDEX idx_upload_jobs_queue`,
+		`DROP INDEX idx_upload_jobs_user_state`,
+		`DROP TABLE upload_jobs`,
+		`ALTER TABLE user_groups DROP COLUMN resource_scheduling_priority`,
+		`PRAGMA user_version = 2`,
+	} {
+		if _, err := db.write.Exec(stmt); err != nil {
+			t.Fatalf("回退到 v2 结构失败 (%s): %v", stmt, err)
+		}
+	}
+}
+
+// TestMigrationFromBaseline 把带有基线业务数据的旧库升到当前版本。
 //
-// 造 v1 库的方式就是真实世界的样子：先按基线 schema 建库、跑几笔业务数据、
-// 再把 user_version 拨回 1。它同时验证了两件事——迁移能在有数据的库上跑，
-// 且不会动到既有数据。
+// 测试先按终版 schema 建库并写入业务数据，再降为真实 v2 结构，验证当前迁移
+// 能在有数据的库上运行且不会动到既有数据。
 func TestMigrationFromBaseline(t *testing.T) {
 	db := openTestDB(t) // 全新库，已是当前版本
 
 	// 塞一点业务数据，证明迁移前后数据不受影响。
 	mustExec(t, db, `INSERT INTO user_groups (name, display_name, is_builtin, permissions, priority, created_at)
 		VALUES ('normal', '普通用户', 1, 32831, 100, 1)`)
+	mustExec(t, db, `INSERT INTO users (id, account, password_hash, group_name, created_at, updated_at)
+		VALUES (1, 'u1', 'x', 'normal', 1, 1)`)
 	mustExec(t, db, `INSERT INTO mail_domains (domain, created_at) VALUES ('pylin.cn', 1)`)
-
-	before := schemaSnapshot(t, db)
-
-	// 拨回 v1，模拟"老库"。
-	if _, err := db.write.Exec("PRAGMA user_version = 1"); err != nil {
-		t.Fatalf("拨回基线版本失败: %v", err)
+	if err := CreateUploadTask(context.Background(), db.W(), UploadTask{
+		ID: "legacy-upload", UserID: 1, Checksum: "legacy-checksum", SizePlain: 1024,
+		ChunkSize: 512, ChunkTotal: 2, ReceivedMask: make([]byte, BitmapBytes(2)),
+		TargetParentPath: "/", TargetName: "legacy.bin", ConflictAction: "rename",
+		ExpiresAt: ToTime(Now() + 3600),
+	}); err != nil {
+		t.Fatalf("创建迁移前上传会话失败: %v", err)
 	}
+
+	// 回退到已发布的 v2 结构，模拟已有站点升级。
+	rewindToBaselineSchema(t, db)
 	if err := db.initSchema(); err != nil {
-		t.Fatalf("从 v1 升级失败: %v", err)
+		t.Fatalf("从 v2 升级失败: %v", err)
 	}
 
 	if got := mustUserVersion(t, db); got != currentSchemaVersion {
 		t.Fatalf("升级后版本应为 %d，得 %d", currentSchemaVersion, got)
 	}
-	after := schemaSnapshot(t, db)
-	assertSameSchema(t, before, after)
-
-	var groups, domains int
+	var groups, domains, uploads int
 	mustQuery(t, db, `SELECT COUNT(*) FROM user_groups`, &groups)
 	mustQuery(t, db, `SELECT COUNT(*) FROM mail_domains`, &domains)
-	if groups != 1 || domains != 1 {
-		t.Fatalf("迁移不应动既有数据，groups=%d domains=%d", groups, domains)
+	mustQuery(t, db, `SELECT COUNT(*) FROM upload_tasks WHERE id = 'legacy-upload'`, &uploads)
+	if groups != 1 || domains != 1 || uploads != 1 {
+		t.Fatalf("迁移不应动既有数据，groups=%d domains=%d uploads=%d", groups, domains, uploads)
+	}
+	var stagingReservation int64
+	if err := db.read.QueryRow(`SELECT bytes FROM upload_staging_reservations WHERE session_id = 'legacy-upload' AND kind = 'legacy'`).Scan(&stagingReservation); err != nil {
+		t.Fatalf("读取旧上传暂存预留失败: %v", err)
+	}
+	if stagingReservation != 2144 {
+		t.Fatalf("旧上传暂存预留应覆盖明文与密文开销，得 %d", stagingReservation)
+	}
+	var resourcePriority int
+	if err := db.read.QueryRow(`SELECT resource_scheduling_priority FROM user_groups WHERE name = 'normal'`).Scan(&resourcePriority); err != nil {
+		t.Fatalf("读取迁移后资源调度优先级失败: %v", err)
+	}
+	if resourcePriority != 0 {
+		t.Fatalf("迁移后资源调度优先级应默认 0，得 %d", resourcePriority)
 	}
 }
 
@@ -187,10 +226,8 @@ func TestSchemaMatchesMigrated(t *testing.T) {
 		t.Fatalf("打开库失败: %v", err)
 	}
 	defer mig.Close()
-	// 拨回基线，让第二次 initSchema 真正走迁移路径。
-	if _, err := mig.write.Exec("PRAGMA user_version = 1"); err != nil {
-		t.Fatalf("拨回基线版本失败: %v", err)
-	}
+	// 降为已发布的 v2 结构，让第二次 initSchema 真正走迁移路径。
+	rewindToBaselineSchema(t, mig)
 	if err := mig.initSchema(); err != nil {
 		t.Fatalf("迁移失败: %v", err)
 	}

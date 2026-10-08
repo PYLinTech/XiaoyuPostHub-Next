@@ -86,6 +86,8 @@ type DeliveryPlan struct {
 	Mode DeliveryMode `json:"mode"`
 	// URL 是密文直链（Mode 为 direct 时有意义），已带鉴权与票据参数。
 	URL string `json:"url,omitempty"`
+	// Parts 是分卷密文直链清单。Offset/Size 使用整个逻辑密文的字节口径。
+	Parts []backend.PresignedPart `json:"parts,omitempty"`
 	// StreamURL 是本机中转流地址（Mode 为 proxy / proxy_decrypt 时有意义）。
 	StreamURL string `json:"streamUrl,omitempty"`
 	// ContentForm 声明本次下发的字节形态。必须以此字段为准。
@@ -353,10 +355,21 @@ func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Princip
 	}
 
 	// 直链交付：客户端从 123 直链拉密文，本地解密。
-	link, err := s.Backend.Presign(ctx, file.PanFileID, backend.PresignOptions{
+	presignOptions := backend.PresignOptions{
 		TTL:      ttl,
 		TicketID: ticketID,
-	})
+	}
+	var link string
+	var parts []backend.PresignedPart
+	if presigner, ok := s.Backend.(backend.MultipartPresigner); ok {
+		parts, err = presigner.PresignParts(ctx, file.PanFileID, file.PanSizeWire, presignOptions)
+		if err == nil && len(parts) == 1 {
+			link = parts[0].URL
+			parts = nil
+		}
+	} else {
+		link, err = s.Backend.Presign(ctx, file.PanFileID, presignOptions)
+	}
 	if err != nil {
 		// 直链通道失败（文件夹未开直链空间、直链流量用尽、上游暂时不可用）
 		// 时，即使站点策略是"优先直链交付"，本次交付也降级为服务端中转，
@@ -380,6 +393,7 @@ func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Princip
 	}
 	plan.Mode = store.TicketDirect
 	plan.URL = link
+	plan.Parts = parts
 	return plan, nil
 }
 

@@ -122,6 +122,7 @@ func run() error {
 
 	go maintenanceLoop(ctx, svc, settingsStore)
 	go mailReceiveLoop(ctx, settingsStore, mailSupervisor)
+	svc.RunUploadFinalizers(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -146,6 +147,9 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		// 优雅关闭失败不改变退出码：进程要退出，残留连接由操作系统回收。
 		log.Printf("优雅关闭未完成: %v", err)
+	}
+	if err := svc.WaitUploadFinalizers(shutdownCtx); err != nil {
+		log.Printf("等待上传收尾任务退出未完成: %v", err)
 	}
 	// 关闭前把 WAL 落盘并截断：留下一个几十 MB 的 -wal 会让下次冷启动多花
 	// 一次恢复扫描，而这一步几乎不耗时。

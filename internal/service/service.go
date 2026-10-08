@@ -70,6 +70,8 @@ var (
 	ErrStorageNotReady = errors.New("service: 存储后端尚未就绪")
 	// ErrBusy 表示同校验码的对象已被其他上传占位，调用方应稍后重试。
 	ErrBusy = errors.New("service: 该文件正在上传中")
+	// ErrUploadBackpressure 表示暂存窗口已满，客户端应退避后重传当前分片。
+	ErrUploadBackpressure = errors.New("service: 上传暂存窗口繁忙")
 	// ErrPickupPoolExhausted 表示取件码的全局码空间（28^6）已被有效期窗口内
 	// 存活的取件码占满，新码无法生成。这是需要明确告知最终用户的容量约束，
 	// 不能用主键碰撞无限重试掩盖。
@@ -117,6 +119,7 @@ type Service struct {
 	// 用 TryLock 而不是 Lock：维护是尽力而为的后台任务，失败可以等下一轮，
 	// 不该把调用方（尤其是管理端手动触发）阻塞在锁上。
 	maintenanceMu sync.Mutex
+	finalizerWG   sync.WaitGroup
 }
 
 // New 构造业务服务。

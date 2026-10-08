@@ -47,9 +47,10 @@ type migration struct {
 // ⚠️ 已发布的条目**永不改写**：改了老库升不上去（它已经按旧内容升过了）。
 // 写错了就在末尾追加新版本补救，不要回头编辑旧条目。
 //
-// 初始只有 v1 → v2 一代，对应邮箱地址解绑申请表。
+// v1 → v2 创建邮箱地址解绑申请表；v2 → v3 添加完整上传平台与资源调度优先级。
 var migrations = []migration{
 	{Version: 2, Name: "mail_unbind_requests", File: "0001_mail_unbind.sql"},
+	{Version: 3, Name: "upload_platform", File: "0002_upload_platform.sql"},
 }
 
 // loadMigrations 按注册表读取每个迁移的 SQL 并做完整性校验。

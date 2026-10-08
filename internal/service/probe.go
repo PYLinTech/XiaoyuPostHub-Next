@@ -158,7 +158,8 @@ func (s *Service) buildProbeObject(ctx context.Context) (*probeObject, error) {
 		CipherMD5: obj.checksum,
 		Source:    bytes.NewReader(cipher),
 		// 与真实对象相同的分块粒度（默认 1 MiB）。
-		BlockSize: hdr.BlockSize(),
+		BlockSize:   hdr.BlockSize(),
+		MaxPartSize: s.Settings.Runtime(ctx).Upload.MaxVolumeBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("上传失败: %w", err)

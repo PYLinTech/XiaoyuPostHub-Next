@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -129,19 +130,60 @@ func (m *Manager) Put(ctx context.Context, req PutRequest) (PutResult, error) {
 }
 
 func (m *Manager) Open(ctx context.Context, ref string) (io.ReadSeekCloser, error) {
-	return m.Current().Open(ctx, ref)
+	current := m.Current()
+	if parts, err := SplitObjectRef(ref, -1); err == nil && len(parts) > 1 {
+		return &multipartReader{backend: current, ctx: ctx, parts: parts, size: totalPartSize(parts)}, nil
+	}
+	return current.Open(ctx, ref)
 }
 
 func (m *Manager) Delete(ctx context.Context, ref string) error {
-	return m.Current().Delete(ctx, ref)
+	current := m.Current()
+	if parts, err := SplitObjectRef(ref, -1); err == nil && len(parts) > 1 {
+		var errs []error
+		for _, part := range parts {
+			if err := current.Delete(ctx, part.Ref); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	return current.Delete(ctx, ref)
 }
 
 func (m *Manager) Stat(ctx context.Context, ref string) (int64, error) {
+	if parts, err := SplitObjectRef(ref, -1); err == nil && len(parts) > 1 {
+		return totalPartSize(parts), nil
+	}
 	return m.Current().Stat(ctx, ref)
 }
 
 func (m *Manager) Presign(ctx context.Context, ref string, opt PresignOptions) (string, error) {
+	if parts, err := SplitObjectRef(ref, -1); err == nil && len(parts) > 1 {
+		return "", fmt.Errorf("%w: 逻辑对象包含多个物理卷", ErrPresignUnavailable)
+	}
 	return m.Current().Presign(ctx, ref, opt)
+}
+
+// PresignParts 为逻辑对象签发各物理卷直链；普通后端退化为单卷。
+func (m *Manager) PresignParts(ctx context.Context, ref string, size int64, opt PresignOptions) ([]PresignedPart, error) {
+	current := m.Current()
+	if p, ok := current.(MultipartPresigner); ok {
+		return p.PresignParts(ctx, ref, size, opt)
+	}
+	parts, err := SplitObjectRef(ref, size)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PresignedPart, 0, len(parts))
+	for _, part := range parts {
+		url, err := current.Presign(ctx, part.Ref, opt)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PresignedPart{URL: url, Offset: part.Offset, Size: part.Size})
+	}
+	return out, nil
 }
 
 func (m *Manager) PresignReady() bool { return m.Current().PresignReady() }

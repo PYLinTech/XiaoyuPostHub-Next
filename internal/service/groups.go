@@ -47,11 +47,12 @@ type GroupDetail struct {
 // 的语义不同：没有行表示不受限，值为 0 表示完全禁止，因此必须能把一行
 // 真正删掉而不是写成 0。
 type SaveGroupRequest struct {
-	Name        string
-	DisplayName string
-	Permissions int64
-	Priority    int
-	Quotas      map[string]int64
+	Name                       string
+	DisplayName                string
+	Permissions                int64
+	Priority                   int
+	ResourceSchedulingPriority int
+	Quotas                     map[string]int64
 	// ReceiveDomains 是该组应当托管的收件域名**完整列表**。指针是有意的：
 	// nil（请求里没有这个字段）表示"这次不管域名"，与显式传空切片（解绑
 	// 全部）必须区分开。否则一个只想调配额的调用会顺手把域名全解绑掉——
@@ -199,10 +200,11 @@ func (s *Service) AdminSaveGroup(ctx context.Context, p auth.Principal, req Save
 	}
 
 	group := store.Group{
-		Name:        name,
-		DisplayName: display,
-		Permissions: req.Permissions,
-		Priority:    req.Priority,
+		Name:                       name,
+		DisplayName:                display,
+		Permissions:                req.Permissions,
+		Priority:                   req.Priority,
+		ResourceSchedulingPriority: req.ResourceSchedulingPriority,
 	}
 	groupUpdated := false
 	permissionsChanged := false
@@ -212,7 +214,7 @@ func (s *Service) AdminSaveGroup(ctx context.Context, p auth.Principal, req Save
 		case lookupErr == nil:
 			groupUpdated = true
 			permissionsChanged = existing.Permissions != req.Permissions
-			if err := store.UpdateGroup(ctx, tx, name, display, req.Permissions, req.Priority); err != nil {
+			if err := store.UpdateGroup(ctx, tx, name, display, req.Permissions, req.Priority, req.ResourceSchedulingPriority); err != nil {
 				return err
 			}
 		case errors.Is(lookupErr, store.ErrNotFound):
@@ -269,8 +271,8 @@ func (s *Service) AdminSaveGroup(ctx context.Context, p auth.Principal, req Save
 	if req.ReceiveDomains != nil {
 		domainNote = strings.Join(normalizedDomains(*req.ReceiveDomains), ",")
 	}
-	s.audit(ctx, p, "group.save", name, fmt.Sprintf("perm=%d priority=%d domain=%q",
-		req.Permissions, req.Priority, domainNote))
+	s.audit(ctx, p, "group.save", name, fmt.Sprintf("perm=%d priority=%d resource_scheduling_priority=%d domain=%q",
+		req.Permissions, req.Priority, req.ResourceSchedulingPriority, domainNote))
 
 	saved, err := store.GetGroup(ctx, s.DB.R(), name)
 	if err != nil {

@@ -41,6 +41,17 @@ func TestEveryDefaultPassesItsOwnValidation(t *testing.T) {
 	}
 }
 
+func TestUploadStagingAndVolumeDefaults(t *testing.T) {
+	staging, ok := Lookup(KeyUploadMaxStagingBytes)
+	if !ok || staging.Default != "20G" || staging.Section != "storage" {
+		t.Fatalf("暂存空间默认值/分区错误：%+v", staging)
+	}
+	volume, ok := Lookup(KeyUploadMaxVolumeBytes)
+	if !ok || volume.Default != "4G" || volume.Section != "storage" {
+		t.Fatalf("分卷大小默认值/分区错误：%+v", volume)
+	}
+}
+
 // TestRegistryIsConsistent 描述符表本身的一致性。
 func TestRegistryIsConsistent(t *testing.T) {
 	known := map[string]bool{}

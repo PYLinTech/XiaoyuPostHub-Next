@@ -265,12 +265,13 @@ func (s Session) Expired(now time.Time) bool {
 
 // Group 是用户组。
 type Group struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	IsBuiltin   bool   `json:"isBuiltin"`
-	Permissions int64  `json:"permissions"`
-	Priority    int    `json:"priority"`
-	CreatedAt   int64  `json:"createdAt"`
+	Name                       string `json:"name"`
+	DisplayName                string `json:"displayName"`
+	IsBuiltin                  bool   `json:"isBuiltin"`
+	Permissions                int64  `json:"permissions"`
+	Priority                   int    `json:"priority"`
+	ResourceSchedulingPriority int    `json:"resourceSchedulingPriority"`
+	CreatedAt                  int64  `json:"createdAt"`
 }
 
 // GroupQuota 是组的一条配额维度。
@@ -286,6 +287,8 @@ type UploadTask struct {
 	UserID           int64     `json:"userId"`
 	Checksum         string    `json:"checksum"`
 	SizePlain        int64     `json:"sizePlain"`
+	Streaming        bool      `json:"streaming"`
+	VolumeSize       int64     `json:"volumeSize"`
 	ChunkSize        int64     `json:"chunkSize"`
 	ChunkTotal       int       `json:"chunkTotal"`
 	ReceivedMask     []byte    `json:"-"`
@@ -295,6 +298,33 @@ type UploadTask struct {
 	ExpiresAt        time.Time `json:"expiresAt"`
 	CreatedAt        int64     `json:"createdAt"`
 	UpdatedAt        int64     `json:"updatedAt"`
+}
+
+// UploadJob 是分片上传完成后的后台收尾任务。
+type UploadJob struct {
+	SessionID     string `json:"sessionId"`
+	UserID        int64  `json:"userId"`
+	ClientIP      string `json:"clientIp"`
+	State         string `json:"state"`
+	Error         string `json:"error,omitempty"`
+	ResultJSON    string `json:"-"`
+	TotalBytes    int64  `json:"totalBytes"`
+	ProgressBytes int64  `json:"progressBytes"`
+	CreatedAt     int64  `json:"createdAt"`
+	UpdatedAt     int64  `json:"updatedAt"`
+}
+
+// UploadPart 是一个逻辑上传任务已写入的密文物理卷。
+type UploadPart struct {
+	SessionID   string
+	PartNo      int
+	ObjectRef   string
+	ObjectName  string
+	PlainOffset int64
+	PlainSize   int64
+	WireOffset  int64
+	WireSize    int64
+	CipherMD5   string
 }
 
 // ReceivedBytes 返回已接收字节数（供进度展示）。

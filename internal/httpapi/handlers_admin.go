@@ -162,11 +162,12 @@ func (s *Server) handleAdminListGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type saveGroupRequest struct {
-	Name        string           `json:"name"`
-	DisplayName string           `json:"displayName"`
-	Permissions int64            `json:"permissions"`
-	Priority    int              `json:"priority"`
-	Quotas      map[string]int64 `json:"quotas"`
+	Name                       string           `json:"name"`
+	DisplayName                string           `json:"displayName"`
+	Permissions                int64            `json:"permissions"`
+	Priority                   int              `json:"priority"`
+	ResourceSchedulingPriority int              `json:"resourceSchedulingPriority"`
+	Quotas                     map[string]int64 `json:"quotas"`
 	// 收件域名随组一起提交。指针区分三态：没这个键 = 不动域名，[] = 解绑全部，
 	// 非空列表 = 该组应当托管的完整域名集合（不是增量追加）。少了这个区分，
 	// 只想调配额的调用就会顺手把域名全解绑掉。
@@ -184,12 +185,13 @@ func (s *Server) handleAdminSaveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	group, err := s.Svc.AdminSaveGroup(r.Context(), p, service.SaveGroupRequest{
-		Name:           req.Name,
-		DisplayName:    req.DisplayName,
-		Permissions:    req.Permissions,
-		Priority:       req.Priority,
-		Quotas:         req.Quotas,
-		ReceiveDomains: req.ReceiveDomains,
+		Name:                       req.Name,
+		DisplayName:                req.DisplayName,
+		Permissions:                req.Permissions,
+		Priority:                   req.Priority,
+		ResourceSchedulingPriority: req.ResourceSchedulingPriority,
+		Quotas:                     req.Quotas,
+		ReceiveDomains:             req.ReceiveDomains,
 	})
 	if err != nil {
 		fail(w, err)

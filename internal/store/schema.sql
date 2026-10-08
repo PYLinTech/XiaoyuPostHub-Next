@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS user_groups (
     is_builtin     INTEGER NOT NULL DEFAULT 0 CHECK (is_builtin IN (0, 1)),
     permissions    INTEGER NOT NULL DEFAULT 0,
     priority       INTEGER NOT NULL DEFAULT 0,
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    resource_scheduling_priority INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
 -- 组配额：键值化，加维度不需要改表。
@@ -216,13 +217,73 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
     conflict_action    TEXT NOT NULL DEFAULT 'rename',
     expires_at         INTEGER NOT NULL,
     created_at         INTEGER NOT NULL,
-    updated_at         INTEGER NOT NULL
+    updated_at         INTEGER NOT NULL,
+    streaming          INTEGER NOT NULL DEFAULT 0 CHECK (streaming IN (0, 1)),
+    volume_size        INTEGER NOT NULL DEFAULT 4294967296
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_user ON upload_tasks(user_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_checksum ON upload_tasks(checksum);
 -- 清理任务只按过期时间扫描，复合索引的首列不是 expires_at，用不上。
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_expires ON upload_tasks(expires_at);
+
+-- 只记当前实际占用的输入分片，流水线消费一卷后即可归还对应空间。
+CREATE TABLE IF NOT EXISTS upload_staging_chunks (
+    session_id  TEXT NOT NULL REFERENCES upload_tasks(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    size_bytes  INTEGER NOT NULL CHECK (size_bytes > 0),
+    state       TEXT NOT NULL CHECK (state IN ('reserved', 'staged')),
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (session_id, chunk_index)
+) STRICT, WITHOUT ROWID;
+
+-- 会话预占磁盘空间；迁移时旧会话按明文分片与最坏密文开销保守占位。
+CREATE TABLE IF NOT EXISTS upload_staging_reservations (
+    session_id TEXT NOT NULL REFERENCES upload_tasks(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    bytes      INTEGER NOT NULL CHECK (bytes > 0),
+    PRIMARY KEY (session_id, kind)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS upload_stream_state (
+    session_id       TEXT PRIMARY KEY REFERENCES upload_tasks(id) ON DELETE CASCADE,
+    next_plain_offset INTEGER NOT NULL DEFAULT 0,
+    sha256_state      BLOB NOT NULL
+) STRICT;
+
+-- ---------------------------------------------------------------- 上传收尾队列
+
+-- 分片收齐后先持久化排队，后台 worker 再做完整性校验、加密与对象存储写入。
+-- 同一用户最多同时处理一个收尾任务；跨用户由有限 worker 并发推进。
+CREATE TABLE IF NOT EXISTS upload_jobs (
+    session_id  TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_ip   TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL CHECK (state IN ('receiving', 'queued', 'processing', 'done', 'error')),
+    error       TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '',
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    progress_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_upload_jobs_queue ON upload_jobs(state, updated_at, created_at, session_id);
+CREATE INDEX IF NOT EXISTS idx_upload_jobs_user_state ON upload_jobs(user_id, state);
+
+CREATE TABLE IF NOT EXISTS upload_job_parts (
+    session_id   TEXT NOT NULL REFERENCES upload_jobs(session_id) ON DELETE CASCADE,
+    part_no      INTEGER NOT NULL,
+    object_ref   TEXT NOT NULL,
+    object_name  TEXT NOT NULL,
+    plain_offset INTEGER NOT NULL,
+    plain_size   INTEGER NOT NULL,
+    wire_offset  INTEGER NOT NULL,
+    wire_size    INTEGER NOT NULL,
+    cipher_md5   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (session_id, part_no)
+) STRICT, WITHOUT ROWID;
 
 -- ---------------------------------------------------------------- 下载票据
 

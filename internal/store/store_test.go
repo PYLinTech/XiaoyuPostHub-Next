@@ -24,7 +24,7 @@ func TestFreshSchemaCreatesAllTables(t *testing.T) {
 		"download_tickets", "files", "group_quotas", "invite_codes", "invite_uses",
 		"pickup_codes", "quota_counters", "sessions", "share_accesses", "shares",
 		"system_config", "throttle", "traffic_daily", "traffic_logs", "upload_tasks",
-		"user_groups", "user_nodes", "users",
+		"upload_jobs", "user_groups", "user_nodes", "users",
 	}
 	rows, err := db.R().Query(`SELECT name FROM sqlite_master WHERE type = 'table'`)
 	if err != nil {

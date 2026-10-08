@@ -169,6 +169,8 @@ func errorStatus(err error) (int, string, string) {
 
 	case errors.Is(err, service.ErrBusy):
 		return http.StatusConflict, "该文件正在上传中，请稍后重试", detailText(err)
+	case errors.Is(err, service.ErrUploadBackpressure):
+		return http.StatusTooManyRequests, "服务器正在处理已接收的数据，请稍后继续上传", detailText(err)
 
 	// 取件码码池耗尽是明确的容量约束：重试没有意义，必须把"为什么生成不了、
 	// 什么时候能恢复"讲清楚，因此用户文案不复用泛化的冲突提示。

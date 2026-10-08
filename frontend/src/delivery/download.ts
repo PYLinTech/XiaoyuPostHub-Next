@@ -140,11 +140,17 @@ async function receiveCiphertext(
   //   direct：123 直链绝对地址，跨域、只带 Range 头；
   //   proxy ：本机中转地址（纯反向代理），同源、票据与令牌走查询串。
   const url = cipherSourceUrl(plan);
+  const fetchRange = (start: number, endExclusive: number) => {
+    if (!plan.parts?.length) {
+      return fetchCipherRange(url, start, endExclusive - 1, signal);
+    }
+    return fetchCipherPartsRange(plan.parts, start, endExclusive - 1, signal);
+  };
 
   // 先取文件头：块大小、明文长度、nonce 前缀都在里面，而它们必须与交付元数据
   // 一致。不一致说明对象与记录已经错配，此时继续解密只会得到认证失败。
   report({ phase: "fetching", bytesDone: 0, bytesTotal: meta.plainSize, message: "正在读取文件头" });
-  const headerBytes = await fetchCipherRange(url, 0, HEADER_SIZE - 1, signal);
+  const headerBytes = await fetchRange(0, HEADER_SIZE);
   const header = parseXphHeader(headerBytes);
   assertHeaderMatchesMeta(header, meta);
 
@@ -165,7 +171,7 @@ async function receiveCiphertext(
     await decryptAll(
       key,
       header,
-      (start, endExclusive) => fetchCipherRange(url, start, endExclusive - 1, signal),
+      fetchRange,
       async (plain) => {
         hasher.update(plain);
         if (sink) {
@@ -214,6 +220,35 @@ async function receiveCiphertext(
     await sink?.abort();
     throw err;
   }
+}
+
+/** 把跨物理卷的一个逻辑密文区间拼成连续字节，供既有解密器使用。 */
+async function fetchCipherPartsRange(
+  parts: NonNullable<DeliveryPlan["parts"]>,
+  start: number,
+  endInclusive: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const endExclusive = endInclusive + 1;
+  const hits = parts.filter((part) => part.offset < endExclusive && part.offset + part.size > start);
+  if (!hits.length || hits[0].offset > start || hits[hits.length - 1].offset + hits[hits.length - 1].size < endExclusive) {
+    throw new Error("分卷清单无法覆盖所请求的密文区间");
+  }
+  const blocks = await Promise.all(hits.map((part) => {
+    const from = Math.max(start, part.offset);
+    const to = Math.min(endExclusive, part.offset + part.size);
+    return fetchCipherRange(part.url, from - part.offset, to - part.offset - 1, signal);
+  }));
+  const out = new Uint8Array(endExclusive - start);
+  let offset = 0;
+  for (const block of blocks) {
+    out.set(block, offset);
+    offset += block.byteLength;
+  }
+  if (offset !== out.byteLength) {
+    throw new Error("分卷响应长度与逻辑密文区间不一致");
+  }
+  return out;
 }
 
 async function receivePlaintext(

@@ -183,6 +183,67 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   return (data ?? ({} as T)) as T;
 }
 
+/** 二进制上传专用请求：XHR 提供 fetch 尚不支持的上传进度事件。 */
+export function requestWithUploadProgress<T>(
+  path: string,
+  body: Blob,
+  options: { method?: "PUT" | "POST"; signal?: AbortSignal; headers?: Record<string, string> } = {},
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const method = options.method ?? "PUT";
+    xhr.open(method, path, true);
+    xhr.responseType = "text";
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    for (const [name, value] of Object.entries(options.headers ?? {})) {
+      xhr.setRequestHeader(name, value);
+    }
+
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      options.signal?.removeEventListener("abort", abort);
+      fn();
+    };
+    const abort = () => xhr.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) {
+      finish(() => reject(new DOMException("已取消", "AbortError")));
+      return;
+    }
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total);
+    };
+    xhr.onerror = () => finish(() => reject(new ApiError(0, "网络连接失败，请检查网络后重试")));
+    xhr.onabort = () => finish(() => reject(new DOMException("已取消", "AbortError")));
+    xhr.onload = () => finish(() => {
+      const retryAfter = parseRetryAfter(xhr.getResponseHeader("Retry-After"));
+      let payload: ApiEnvelope<T> | null = null;
+      if (xhr.responseText) {
+        try { payload = JSON.parse(xhr.responseText) as ApiEnvelope<T>; } catch { payload = null; }
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        if (xhr.status === 401 && onUnauthorized && !unauthorizedFired) {
+          unauthorizedFired = true;
+          try { onUnauthorized(); } catch { /* 保留原始 API 错误。 */ }
+        }
+        const shape: ApiErrorShape | undefined = payload?.error;
+        reject(new ApiError(xhr.status, shape?.message ?? defaultMessageFor(xhr.status), shape?.detail, retryAfter));
+        return;
+      }
+      if (payload?.error) {
+        reject(new ApiError(xhr.status, payload.error.message, payload.error.detail));
+        return;
+      }
+      resolve((payload?.data ?? {}) as T);
+    });
+    xhr.send(body);
+  });
+}
+
 function isBinary(value: unknown): boolean {
   return (
     value instanceof FormData ||

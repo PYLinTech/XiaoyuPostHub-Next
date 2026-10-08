@@ -63,8 +63,8 @@ const STATUS_LABEL: Record<string, string> = {
         <AppProgress
           v-if="item.status === 'running' || item.status === 'queued'"
           :ratio="item.status === 'queued' ? 0 : item.progress.ratio"
-          :bytes-done="item.progress.sent"
-          :bytes-total="item.progress.total"
+          :bytes-done="item.progress.phase === 'uploading' ? item.progress.sent : 0"
+          :bytes-total="item.progress.phase === 'uploading' ? item.progress.total : 0"
           :label="item.progress.message"
         />
         <p v-else-if="item.status === 'error'" class="dock__error">{{ item.errorMessage }}</p>
@@ -75,7 +75,7 @@ const STATUS_LABEL: Record<string, string> = {
 
         <div class="row" style="gap: 4px">
           <AppButton
-            v-if="item.status === 'running' || item.status === 'queued'"
+            v-if="item.status === 'queued' || (item.status === 'running' && (item.progress.canCancel ?? item.progress.phase !== 'finishing'))"
             size="sm"
             variant="ghost"
             @click="cancelUploadItem(item.id)"

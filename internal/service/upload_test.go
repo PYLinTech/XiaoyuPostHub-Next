@@ -1,14 +1,18 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/backend"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
 
 // 测试用主密钥：32 字节全零的 URL 安全 Base64（43 字符，无填充）。
@@ -106,5 +110,90 @@ func TestCompleteEmptyUpload(t *testing.T) {
 	}
 	if node.SizePlain != 0 || node.LogicalPath != "/a/empty.bin" {
 		t.Fatalf("空文件节点不正确: %+v", node)
+	}
+}
+
+func TestStreamingUploadSupportsFileLargerThanStagingLimit(t *testing.T) {
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	ctx := context.Background()
+	if err := f.svc.Settings.SetMany(ctx, map[settings.Key]string{
+		settings.KeyUploadChunkSize:       "1M",
+		settings.KeyUploadMaxStagingBytes: "5M",
+		settings.KeyUploadMaxVolumeBytes:  "2M",
+	}, 0); err != nil {
+		t.Fatalf("设置小型流式测试参数失败: %v", err)
+	}
+
+	payload := bytes.Repeat([]byte("stream"), (2<<20)/len("stream"))
+	digest := sha256.Sum256(payload)
+	result, err := f.svc.InitUpload(ctx, f.user, InitUploadRequest{
+		Checksum: hex.EncodeToString(digest[:]), SizePlain: int64(len(payload)),
+		ParentPath: "/a", Name: "larger-than-staging.bin",
+	})
+	if err != nil {
+		t.Fatalf("初始化超暂存上限文件失败: %v", err)
+	}
+	task, err := store.GetUploadTask(ctx, f.db.R(), result.SessionID)
+	if err != nil || !task.Streaming {
+		t.Fatalf("超过暂存窗口的文件应进入流式模式，task=%+v err=%v", task, err)
+	}
+
+	workerCtx, stopWorkers := context.WithCancel(ctx)
+	f.svc.RunUploadFinalizers(workerCtx)
+	defer func() {
+		stopWorkers()
+		waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := f.svc.WaitUploadFinalizers(waitCtx); err != nil {
+			t.Errorf("等待收尾 worker 退出失败: %v", err)
+		}
+	}()
+
+	for index := 0; index < result.ChunkTotal; index++ {
+		start := int64(index) * result.ChunkSize
+		end := start + result.ChunkSize
+		if end > int64(len(payload)) {
+			end = int64(len(payload))
+		}
+		if _, err := f.svc.UploadChunk(ctx, f.user, result.SessionID, index,
+			bytes.NewReader(payload[start:end])); err != nil {
+			t.Fatalf("接收第 %d 片失败: %v", index, err)
+		}
+	}
+	if _, err := f.svc.QueueUploadCompletion(ctx, f.user, result.SessionID); err != nil {
+		t.Fatalf("提交流式收尾失败: %v", err)
+	}
+
+	deadline := time.After(10 * time.Second)
+	for {
+		status, found, err := f.svc.UploadJobStatusForUser(ctx, f.user, result.SessionID)
+		if err != nil {
+			t.Fatalf("读取收尾状态失败: %v", err)
+		}
+		if found && status.State == "done" {
+			break
+		}
+		if found && status.State == "error" {
+			t.Fatalf("流式收尾失败: %s", status.Error)
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("流式收尾超时，最近状态：%+v", status)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	file, err := store.GetFile(ctx, f.db.R(), hex.EncodeToString(digest[:]))
+	if err != nil || file.Status != store.FileNormal {
+		t.Fatalf("超大文件内容池登记失败：file=%+v err=%v", file, err)
+	}
+	parts, err := backend.SplitObjectRef(file.PanFileID, file.PanSizeWire)
+	if err != nil || len(parts) != 2 {
+		t.Fatalf("文件应由两卷合成一个对象，parts=%+v err=%v", parts, err)
+	}
+	if used, err := store.UploadStagingUsage(ctx, f.db.R()); err != nil || used != 0 {
+		t.Fatalf("完成后应释放全部暂存记录，used=%d err=%v", used, err)
 	}
 }

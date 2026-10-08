@@ -10,6 +10,8 @@ var (
 	ErrConflict = errors.New("store: 记录已存在")
 	// ErrQuotaExceeded 表示配额不足（预扣被条件更新拒绝）。
 	ErrQuotaExceeded = errors.New("store: 配额不足")
+	ErrBusy          = errors.New("store: 处理队列已满")
+	ErrStagingFull   = errors.New("store: 上传暂存空间已满")
 	// ErrNoRowsAffected 表示条件更新未命中任何行，通常意味着并发竞争或状态不符。
 	ErrNoRowsAffected = errors.New("store: 条件更新未命中")
 )

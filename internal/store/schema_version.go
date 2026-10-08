@@ -22,8 +22,9 @@ import (
 // currentSchemaVersion 是当前代码期望的结构版本，与 schema.sql 和
 // migrations/ 同步演进。
 //
-// 1 是基线：首批建库直起的结构。v1 → v2 是邮箱地址解绑申请表。
-const currentSchemaVersion = 2
+// 1 是基线：首批建库直起的结构；v2 邮箱解绑申请；v3 上传平台（收尾队列、流式暂存、
+// 密文分卷与用户组资源调度优先级）。
+const currentSchemaVersion = 3
 
 const schemaVersionOpTimeout = 120 * time.Second
 

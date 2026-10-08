@@ -89,6 +89,10 @@ const (
 	KeyUploadMaxConcurrency Key = "upload.max_concurrency"
 	// KeyUploadMaxTasks 同时进行的上传任务（文件）数。
 	KeyUploadMaxTasks Key = "upload.max_tasks"
+	// KeyUploadMaxStagingBytes 全站上传暂存空间上限。
+	KeyUploadMaxStagingBytes Key = "upload.max_staging_bytes"
+	// KeyUploadMaxVolumeBytes 上传密文单卷大小上限。
+	KeyUploadMaxVolumeBytes Key = "upload.max_volume_bytes"
 
 	// ---- 归档 ----
 
@@ -250,6 +254,16 @@ var registry = []Descriptor{
 		Kind: KindEnum, Default: DedupGroup, Scope: ScopeHot,
 		Enum: []string{DedupGroup, DedupGlobal, DedupOff},
 		Warn: "global 意味着任何登录用户只要知道某个文件的明文 SHA-256，无需持有文件即可获得可下载的引用。",
+	},
+	{
+		Key: KeyUploadMaxStagingBytes, Section: "storage", Title: "全站上传暂存上限",
+		Help: "所有未完成上传及收尾临时文件实际占用的总量上限，应不超过 XPH_TEMP_DIR 所在磁盘可用空间。",
+		Kind: KindSize, Default: "20G", Min: 1, Scope: ScopeHot,
+	},
+	{
+		Key: KeyUploadMaxVolumeBytes, Section: "storage", Title: "单个存储分卷大小上限",
+		Help: "每个物理密文卷的最大长度。为了给暂存输入和卷生成留出空间，此值必须小于全站暂存上限的一半。超大文件会自动拆成多个卷，下载时仍作为一个文件交付。",
+		Kind: KindSize, Default: "4G", Min: 1, Scope: ScopeHot,
 	},
 
 	// ---- 123 云盘 ----
@@ -602,12 +616,14 @@ type DeliveryRuntime struct {
 
 // UploadRuntime 是上传相关配置。
 type UploadRuntime struct {
-	ChunkSize      int64
-	MaxConcurrency int
-	MaxTasks       int
-	MaxFileSize    int64
-	SessionTTL     time.Duration
-	MaxPending     int
+	ChunkSize       int64
+	MaxStagingBytes int64
+	MaxVolumeBytes  int64
+	MaxConcurrency  int
+	MaxTasks        int
+	MaxFileSize     int64
+	SessionTTL      time.Duration
+	MaxPending      int
 }
 
 // OpsRuntime 是运维相关配置。
@@ -721,6 +737,8 @@ func buildRuntime(overlays map[Key]string) Runtime {
 		return n
 	}
 	maxFileSize := sizeOrInvalid(KeyUploadMaxFileSize)
+	maxStagingBytes := sizeOrInvalid(KeyUploadMaxStagingBytes)
+	maxVolumeBytes := sizeOrInvalid(KeyUploadMaxVolumeBytes)
 	chunkSize := defaultUploadChunkSize
 	if n, err := ParseSize(get(KeyUploadChunkSize)); err == nil && n > 0 {
 		chunkSize = n
@@ -806,12 +824,14 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			IPPrefixV6:    defaultDeliveryIPPrefixV6,
 		},
 		Upload: UploadRuntime{
-			ChunkSize:      chunkSize,
-			MaxConcurrency: maxConcurrency,
-			MaxTasks:       maxTasks,
-			MaxFileSize:    maxFileSize,
-			SessionTTL:     uploadSessionTTL,
-			MaxPending:     uploadMaxPending,
+			ChunkSize:       chunkSize,
+			MaxStagingBytes: maxStagingBytes,
+			MaxVolumeBytes:  maxVolumeBytes,
+			MaxConcurrency:  maxConcurrency,
+			MaxTasks:        maxTasks,
+			MaxFileSize:     maxFileSize,
+			SessionTTL:      uploadSessionTTL,
+			MaxPending:      uploadMaxPending,
 		},
 		Archive: ArchiveRuntime{
 			UserRetention:  archiveRetention(get(KeyArchiveUserRetention), 720*time.Hour),

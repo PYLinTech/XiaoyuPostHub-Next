@@ -8,19 +8,21 @@ import (
 	"strings"
 )
 
-const uploadTaskColumns = `id, user_id, checksum, size_plain, chunk_size, chunk_total, received_mask,
+const uploadTaskColumns = `id, user_id, checksum, size_plain, streaming, volume_size, chunk_size, chunk_total, received_mask,
 	target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at`
 
 func scanUploadTask(row rowScanner) (UploadTask, error) {
 	var t UploadTask
 	var expires int64
-	err := row.Scan(&t.ID, &t.UserID, &t.Checksum, &t.SizePlain, &t.ChunkSize, &t.ChunkTotal,
+	var streaming int
+	err := row.Scan(&t.ID, &t.UserID, &t.Checksum, &t.SizePlain, &streaming, &t.VolumeSize, &t.ChunkSize, &t.ChunkTotal,
 		&t.ReceivedMask, &t.TargetParentPath, &t.TargetName, &t.ConflictAction,
 		&expires, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return UploadTask{}, err
 	}
 	t.ExpiresAt = ToTime(expires)
+	t.Streaming = streaming != 0
 	return t, nil
 }
 
@@ -47,19 +49,19 @@ func createUploadTask(ctx context.Context, q Querier, t UploadTask, limit int64)
 		t.CreatedAt = now
 	}
 	query := `
-		INSERT INTO upload_tasks (id, user_id, checksum, size_plain, chunk_size, chunk_total,
+		INSERT INTO upload_tasks (id, user_id, checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
 			received_mask, target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	args := []any{
-		t.ID, t.UserID, t.Checksum, t.SizePlain, t.ChunkSize, t.ChunkTotal,
+		t.ID, t.UserID, t.Checksum, t.SizePlain, boolToInt(t.Streaming), t.VolumeSize, t.ChunkSize, t.ChunkTotal,
 		t.ReceivedMask, t.TargetParentPath, t.TargetName, t.ConflictAction,
 		FromTime(t.ExpiresAt), t.CreatedAt, now,
 	}
 	if limit > 0 {
 		query = `
-			INSERT INTO upload_tasks (id, user_id, checksum, size_plain, chunk_size, chunk_total,
+			INSERT INTO upload_tasks (id, user_id, checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
 				received_mask, target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at)
-			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			WHERE (SELECT COUNT(*) FROM upload_tasks WHERE user_id = ?) < ?`
 		args = append(args, t.UserID, limit)
 	}
@@ -174,7 +176,9 @@ func ListExpiredUploadTasksBatch(ctx context.Context, q Querier, now int64, limi
 		limit = 200
 	}
 	rows, err := q.QueryContext(ctx, `SELECT `+uploadTaskColumns+`
-		FROM upload_tasks WHERE expires_at < ? ORDER BY expires_at LIMIT ?`, now, limit)
+		FROM upload_tasks t WHERE expires_at < ?
+		AND NOT EXISTS (SELECT 1 FROM upload_jobs j WHERE j.session_id = t.id AND j.state IN ('queued', 'processing'))
+		ORDER BY expires_at LIMIT ?`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("查询过期上传会话失败: %w", err)
 	}
@@ -212,13 +216,22 @@ func DeleteExpiredUploadTask(ctx context.Context, q Querier, id string, before i
 		return task, false, nil
 	}
 	res, err := q.ExecContext(ctx,
-		`DELETE FROM upload_tasks WHERE id = ? AND expires_at < ?`, id, before)
+		`DELETE FROM upload_tasks WHERE id = ? AND expires_at < ?
+			AND NOT EXISTS (
+				SELECT 1 FROM upload_jobs WHERE session_id = ? AND state IN ('queued', 'processing')
+			)`, id, before, id)
 	if err != nil {
 		return UploadTask{}, false, fmt.Errorf("删除过期上传会话失败: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
 		return UploadTask{}, false, fmt.Errorf("读取过期上传会话删除结果失败: %w", err)
+	}
+	if n > 0 {
+		if _, err := q.ExecContext(ctx, `UPDATE upload_jobs SET state = 'error', error = '上传会话已过期', updated_at = ?
+			WHERE session_id = ? AND state = 'receiving'`, Now(), id); err != nil {
+			return UploadTask{}, false, fmt.Errorf("结束过期的流式上传任务失败: %w", err)
+		}
 	}
 	return task, n > 0, nil
 }

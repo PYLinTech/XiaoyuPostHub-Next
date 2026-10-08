@@ -125,6 +125,7 @@ export interface Group {
   isBuiltin: boolean;
   permissions: number;
   priority: number;
+  resourceSchedulingPriority: number;
   createdAt: number;
 }
 
@@ -336,6 +337,8 @@ export interface DeliveryPlan {
   mode: DeliveryMode;
   /** 直链地址（mode=direct 时有意义）。 */
   url?: string;
+  /** 多卷对象的直链清单，区间偏移相对于连续密文流。 */
+  parts?: Array<{ url: string; offset: number; size: number }>;
   /** 本机中转地址（mode=proxy/proxy_decrypt 时有意义）。 */
   streamUrl?: string;
   /** 本次下发字节的形态：ciphertext 需本地解密，plaintext 可直接消费。 */
@@ -366,15 +369,34 @@ export interface InitUploadResult {
   chunkTotal?: number;
   received?: number[];
   expiresAt?: number;
+  finalizing?: boolean;
+  jobState?: "queued" | "processing";
+  completedNode?: Node;
 }
 
 export interface UploadProgress {
   sessionId: string;
-  chunkSize: number;
-  chunkTotal: number;
-  received: number[];
-  receivedBytes: number;
-  expiresAt: number;
+  chunkSize?: number;
+  chunkTotal?: number;
+  received?: number[];
+  receivedBytes?: number;
+  expiresAt?: number;
+  state?: "receiving" | "queued" | "processing" | "done" | "error";
+  message?: string;
+  error?: string;
+  progressBytes?: number;
+  totalBytes?: number;
+  node?: Node;
+}
+
+export interface UploadJobStatus {
+  sessionId: string;
+  state: "receiving" | "queued" | "processing" | "done" | "error";
+  message: string;
+  error?: string;
+  progressBytes: number;
+  totalBytes: number;
+  node?: Node;
 }
 
 export interface UploadChunkResult {
@@ -911,4 +933,3 @@ export interface AdminMailQuery {
   limit?: number;
   offset?: number;
 }
-

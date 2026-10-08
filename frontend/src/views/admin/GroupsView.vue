@@ -86,6 +86,7 @@ interface GroupRow {
   memberCount: number;
   permCount: number;
   priority: number;
+  resourceSchedulingPriority: number;
   quotaLines: QuotaLine[];
   mailDomains: GroupMailDomain[];
 }
@@ -98,6 +99,7 @@ const rows = computed<GroupRow[]>(() =>
     memberCount: detail.memberCount,
     permCount: PERM_LABELS.filter((item) => hasPerm(detail.group.permissions, item.bit)).length,
     priority: detail.group.priority,
+    resourceSchedulingPriority: detail.group.resourceSchedulingPriority,
     quotaLines: quotaLines(quotaRecord(detail)),
     // 同一组可以托管多个域名，逐条展示：收件开关是按绑定算的，
     // 一格塞一个域名会漏掉其余域名的开关状态。
@@ -168,6 +170,7 @@ const form = reactive({
   name: "",
   displayName: "",
   priority: 0,
+  resourceSchedulingPriority: 0,
   permissions: 0,
 });
 
@@ -263,6 +266,7 @@ function openCreate(): void {
   form.name = "";
   form.displayName = "";
   form.priority = 0;
+  form.resourceSchedulingPriority = 0;
   form.permissions = 0;
   // 新建没有可继承的绑定：列表从空开始，管理员自己加。
   receiveDomains.value = [];
@@ -277,6 +281,7 @@ function openEdit(detail: GroupDetail): void {
   form.name = detail.group.name;
   form.displayName = detail.group.displayName;
   form.priority = detail.group.priority;
+  form.resourceSchedulingPriority = detail.group.resourceSchedulingPriority;
   form.permissions = detail.group.permissions;
   // 复制成草稿而不是直接用 detail 里的对象：管理员在表单上的每一次
   // 改动都只落在草稿上，点「取消」才不会把列表页的数据改脏。
@@ -326,6 +331,7 @@ async function save(): Promise<void> {
       displayName: form.displayName.trim(),
       permissions: form.permissions,
       priority: Math.trunc(form.priority),
+      resourceSchedulingPriority: Math.trunc(form.resourceSchedulingPriority),
       quotas,
       // 始终显式提交这个键，空列表也提交：[] 是"解绑全部域名"的明确意图，
       // 少传这个键后端会理解成"这次不动域名"，和管理员刚点下的操作对不上。
@@ -441,8 +447,12 @@ function deleteByName(name: string): void {
             <dd class="mono">{{ row.permCount }} 项</dd>
           </div>
           <div class="group-card__fact">
-            <dt>优先级</dt>
+            <dt>组匹配优先级</dt>
             <dd class="mono">{{ row.priority }}</dd>
+          </div>
+          <div class="group-card__fact">
+            <dt>资源调度优先级</dt>
+            <dd class="mono">{{ row.resourceSchedulingPriority }}</dd>
           </div>
         </dl>
 
@@ -509,6 +519,12 @@ function deleteByName(name: string): void {
           </FormField>
           <FormField label="优先级" hint="数值越大优先匹配；同名冲突时以它决定归属。">
             <input v-model.number="form.priority" class="input" type="number" step="1" />
+          </FormField>
+          <FormField
+            label="资源调度优先级"
+            hint="数值越大，该组上传收尾任务越先处理；相同优先级按排队轮转。"
+          >
+            <input v-model.number="form.resourceSchedulingPriority" class="input" type="number" step="1" />
           </FormField>
         </div>
 
@@ -717,7 +733,7 @@ function deleteByName(name: string): void {
 
 .group-card__facts {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0;
   border-top: 1px solid var(--c-border);
   border-bottom: 1px solid var(--c-border);
@@ -730,8 +746,12 @@ function deleteByName(name: string): void {
   gap: var(--sp-2);
 }
 
-.group-card__fact + .group-card__fact {
+.group-card__fact:nth-child(even) {
   border-left: 1px solid var(--c-border);
+}
+
+.group-card__fact:nth-child(n + 3) {
+  border-top: 1px solid var(--c-border);
 }
 
 .group-card__fact dt {

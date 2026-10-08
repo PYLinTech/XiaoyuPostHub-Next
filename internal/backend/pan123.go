@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -18,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/xph"
 )
 
 // 123 开放平台的接口地址。各接口的频率上限见 NewPan123 里构造的 limiter：
@@ -615,6 +618,111 @@ func (b *Pan123) Put(ctx context.Context, req PutRequest) (PutResult, error) {
 	if _, err := hex.DecodeString(strings.TrimSpace(req.CipherMD5)); err != nil || len(strings.TrimSpace(req.CipherMD5)) != 32 {
 		return PutResult{}, fmt.Errorf("backend: 密文 MD5 必须是 32 位十六进制")
 	}
+	maxPartSize := req.MaxPartSize
+	if maxPartSize <= 0 || req.SizeWire <= maxPartSize {
+		return b.putOne(ctx, req)
+	}
+	parts, err := cipherPartRanges(req.SizePlain, req.SizeWire, req.BlockSize, maxPartSize)
+	if err != nil {
+		return PutResult{}, err
+	}
+	refs := make([]ObjectPart, 0, len(parts))
+	var uploaded int64
+	for i, part := range parts {
+		section := io.NewSectionReader(req.Source, part.offset, part.wireSize)
+		sum := md5.New()
+		if _, err := io.Copy(sum, section); err != nil {
+			return PutResult{}, fmt.Errorf("backend: 计算第 %d 卷密文 MD5 失败: %w", i+1, err)
+		}
+		partReq := req
+		partReq.LogicalName = fmt.Sprintf("%s.xph-%05d", req.LogicalName, i+1)
+		partReq.SizePlain = part.plainSize
+		partReq.SizeWire = part.wireSize
+		partReq.CipherMD5 = hex.EncodeToString(sum.Sum(nil))
+		partReq.Source = io.NewSectionReader(req.Source, part.offset, part.wireSize)
+		partReq.MaxPartSize = 0
+		base := uploaded
+		if req.OnProgress != nil {
+			partReq.OnProgress = func(n int64) { req.OnProgress(base + n) }
+		}
+		put, err := b.putOne(ctx, partReq)
+		if err != nil {
+			cleanupErr := deleteObjectParts(ctx, b, refs)
+			return PutResult{}, errors.Join(err, cleanupErr)
+		}
+		refs = append(refs, ObjectPart{Ref: put.ObjectRef, Offset: uploaded, Size: part.wireSize})
+		uploaded += part.wireSize
+	}
+	ref, err := ComposeObjectRef(refs)
+	if err != nil {
+		return PutResult{}, err
+	}
+	return PutResult{ObjectRef: ref}, nil
+}
+
+type cipherPartRange struct {
+	offset    int64
+	wireSize  int64
+	plainSize int64
+}
+
+// cipherPartRanges 只在 XPH 的完整 GCM 块边界切卷，第一卷保留文件头。
+func cipherPartRanges(sizePlain, sizeWire, blockSize, maxPart int64) ([]cipherPartRange, error) {
+	headerSize := int64(xph.HeaderSize)
+	tagSize := int64(xph.TagSize)
+	if sizePlain < 0 || sizeWire < headerSize || blockSize <= 0 || blockSize > math.MaxInt64-tagSize || maxPart <= headerSize {
+		return nil, fmt.Errorf("backend: 分卷参数无效")
+	}
+	unit := blockSize + tagSize
+	blocks := int64(0)
+	if sizePlain > 0 {
+		blocks = 1 + (sizePlain-1)/blockSize
+	}
+	firstCapacity := (maxPart - headerSize) / unit
+	otherCapacity := maxPart / unit
+	if firstCapacity == 0 || (blocks > firstCapacity && otherCapacity == 0) {
+		return nil, fmt.Errorf("backend: 分卷上限小于一个加密块")
+	}
+	var out []cipherPartRange
+	var blockIndex, cipherOffset int64
+	for len(out) == 0 || blockIndex < blocks {
+		capacity := otherCapacity
+		first := len(out) == 0
+		if first {
+			capacity = firstCapacity
+		}
+		count := blocks - blockIndex
+		if count > capacity {
+			count = capacity
+		}
+		partStart := headerSize + blockIndex*unit
+		if first {
+			partStart = 0
+		}
+		partEnd := headerSize + (blockIndex+count)*unit
+		if blockIndex+count == blocks {
+			partEnd = sizeWire
+		}
+		wire := partEnd - partStart
+		plainStart := blockIndex * blockSize
+		plainEnd := plainStart + count*blockSize
+		if plainEnd > sizePlain {
+			plainEnd = sizePlain
+		}
+		if blocks == 0 {
+			wire = headerSize
+		}
+		out = append(out, cipherPartRange{offset: cipherOffset, wireSize: wire, plainSize: plainEnd - plainStart})
+		cipherOffset += wire
+		blockIndex += count
+	}
+	if cipherOffset != sizeWire {
+		return nil, fmt.Errorf("backend: 分卷边界计算与密文长度不一致 (%d != %d)", cipherOffset, sizeWire)
+	}
+	return out, nil
+}
+
+func (b *Pan123) putOne(ctx context.Context, req PutRequest) (PutResult, error) {
 	parentID, err := b.EnsureDir(ctx, req.ParentDir)
 	if err != nil {
 		return PutResult{}, err
@@ -654,6 +762,16 @@ func (b *Pan123) Put(ctx context.Context, req PutRequest) (PutResult, error) {
 		return PutResult{}, err
 	}
 	return PutResult{ObjectRef: strconv.FormatInt(fileID, 10)}, nil
+}
+
+func deleteObjectParts(ctx context.Context, b *Pan123, parts []ObjectPart) error {
+	var errs []error
+	for _, part := range parts {
+		if err := b.Delete(ctx, part.Ref); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (b *Pan123) uploadSlices(ctx context.Context, req PutRequest, created *uploadCreateResp) error {
@@ -1099,6 +1217,23 @@ func (b *Pan123) Presign(ctx context.Context, ref string, opt PresignOptions) (s
 		ttl = b.cfg.DirectLinkTTL
 	}
 	return b.signedDirectLink(ctx, id, ttl, opt.TicketID)
+}
+
+// PresignParts 为逻辑对象中的每个物理卷分别签发直链。
+func (b *Pan123) PresignParts(ctx context.Context, ref string, size int64, opt PresignOptions) ([]PresignedPart, error) {
+	parts, err := SplitObjectRef(ref, size)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PresignedPart, 0, len(parts))
+	for _, part := range parts {
+		url, err := b.Presign(ctx, part.Ref, opt)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PresignedPart{URL: url, Offset: part.Offset, Size: part.Size})
+	}
+	return out, nil
 }
 
 // signedDirectLink 经直链流量通道换取原始地址并完成 URL 鉴权签名。

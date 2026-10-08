@@ -27,6 +27,7 @@ export interface UploadItem {
   node: Node | null;
   dedup: boolean;
   controller: AbortController | null;
+  sessionId: string | null;
 }
 
 const state = reactive({ items: [] as UploadItem[] });
@@ -74,6 +75,7 @@ export function enqueueUploads(
       node: null,
       dedup: false,
       controller: null,
+      sessionId: null,
     });
     ids.push(id);
   }
@@ -107,6 +109,7 @@ async function runItem(item: UploadItem): Promise<void> {
       conflictAction: item.conflictAction,
       signal: controller.signal,
       concurrency: uploadLimits().maxConcurrency,
+      onSessionId: (sessionId) => { item.sessionId = sessionId; },
       onProgress: (info) => {
         item.progress = info;
       },
@@ -129,6 +132,7 @@ async function runItem(item: UploadItem): Promise<void> {
     }
   } finally {
     item.controller = null;
+    if (item.status === "done" || item.status === "error" || item.status === "canceled") item.sessionId = null;
     void pump();
   }
 }
@@ -145,13 +149,20 @@ export async function cancelUploadItem(id: string): Promise<void> {
     void pump();
     return;
   }
+  // 收尾排队期间先让服务端原子取消，再停止前端轮询；worker 已经领取时
+  // 服务端会拒绝取消，界面不能误报成“已取消”。
+  if (item.progress.phase === "finishing" && item.sessionId) {
+    const canceled = await cancelUpload(item.sessionId);
+    if (!canceled) {
+      useToasts().info("服务器已开始处理，此任务暂时不能取消");
+      return;
+    }
+    item.controller?.abort();
+    return;
+  }
   item.controller?.abort();
   // 服务端会话也要清掉，否则临时文件与预扣的额度会挂到过期为止。
-  try {
-    await cancelUpload(item.file, item.parentPath);
-  } catch {
-    // 会话可能已经过期或已经完成，忽略。
-  }
+  if (item.sessionId) await cancelUpload(item.sessionId);
 }
 
 /** 重试一个失败的上传。 */

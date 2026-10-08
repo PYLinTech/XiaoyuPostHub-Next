@@ -1,4 +1,4 @@
-import { getToken, request } from "./client";
+import { getToken, request, requestWithUploadProgress } from "./client";
 import type {
   AdminMailListResult,
   AdminMailQuery,
@@ -45,6 +45,7 @@ import type {
   TrafficLog,
   UploadChunkResult,
   UploadProgress,
+  UploadJobStatus,
   User,
 } from "./types";
 
@@ -134,19 +135,24 @@ export const uploadApi = {
   }) => request<InitUploadResult>("/api/upload/init", { method: "POST", body: input }),
 
   /** 分片按二进制原样发送：包一层 JSON 会让传输量膨胀三分之一。 */
-  chunk: (sessionId: string, index: number, data: Blob, signal?: AbortSignal) =>
-    request<UploadChunkResult>(`/api/upload/${encodeURIComponent(sessionId)}/chunk/${index}`, {
-      method: "PUT",
-      body: data,
-      signal,
-      headers: { "Content-Type": "application/octet-stream" },
-    }),
+  chunk: (
+    sessionId: string,
+    index: number,
+    data: Blob,
+    signal?: AbortSignal,
+    onProgress?: (loaded: number, total: number) => void,
+  ) => requestWithUploadProgress<UploadChunkResult>(
+    `/api/upload/${encodeURIComponent(sessionId)}/chunk/${index}`,
+    data,
+    { method: "PUT", signal },
+    onProgress,
+  ),
 
   complete: (sessionId: string) =>
-    request<{ node: Node }>(`/api/upload/${encodeURIComponent(sessionId)}/complete`, { method: "POST" }),
+    request<UploadJobStatus>(`/api/upload/${encodeURIComponent(sessionId)}/complete`, { method: "POST" }),
 
-  status: (sessionId: string) =>
-    request<UploadProgress>(`/api/upload/${encodeURIComponent(sessionId)}`),
+  status: (sessionId: string, signal?: AbortSignal) =>
+    request<UploadProgress>(`/api/upload/${encodeURIComponent(sessionId)}`, { signal }),
 
   cancel: (sessionId: string) =>
     request<{ ok: boolean }>(`/api/upload/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" }),
@@ -363,6 +369,7 @@ export const adminApi = {
     displayName: string;
     permissions: number;
     priority: number;
+    resourceSchedulingPriority: number;
     quotas: Record<string, number>;
     /**
      * 本次要保存的「组 × 域名」绑定集合，是**整体替换**而不是增量追加。

@@ -91,12 +91,12 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	node, err := s.Svc.CompleteUpload(r.Context(), p, pathParam(r, "session"))
+	job, err := s.Svc.QueueUploadCompletion(r.Context(), p, pathParam(r, "session"))
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeData(w, map[string]any{"node": node})
+	writeData(w, job)
 }
 
 // handleUploadStatus 返回会话进度，供断点续传。
@@ -105,7 +105,15 @@ func (s *Server) handleUploadStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	task, received, err := s.Svc.UploadProgress(r.Context(), p, pathParam(r, "session"))
+	sessionID := pathParam(r, "session")
+	if job, found, err := s.Svc.UploadJobStatusForUser(r.Context(), p, sessionID); err != nil {
+		fail(w, err)
+		return
+	} else if found {
+		writeData(w, job)
+		return
+	}
+	task, received, err := s.Svc.UploadProgress(r.Context(), p, sessionID)
 	if err != nil {
 		fail(w, err)
 		return

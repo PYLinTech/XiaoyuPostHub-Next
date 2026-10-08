@@ -276,6 +276,7 @@ func (s *Service) putCipherObject(ctx context.Context, rec store.File, cipher *o
 		CipherMD5:   cipherMD5,
 		Source:      cipher,
 		BlockSize:   s.BlockSize(ctx),
+		MaxPartSize: s.Settings.Runtime(ctx).Upload.MaxVolumeBytes,
 	})
 	if err != nil {
 		return cipherPutResult{}, fmt.Errorf("%w: 写入存储后端失败: %w", ErrUnavailable, err)

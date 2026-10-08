@@ -40,8 +40,22 @@ type PutRequest struct {
 	Source io.ReaderAt
 	// BlockSize 是加密块大小，用于校验分片对齐。
 	BlockSize int64
+	// MaxPartSize 是单个物理对象允许的最大密文长度；0 表示后端默认值。
+	MaxPartSize int64
 	// OnProgress 上报已上传的密文字节数。
 	OnProgress func(uploaded int64)
+}
+
+// PresignedPart 是逻辑密文对象的一个可直接读取物理卷。
+type PresignedPart struct {
+	URL    string `json:"url"`
+	Offset int64  `json:"offset"`
+	Size   int64  `json:"size"`
+}
+
+// MultipartPresigner 是支持多物理卷直链的可选能力。
+type MultipartPresigner interface {
+	PresignParts(ctx context.Context, ref string, size int64, opt PresignOptions) ([]PresignedPart, error)
 }
 
 // PutResult 是一次写入的结果。

@@ -32,12 +32,12 @@ const (
 	QuotaMailAddresses = "count.mail_addresses"
 )
 
-const groupColumns = `name, display_name, is_builtin, permissions, priority, created_at`
+const groupColumns = `name, display_name, is_builtin, permissions, priority, resource_scheduling_priority, created_at`
 
 func scanGroup(row rowScanner) (Group, error) {
 	var g Group
 	var builtin int
-	err := row.Scan(&g.Name, &g.DisplayName, &builtin, &g.Permissions, &g.Priority, &g.CreatedAt)
+	err := row.Scan(&g.Name, &g.DisplayName, &builtin, &g.Permissions, &g.Priority, &g.ResourceSchedulingPriority, &g.CreatedAt)
 	if err != nil {
 		return Group{}, err
 	}
@@ -135,9 +135,9 @@ func CreateGroup(ctx context.Context, q Querier, g Group) error {
 		return fmt.Errorf("%w: %s 是预设组，不能以同名新建", ErrConflict, g.Name)
 	}
 	_, err := q.ExecContext(ctx, `
-		INSERT INTO user_groups (name, display_name, is_builtin, permissions, priority, created_at)
-		VALUES (?, ?, 0, ?, ?, ?)`,
-		g.Name, g.DisplayName, g.Permissions, g.Priority, Now())
+		INSERT INTO user_groups (name, display_name, is_builtin, permissions, priority, resource_scheduling_priority, created_at)
+		VALUES (?, ?, 0, ?, ?, ?, ?)`,
+		g.Name, g.DisplayName, g.Permissions, g.Priority, g.ResourceSchedulingPriority, Now())
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY KEY") {
 			return fmt.Errorf("%w: 用户组 %s 已存在", ErrConflict, g.Name)
@@ -149,10 +149,10 @@ func CreateGroup(ctx context.Context, q Querier, g Group) error {
 
 // UpdateGroup 修改组权限与显示名。预设组的名称不可变（这里不接受改名，
 // 调用方若需要改名必须走"新建 + 迁移成员"）。
-func UpdateGroup(ctx context.Context, q Querier, name, displayName string, permissions int64, priority int) error {
+func UpdateGroup(ctx context.Context, q Querier, name, displayName string, permissions int64, priority, resourceSchedulingPriority int) error {
 	res, err := q.ExecContext(ctx, `
-		UPDATE user_groups SET display_name = ?, permissions = ?, priority = ?
-		WHERE name = ?`, displayName, permissions, priority, name)
+		UPDATE user_groups SET display_name = ?, permissions = ?, priority = ?, resource_scheduling_priority = ?
+		WHERE name = ?`, displayName, permissions, priority, resourceSchedulingPriority, name)
 	if err != nil {
 		return fmt.Errorf("更新用户组失败: %w", err)
 	}

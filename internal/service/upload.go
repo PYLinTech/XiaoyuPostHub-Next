@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
+	"encoding"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/backend"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
@@ -165,6 +168,9 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 	// 分片落到临时盘，不设上限等于把磁盘交给客户端支配；秒传命中不建会话，
 	// 不会被这个上限拦住。组配额行存在时覆盖默认并发数（0 = 禁止新建会话）。
 	uploadRT := s.Settings.Runtime(ctx).Upload
+	if uploadRT.MaxStagingBytes <= 0 {
+		return InitUploadResult{}, fmt.Errorf("%w: 上传暂存上限配置无效", ErrUnavailable)
+	}
 	pendingLimit := uploadRT.MaxPending
 	pendingLimited := false
 	if !quotaBypass {
@@ -189,6 +195,19 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 	if uploadRT.SessionTTL <= 0 {
 		return InitUploadResult{}, fmt.Errorf("%w: 上传会话有效期配置无效", ErrUnavailable)
 	}
+	minimumVolume := xph.CipherSizeOf(chunkSize, s.BlockLog2(ctx))
+	if minimumVolume < 0 || uploadRT.MaxVolumeBytes < minimumVolume {
+		return InitUploadResult{}, fmt.Errorf("%w: 分卷上限必须能容纳至少一个上传分片的密文", ErrUnavailable)
+	}
+	stagingAdmission, err := uploadStagingAdmission(ctx, s.DB.R(), uploadRT.MaxStagingBytes, uploadRT.MaxVolumeBytes)
+	if err != nil {
+		return InitUploadResult{}, err
+	}
+	cipherSize := xph.CipherSizeOf(req.SizePlain, s.BlockLog2(ctx))
+	if cipherSize < 0 {
+		return InitUploadResult{}, fmt.Errorf("%w: 文件长度超出加密格式支持范围", ErrTooLarge)
+	}
+	streaming := req.SizePlain > stagingAdmission || cipherSize > stagingAdmission-req.SizePlain
 
 	// ③ 建立上传会话。配额预扣与会话创建在同一事务中提交：如果进程在
 	// 两步之间退出，维护任务仍能根据会话回收额度，不会留下无主的预扣。
@@ -207,6 +226,8 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		UserID:           p.UserID(),
 		Checksum:         checksum,
 		SizePlain:        req.SizePlain,
+		Streaming:        streaming,
+		VolumeSize:       uploadRT.MaxVolumeBytes,
 		ChunkSize:        chunkSize,
 		ChunkTotal:       total,
 		ReceivedMask:     make([]byte, store.BitmapBytes(total)),
@@ -238,10 +259,40 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		if err != nil {
 			return err
 		}
-		if pendingLimit > 0 {
-			return store.CreateUploadTaskLimited(ctx, tx, task, int64(pendingLimit))
+		err = store.CreateUploadTaskLimited(ctx, tx, task, int64(pendingLimit))
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			return fmt.Errorf("%w: 同时进行的上传会话已达用户组上限", ErrQuotaExceeded)
 		}
-		return store.CreateUploadTask(ctx, tx, task)
+		if err != nil {
+			return err
+		}
+		if !streaming && cipherSize > 0 {
+			if err := store.ReserveUploadStaging(ctx, tx, task.ID, "cipher", cipherSize, stagingAdmission); err != nil {
+				if errors.Is(err, store.ErrStagingFull) {
+					return fmt.Errorf("%w: 服务器暂存空间已满，请稍后重试", ErrBusy)
+				}
+				return err
+			}
+		}
+		if streaming {
+			state, ok := sha256.New().(encoding.BinaryMarshaler)
+			if !ok {
+				return fmt.Errorf("%w: SHA-256 状态无法持久化", ErrUnavailable)
+			}
+			raw, err := state.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			if err := store.CreateUploadStreamState(ctx, tx, task.ID, raw); err != nil {
+				return err
+			}
+			if err := store.CreateReceivingUploadJob(ctx, tx, store.UploadJob{
+				SessionID: task.ID, UserID: p.UserID(), ClientIP: p.ClientIP.String(), TotalBytes: task.SizePlain, CreatedAt: task.CreatedAt,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		return InitUploadResult{}, err
 	}
@@ -471,6 +522,8 @@ func (s *Service) UploadChunk(ctx context.Context, p auth.Principal, sessionID s
 	// 已确认的分片不再允许重复写入。重复请求常见于客户端重试；继续
 	// 截断目标文件会与收尾读取产生竞态，甚至把一份完整分片变成半片。
 	if store.HasBit(task.ReceivedMask, index) {
+		// 修复“位图已提交、暂存记录状态更新失败”的短暂窗口。
+		_ = store.MarkUploadStagingChunkReady(ctx, s.DB.W(), task.ID, index)
 		return task, nil
 	}
 
@@ -481,9 +534,31 @@ func (s *Service) UploadChunk(ctx context.Context, p auth.Principal, sessionID s
 	if expect < 0 {
 		expect = 0
 	}
+	if expect == 0 {
+		return store.UploadTask{}, fmt.Errorf("%w: 空分片无效", ErrBadRequest)
+	}
+	uploadRT := s.Settings.Runtime(ctx).Upload
+	admissionLimit, err := uploadStagingAdmission(ctx, s.DB.R(), uploadRT.MaxStagingBytes, task.VolumeSize)
+	if err != nil {
+		return store.UploadTask{}, err
+	}
+	reserved, err := store.ReserveUploadStagingChunk(ctx, s.DB, task.ID, index, expect, admissionLimit)
+	if errors.Is(err, store.ErrStagingFull) || errors.Is(err, store.ErrBusy) {
+		return store.UploadTask{}, fmt.Errorf("%w: 暂存空间正在被其他任务使用", ErrUploadBackpressure)
+	}
+	if err != nil {
+		return store.UploadTask{}, err
+	}
+	if !reserved {
+		updated, markErr := store.MarkChunkReceived(ctx, s.DB.W(), task.ID, index)
+		return updated, markErr
+	}
+	stopHeartbeat := s.keepUploadStagingReservationAlive(ctx, task.ID, index)
+	defer stopHeartbeat()
 
 	path := s.chunkPath(task.ID, index)
 	if err := s.writeChunkFile(path, body, expect); err != nil {
+		_ = store.ReleaseUploadStagingChunk(ctx, s.DB.W(), task.ID, index)
 		return store.UploadTask{}, err
 	}
 	updated, err := store.MarkChunkReceived(ctx, s.DB.W(), task.ID, index)
@@ -491,9 +566,44 @@ func (s *Service) UploadChunk(ctx context.Context, p auth.Principal, sessionID s
 		// 会话可能恰好在写盘后过期或被取消；位图没有记录这片时，
 		// 留下的分片只会变成不可定位的临时垃圾。
 		_ = os.Remove(path)
+		_ = store.ReleaseUploadStagingChunk(ctx, s.DB.W(), task.ID, index)
 		return store.UploadTask{}, err
 	}
+	if err := store.MarkUploadStagingChunkReady(ctx, s.DB.W(), task.ID, index); err != nil {
+		return store.UploadTask{}, err
+	}
+	if task.Streaming {
+		if err := s.queueStreamingUploadIfReady(ctx, updated); err != nil {
+			return store.UploadTask{}, err
+		}
+	}
 	return updated, nil
+}
+
+func (s *Service) keepUploadStagingReservationAlive(ctx context.Context, sessionID string, index int) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-ticker.C:
+				if err := store.TouchUploadStagingChunk(ctx, s.DB.W(), sessionID, index); err != nil {
+					log.Printf("service: 上传 %s 分片 %d 暂存预占保活失败: %v", sessionID, index, err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
 // writeChunkFile 写入分片文件，并校验长度与声明一致。
@@ -603,32 +713,50 @@ func (s *Service) CompleteUpload(ctx context.Context, p auth.Principal, sessionI
 	}
 
 	var node store.Node
-	err = s.DB.InTx(ctx, func(tx store.Querier) error {
-		// 上传初始化时的父目录检查只是早期反馈；收尾必须在同一写事务
-		// 内再次确认，避免目录在上传过程中被删除后仍登记出孤儿节点。
-		if err := s.requireFolderTx(ctx, tx, p.UserID(), task.TargetParentPath); err != nil {
-			return err
-		}
-		if err := store.FinalizeFile(ctx, tx, task.Checksum, put.ObjectRef, put.objectPath, put.sizeWire); err != nil {
-			return err
-		}
-		if _, err := store.AddFileRef(ctx, tx, task.Checksum); err != nil {
-			return err
-		}
-		file, err := store.GetFile(ctx, tx, task.Checksum)
-		if err != nil {
-			return err
-		}
-		n, err := s.placeFileNodeTx(ctx, tx, p, task.TargetParentPath, task.TargetName, task.ConflictAction, file)
-		if err != nil {
-			return err
-		}
-		if err := store.DeleteUploadTask(ctx, tx, task.ID); err != nil {
-			return err
-		}
-		node = n
-		return nil
-	})
+	// 在事务释放暂存预留前先物理删除输入与密文临时文件；预留在整个清理
+	// 过程中仍保留，避免下一批上传趁数据库记录先消失而突破磁盘上限。
+	err = cipherFile.Close()
+	if err == nil {
+		err = os.Remove(cipherPath)
+	}
+	if err == nil {
+		err = s.cleanupSession(task.ID)
+	}
+	if err == nil {
+		err = s.DB.InTx(ctx, func(tx store.Querier) error {
+			// 上传初始化时的父目录检查只是早期反馈；收尾必须在同一写事务
+			// 内再次确认，避免目录在上传过程中被删除后仍登记出孤儿节点。
+			if err := s.requireFolderTx(ctx, tx, p.UserID(), task.TargetParentPath); err != nil {
+				return err
+			}
+			if err := store.FinalizeFile(ctx, tx, task.Checksum, put.ObjectRef, put.objectPath, put.sizeWire); err != nil {
+				return err
+			}
+			if _, err := store.AddFileRef(ctx, tx, task.Checksum); err != nil {
+				return err
+			}
+			file, err := store.GetFile(ctx, tx, task.Checksum)
+			if err != nil {
+				return err
+			}
+			n, err := s.placeFileNodeTx(ctx, tx, p, task.TargetParentPath, task.TargetName, task.ConflictAction, file)
+			if err != nil {
+				return err
+			}
+			if err := store.DeleteUploadTask(ctx, tx, task.ID); err != nil {
+				return err
+			}
+			resultJSON, err := json.Marshal(n)
+			if err != nil {
+				return err
+			}
+			if err := store.CompleteUploadJobInTx(ctx, tx, task.ID, string(resultJSON)); err != nil {
+				return err
+			}
+			node = n
+			return nil
+		})
+	}
 	if err != nil {
 		// 并发收尾时，只有仍处于“上传中”的内容才属于本次失败。另一条
 		// 请求可能已经完成并登记节点；此时不能把正常对象改成待回收。
@@ -906,6 +1034,37 @@ func (s *Service) overwriteExisting(ctx context.Context, tx store.Querier, userI
 
 // CancelUpload 主动取消上传并释放配额与临时文件。
 func (s *Service) CancelUpload(ctx context.Context, p auth.Principal, sessionID string) error {
+	if job, err := store.GetUploadJob(ctx, s.DB.R(), sessionID); err == nil {
+		if job.UserID != p.UserID() {
+			return ErrNotFound
+		}
+		if job.State == "processing" {
+			return fmt.Errorf("%w: 服务器已开始处理，暂时不能取消", ErrConflict)
+		}
+		if job.State == "done" {
+			return fmt.Errorf("%w: 上传已经完成", ErrConflict)
+		}
+		if job.State == "receiving" {
+			canceled, cancelErr := store.CancelReceivingUploadJob(ctx, s.DB.W(), sessionID)
+			if cancelErr != nil {
+				return cancelErr
+			}
+			if !canceled {
+				return fmt.Errorf("%w: 服务器已开始处理，暂时不能取消", ErrConflict)
+			}
+		}
+		if job.State == "queued" {
+			canceled, cancelErr := store.CancelQueuedUploadJob(ctx, s.DB.W(), sessionID)
+			if cancelErr != nil {
+				return cancelErr
+			}
+			if !canceled {
+				return fmt.Errorf("%w: 服务器已开始处理，暂时不能取消", ErrConflict)
+			}
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
 	task, err := s.ownUploadTask(ctx, p, sessionID)
 	if err != nil {
 		return err
@@ -918,6 +1077,29 @@ func (s *Service) CancelUpload(ctx context.Context, p auth.Principal, sessionID 
 // 四处残留必须一起清掉：任何一处遗留都会造成"内容永远处于上传中"或"磁盘被
 // 悄悄占满"这类难以归因的问题。
 func (s *Service) abortUpload(ctx context.Context, task store.UploadTask) error {
+	var streamedRef string
+	var streamedSize int64
+	var streamedDeleteErr error
+	if task.Streaming {
+		parts, err := store.ListUploadParts(ctx, s.DB.R(), task.ID)
+		if err != nil {
+			return err
+		}
+		if len(parts) > 0 {
+			refs := make([]backend.ObjectPart, 0, len(parts))
+			for _, part := range parts {
+				refs = append(refs, backend.ObjectPart{Ref: part.ObjectRef, Offset: part.WireOffset, Size: part.WireSize})
+				if part.WireOffset+part.WireSize > streamedSize {
+					streamedSize = part.WireOffset + part.WireSize
+				}
+			}
+			streamedRef, err = backend.ComposeObjectRef(refs)
+			if err != nil {
+				return err
+			}
+			streamedDeleteErr = s.Backend.Delete(ctx, streamedRef)
+		}
+	}
 	// 先清理临时文件；失败时保留会话，让下一轮维护仍能定位并重试，
 	// 避免留下无法追踪的磁盘垃圾。
 	if err := s.cleanupSession(task.ID); err != nil {
@@ -943,7 +1125,12 @@ func (s *Service) abortUpload(ctx context.Context, task store.UploadTask) error 
 				return liveErr
 			}
 			if file.Status == store.FileUploading && file.RefCount == 0 && live == 0 {
-				if err := store.DeleteFileRow(ctx, tx, task.Checksum); err != nil {
+				if streamedDeleteErr != nil && streamedRef != "" {
+					if err := store.MarkRegistrationFailed(ctx, tx, task.Checksum, streamedRef,
+						file.PanObjectName, streamedSize, s.Now()); err != nil {
+						return errors.Join(streamedDeleteErr, err)
+					}
+				} else if err := store.DeleteFileRow(ctx, tx, task.Checksum); err != nil {
 					return err
 				}
 			}
@@ -981,7 +1168,12 @@ func (s *Service) ownUploadTask(ctx context.Context, p auth.Principal, sessionID
 		return store.UploadTask{}, ErrNotFound
 	}
 	if time.Now().UTC().After(task.ExpiresAt) {
-		return store.UploadTask{}, fmt.Errorf("%w: 上传会话已过期", ErrNotFound)
+		// 分片完整并已入持久化收尾队列的任务不再按会话 TTL 过期；
+		// 后台处理完成后会删除会话并释放暂存空间与配额预留。
+		job, jobErr := store.GetUploadJob(ctx, s.DB.R(), sessionID)
+		if jobErr != nil || job.UserID != p.UserID() || (job.State != "queued" && job.State != "processing") {
+			return store.UploadTask{}, fmt.Errorf("%w: 上传会话已过期", ErrNotFound)
+		}
 	}
 	return task, nil
 }

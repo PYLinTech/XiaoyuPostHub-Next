@@ -92,6 +92,40 @@ func TestAdminListGroupsCarriesMailDomains(t *testing.T) {
 	}
 }
 
+func TestAdminSaveGroupPersistsResourceSchedulingPriority(t *testing.T) {
+	f := newInboundFixture(t)
+	ctx := context.Background()
+	admin := f.adminUser("root")
+
+	saved, err := f.svc.AdminSaveGroup(ctx, admin, SaveGroupRequest{
+		Name:                       "priority",
+		DisplayName:                "优先组",
+		ResourceSchedulingPriority: 12,
+	})
+	if err != nil {
+		t.Fatalf("创建带资源调度优先级的用户组失败: %v", err)
+	}
+	if saved.ResourceSchedulingPriority != 12 {
+		t.Fatalf("返回资源调度优先级应为 12，得 %d", saved.ResourceSchedulingPriority)
+	}
+
+	_, err = f.svc.AdminSaveGroup(ctx, admin, SaveGroupRequest{
+		Name:                       "priority",
+		DisplayName:                "优先组",
+		ResourceSchedulingPriority: 4,
+	})
+	if err != nil {
+		t.Fatalf("更新资源调度优先级失败: %v", err)
+	}
+	got, err := store.GetGroup(ctx, f.db.R(), "priority")
+	if err != nil {
+		t.Fatalf("读取用户组失败: %v", err)
+	}
+	if got.ResourceSchedulingPriority != 4 {
+		t.Fatalf("数据库资源调度优先级应为 4，得 %d", got.ResourceSchedulingPriority)
+	}
+}
+
 func TestAdminSaveGroupBindsMultipleMailDomains(t *testing.T) {
 	f := newInboundFixture(t)
 	ctx := context.Background()

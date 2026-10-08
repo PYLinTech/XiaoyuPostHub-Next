@@ -37,6 +37,7 @@ type MaintenanceReport struct {
 	// PurgedTrafficLogs / PurgedAuditLogs 是保留期清理删掉的行数。
 	PurgedTrafficLogs int `json:"purgedTrafficLogs"`
 	PurgedAuditLogs   int `json:"purgedAuditLogs"`
+	PrunedUploadJobs  int `json:"prunedUploadJobs"`
 	// Failures 是各环节的错误计数，用于判断"清理是否真的在推进"。
 	Failures int `json:"failures"`
 	// Skipped 为真表示上一轮清理尚未结束、本次触发被跳过。
@@ -244,15 +245,20 @@ func (s *Service) RunMaintenance(ctx context.Context) MaintenanceReport {
 			report.PurgedAuditLogs = int(n)
 		}
 	}
+	if n, err := store.DeleteOldUploadJobs(ctx, s.DB.W(), now-int64((30*24*time.Hour).Seconds()), maintenanceBatch); err != nil {
+		report.Failures++
+	} else {
+		report.PrunedUploadJobs = int(n)
+	}
 
 	// 维护没有操作者，审计里的 actor 记 0 表示系统自身；失败计数一并落库，
 	// 便于事后回答"这轮清理到底有没有在推进"。
 	_ = store.InsertAuditLog(ctx, s.DB.W(), store.AuditLog{
 		ActorType: "system",
 		Action:    "maintenance.run",
-		Detail: fmt.Sprintf("uploads=%d tickets=%d sessions=%d throttles=%d archived=%d mail=%d traffic=%d audit=%d failures=%d",
-			report.ExpiredUploads, report.ExpiredTickets, report.ExpiredSessions,
-			report.ExpiredThrottles, report.ArchiveFiles, report.PurgedMail,
+		Detail: fmt.Sprintf("uploads=%d uploadJobs=%d tickets=%d sessions=%d throttles=%d archived=%d mail=%d traffic=%d audit=%d failures=%d",
+			report.ExpiredUploads, report.PrunedUploadJobs, report.ExpiredTickets,
+			report.ExpiredSessions, report.ExpiredThrottles, report.ArchiveFiles, report.PurgedMail,
 			report.PurgedTrafficLogs, report.PurgedAuditLogs, report.Failures),
 		OccurredAt: now,
 	})
