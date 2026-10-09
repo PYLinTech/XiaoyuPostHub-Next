@@ -116,6 +116,8 @@ func Open(path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// 结构比对只记日志，不修复业务库，也不阻止启动。
+	db.logSchemaDifferences()
 	db.traffic = newTrafficBuffer(db, defaultTrafficFlushInterval, defaultTrafficBufferMax)
 	db.traffic.Start()
 	return db, nil
