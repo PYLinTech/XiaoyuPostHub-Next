@@ -131,7 +131,7 @@ async function buildHandle(
   await decryptAll(
     key,
     header,
-    (start, endExclusive) => fetchCipherPlanRange(plan, start, endExclusive - 1, options.signal),
+    (start, endExclusive, signal) => fetchCipherPlanRange(plan, start, endExclusive - 1, signal),
     (plain) => {
       parts.push(plain);
     },

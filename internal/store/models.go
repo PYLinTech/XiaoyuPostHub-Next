@@ -286,6 +286,7 @@ type UploadTask struct {
 	ID               string    `json:"id"`
 	UserID           int64     `json:"userId"`
 	Checksum         string    `json:"checksum"`
+	ExpectedChecksum string    `json:"expectedChecksum"`
 	SizePlain        int64     `json:"sizePlain"`
 	Streaming        bool      `json:"streaming"`
 	VolumeSize       int64     `json:"volumeSize"`

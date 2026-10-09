@@ -40,6 +40,25 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	writeData(w, result)
 }
 
+func (s *Server) handleUploadResolve(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireUser(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Checksum string `json:"checksum"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	node, err := s.Svc.ResolveUploadChecksum(r.Context(), p, pathParam(r, "session"), req.Checksum)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeData(w, map[string]any{"dedup": node != nil, "node": node})
+}
+
 // handleUploadChunk 接收一个分片，请求体是原始分片字节。
 //
 // 不做 JSON 包装：分片是二进制，包一层 base64 会让传输量膨胀三分之一，

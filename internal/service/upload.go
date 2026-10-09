@@ -72,7 +72,8 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		return InitUploadResult{}, err
 	}
 	checksum := strings.ToLower(strings.TrimSpace(req.Checksum))
-	if !checksumPattern.MatchString(checksum) {
+	checksumKnown := checksum != ""
+	if checksumKnown && !checksumPattern.MatchString(checksum) {
 		return InitUploadResult{}, fmt.Errorf("%w: 校验码必须是 64 位十六进制 SHA-256", ErrBadRequest)
 	}
 	if req.SizePlain < 0 {
@@ -142,7 +143,7 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 	if err != nil {
 		return InitUploadResult{}, err
 	}
-	if scope != settings.DedupOff {
+	if checksumKnown && scope != settings.DedupOff {
 		file, err := store.GetDedupCandidate(ctx, s.DB.R(), checksum, req.SizePlain)
 		if err == nil {
 			visible := true
@@ -220,11 +221,16 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 	if err != nil {
 		return InitUploadResult{}, err
 	}
+	placeholderChecksum := checksum
+	if !checksumKnown {
+		placeholderChecksum = "pending:" + sessionID
+	}
 
 	task := store.UploadTask{
 		ID:               sessionID,
 		UserID:           p.UserID(),
-		Checksum:         checksum,
+		Checksum:         placeholderChecksum,
+		ExpectedChecksum: checksum,
 		SizePlain:        req.SizePlain,
 		Streaming:        streaming,
 		VolumeSize:       uploadRT.MaxVolumeBytes,
@@ -299,7 +305,7 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 
 	// ④ 占位内容池并冻结加密参数。会话先落库后再占位，所有并发上传者
 	// 都能被 CountLiveUploadsByChecksum 看到，避免两个请求同时接管同一占位行。
-	if _, err := s.ensureContentPlaceholder(ctx, checksum, req.SizePlain, p.UserID()); err != nil {
+	if _, err := s.ensureContentPlaceholder(ctx, placeholderChecksum, req.SizePlain, p.UserID()); err != nil {
 		if abortErr := s.abortUpload(ctx, task); abortErr != nil {
 			return InitUploadResult{}, errors.Join(err, abortErr)
 		}
@@ -318,6 +324,164 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		ChunkTotal: total,
 		ExpiresAt:  task.ExpiresAt.Unix(),
 	}, nil
+}
+
+// ResolveUploadChecksum 在上传期间计算摘要后绑定期望值。命中秒传时撤销并清理
+// 临时会话，直接放置已有内容；未命中时为最终校验预留内容池主键。
+func (s *Service) ResolveUploadChecksum(ctx context.Context, p auth.Principal, sessionID, checksum string) (*store.Node, error) {
+	if err := auth.RequirePermission(p, perm.Upload); err != nil {
+		return nil, err
+	}
+	checksum = strings.ToLower(strings.TrimSpace(checksum))
+	if !checksumPattern.MatchString(checksum) {
+		return nil, fmt.Errorf("%w: 校验码必须是 64 位十六进制 SHA-256", ErrBadRequest)
+	}
+	task, err := s.ownUploadTask(ctx, p, sessionID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			status, found, statusErr := s.UploadJobStatusForUser(ctx, p, sessionID)
+			if statusErr == nil && found && status.State == "done" && status.Node != nil && status.Node.FileChecksum == checksum {
+				return status.Node, nil
+			}
+		}
+		return nil, err
+	}
+	if task.ExpectedChecksum != "" {
+		if task.ExpectedChecksum != checksum {
+			return nil, fmt.Errorf("%w: 上传会话已绑定不同的校验码", ErrConflict)
+		}
+		return nil, nil
+	}
+	if !strings.HasPrefix(task.Checksum, "pending:") {
+		// 兼容升级前创建的断点会话：其 checksum 已是真实值，只需把它
+		// 写入新字段，继续使用原占位行和加密参数。
+		if task.Checksum != checksum {
+			return nil, fmt.Errorf("%w: 上传会话已绑定不同的校验码", ErrConflict)
+		}
+		if err := store.SetUploadExpectedChecksum(ctx, s.DB.W(), task.ID, checksum); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	if scope, err := s.dedupScope(ctx); err != nil {
+		return nil, err
+	} else if scope != settings.DedupOff {
+		file, getErr := store.GetDedupCandidate(ctx, s.DB.R(), checksum, task.SizePlain)
+		if getErr == nil {
+			visible := true
+			if scope == settings.DedupGroup {
+				visible, err = store.ChecksumReferencedByGroup(ctx, s.DB.R(), checksum, p.GroupName())
+				if err != nil {
+					return nil, err
+				}
+			}
+			if visible {
+				return s.resolveDedupUpload(ctx, p, task, file)
+			}
+		} else if !errors.Is(getErr, store.ErrNotFound) {
+			return nil, getErr
+		}
+	}
+
+	// 用相同的加密材料预留真实摘要对应的内容池主键。超大文件的流式 worker
+	// 仍用会话临时主键加密已收卷，最后一卷则必须等 ExpectedChecksum 写入后才可处理。
+	placeholder, err := store.GetFile(ctx, s.DB.R(), task.Checksum)
+	if err != nil {
+		return nil, err
+	}
+	placeholder.Checksum = checksum
+	if _, err := s.ensureContentRecord(ctx, placeholder, func(tx store.Querier) error {
+		return store.SetUploadExpectedChecksum(ctx, tx, task.ID, checksum)
+	}); err != nil {
+		return nil, err
+	}
+	if task.Streaming && task.Complete() {
+		latest, err := s.ownUploadTask(ctx, p, task.ID)
+		if errors.Is(err, ErrNotFound) {
+			// 绑定后流式 worker 可能已经完成；客户端随后从收尾状态恢复结果。
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := s.queueStreamingUploadIfReady(ctx, latest); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+// resolveDedupUpload 原子登记复用节点与终态；配额沿用初始化预扣。
+// 同名冲突会回滚会话；成功结果持久化，响应丢失后也能恢复。
+func (s *Service) resolveDedupUpload(ctx context.Context, p auth.Principal, task store.UploadTask, file store.File) (*store.Node, error) {
+	var node store.Node
+	err := s.DB.InTx(ctx, func(tx store.Querier) error {
+		latest, err := store.GetUploadTask(ctx, tx, task.ID)
+		if err != nil {
+			return err
+		}
+		if latest.ExpectedChecksum != "" {
+			return ErrConflict
+		}
+		if job, err := store.GetUploadJob(ctx, tx, task.ID); err == nil {
+			if job.State != "receiving" && job.State != "queued" {
+				return fmt.Errorf("%w: 服务器已开始处理，暂时不能秒传", ErrConflict)
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		current, err := store.GetDedupCandidate(ctx, tx, file.Checksum, task.SizePlain)
+		if err != nil {
+			return err
+		}
+		if _, err := store.AddFileRef(ctx, tx, current.Checksum); err != nil {
+			return err
+		}
+		node, err = s.placeFileNodeTx(ctx, tx, p, task.TargetParentPath, task.TargetName, task.ConflictAction, current)
+		if err != nil {
+			return err
+		}
+		parts, err := store.ListUploadParts(ctx, tx, task.ID)
+		if err != nil {
+			return err
+		}
+		if len(parts) > 0 {
+			refs := make([]backend.ObjectPart, 0, len(parts))
+			var wireSize int64
+			for _, part := range parts {
+				refs = append(refs, backend.ObjectPart{Ref: part.ObjectRef, Offset: part.WireOffset, Size: part.WireSize})
+				wireSize = part.WireOffset + part.WireSize
+			}
+			ref, err := backend.ComposeObjectRef(refs)
+			if err != nil {
+				return err
+			}
+			// 保留定位符交给现有回收任务，远端清理失败也不会遗失已上传卷。
+			if err := store.MarkRegistrationFailed(ctx, tx, task.Checksum, ref, "", wireSize, s.Now()); err != nil {
+				return err
+			}
+		} else if err := store.DeleteFileRow(ctx, tx, task.Checksum); err != nil {
+			return err
+		}
+		if err := store.DeleteUploadTask(ctx, tx, task.ID); err != nil {
+			return err
+		}
+		result, err := json.Marshal(node)
+		if err != nil {
+			return err
+		}
+		return store.CompleteDedupUploadJob(ctx, tx, store.UploadJob{
+			SessionID: task.ID, UserID: task.UserID, TotalBytes: task.SizePlain,
+		}, string(result))
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.cleanupSession(task.ID); err != nil {
+		log.Printf("service: 秒传 %s 临时目录清理失败: %v", task.ID, err)
+	}
+	return &node, nil
 }
 
 // ensureContentPlaceholder 确保内容池中存在该内容的占位行，并返回带完整
@@ -343,11 +507,25 @@ func (s *Service) ensureContentPlaceholder(ctx context.Context, checksum string,
 	if err != nil {
 		return store.File{}, err
 	}
+	return s.ensureContentRecord(ctx, fresh, nil)
+}
+
+// ensureContentRecord 复用占位状态处置，并把摘要绑定与占位提交放在同一事务中。
+func (s *Service) ensureContentRecord(ctx context.Context, fresh store.File, bind func(store.Querier) error) (store.File, error) {
+	checksum := fresh.Checksum
 	// 远端删除拆成三段：事务内出计划 → 事务外删对象 → 事务内收尾。
 	// 计划与收尾之间行可能被并发请求推进（例如维护任务恰好 purge 了它），
 	// 因此收尾前重新决策，最多三轮。
 	for attempt := 0; attempt < 3; attempt++ {
-		plan, err := s.planContentPlaceholder(ctx, fresh)
+		var plan placeholderPlan
+		err := s.DB.InTx(ctx, func(tx store.Querier) error {
+			var err error
+			plan, err = s.planContentPlaceholderTx(ctx, tx, fresh)
+			if err != nil || plan.deleteRef != "" || bind == nil {
+				return err
+			}
+			return bind(tx)
+		})
 		if err != nil {
 			return store.File{}, err
 		}
@@ -380,56 +558,52 @@ type placeholderPlan struct {
 	deleteRef string
 }
 
-// planContentPlaceholder 在一个写事务内决策占位行的处置。除"删旧对象"
+// planContentPlaceholderTx 在一个写事务内决策占位行的处置。除"删旧对象"
 // 之外的变更都在这里落库，保证并发请求看到的状态是串行化的。
-func (s *Service) planContentPlaceholder(ctx context.Context, fresh store.File) (placeholderPlan, error) {
+func (s *Service) planContentPlaceholderTx(ctx context.Context, tx store.Querier, fresh store.File) (placeholderPlan, error) {
 	var plan placeholderPlan
-	err := s.DB.InTx(ctx, func(tx store.Querier) error {
-		created, err := store.InsertFilePlaceholder(ctx, tx, fresh)
-		if err != nil {
-			return err
-		}
-		if created {
-			plan.file = fresh
-			return nil
-		}
-		existing, err := store.GetFile(ctx, tx, fresh.Checksum)
-		if err != nil {
-			return err
-		}
-		switch existing.Status {
-		case store.FileUploading:
-			// 本请求的会话在进入这里之前已经落库，live 计数恒 ≥ 1，
-			// 因此正常流程不会走到"无活跃会话的接管"：僵死占位行由
-			// 本轮 abort 清理，下一轮 init 用全新参数重新占位。
-			return ErrBusy
-		case store.FileNormal:
-			// 秒传探测已经处理过正常对象；走到这里说明明文长度不一致或秒传作用域
-			// 判定不同，两者都属于数据异常，按占用处理。
-			return ErrBusy
-		case store.FileDisabled:
-			return fmt.Errorf("%w: 该内容已被拉黑，无法上传", ErrForbidden)
-		case store.FileArchive:
-			if existing.PanFileID != "" {
-				// 旧对象仍是唯一可定位的物理副本。先出事务删除远端并
-				// 清空定位符，成功后才允许重建占位；反过来先删数据库
-				// 会制造永远无法定位的孤儿。
-				plan.deleteRef = existing.PanFileID
-				return nil
-			}
-			return s.rebuildPlaceholder(ctx, tx, fresh, &plan)
-		case store.FilePurged:
-			// 远端对象已被真实删除，记录只剩审计价值；翻新为全新占位，
-			// 解除对该校验码的永久占用。
-			return s.rebuildPlaceholder(ctx, tx, fresh, &plan)
-		default:
-			return ErrBusy
-		}
-	})
+	created, err := store.InsertFilePlaceholder(ctx, tx, fresh)
 	if err != nil {
-		return placeholderPlan{}, err
+		return plan, err
 	}
-	return plan, nil
+	if created {
+		plan.file = fresh
+		return plan, nil
+	}
+	existing, err := store.GetFile(ctx, tx, fresh.Checksum)
+	if err != nil {
+		return plan, err
+	}
+	switch existing.Status {
+	case store.FileUploading:
+		// 本请求的会话在进入这里之前已经落库，live 计数恒 ≥ 1，
+		// 因此正常流程不会走到"无活跃会话的接管"：僵死占位行由
+		// 本轮 abort 清理，下一轮 init 用全新参数重新占位。
+		return plan, ErrBusy
+	case store.FileNormal:
+		// 秒传探测已经处理过正常对象；走到这里说明明文长度不一致或秒传作用域
+		// 判定不同，两者都属于数据异常，按占用处理。
+		return plan, ErrBusy
+	case store.FileDisabled:
+		return plan, fmt.Errorf("%w: 该内容已被拉黑，无法上传", ErrForbidden)
+	case store.FileArchive:
+		if existing.PanFileID != "" {
+			// 旧对象仍是唯一可定位的物理副本。先出事务删除远端并
+			// 清空定位符，成功后才允许重建占位；反过来先删数据库
+			// 会制造永远无法定位的孤儿。
+			plan.deleteRef = existing.PanFileID
+			return plan, nil
+		}
+		err := s.rebuildPlaceholder(ctx, tx, fresh, &plan)
+		return plan, err
+	case store.FilePurged:
+		// 远端对象已被真实删除，记录只剩审计价值；翻新为全新占位，
+		// 解除对该校验码的永久占用。
+		err := s.rebuildPlaceholder(ctx, tx, fresh, &plan)
+		return plan, err
+	default:
+		return plan, ErrBusy
+	}
 }
 
 // rebuildPlaceholder 删除失去物理对象的旧记录，并以全新加密参数重建占位。
@@ -689,7 +863,11 @@ func (s *Service) CompleteUpload(ctx context.Context, p auth.Principal, sessionI
 
 	// 明文哈希与声明不一致：客户端发来的内容不是它声称的那份。此时密文已经
 	// 生成但尚未上传，直接中止即可，不需要清理远端。
-	if !strings.EqualFold(plainSHA, task.Checksum) {
+	expectedChecksum := uploadExpectedChecksum(task)
+	if expectedChecksum == "" {
+		return store.Node{}, abort(fmt.Errorf("%w: 文件校验尚未完成", ErrBadRequest))
+	}
+	if !strings.EqualFold(plainSHA, expectedChecksum) {
 		return store.Node{}, abort(fmt.Errorf("%w: 明文校验码与声明不一致", ErrBadRequest))
 	}
 
@@ -729,13 +907,18 @@ func (s *Service) CompleteUpload(ctx context.Context, p auth.Principal, sessionI
 			if err := s.requireFolderTx(ctx, tx, p.UserID(), task.TargetParentPath); err != nil {
 				return err
 			}
-			if err := store.FinalizeFile(ctx, tx, task.Checksum, put.ObjectRef, put.objectPath, put.sizeWire); err != nil {
+			if err := store.FinalizeFile(ctx, tx, expectedChecksum, put.ObjectRef, put.objectPath, put.sizeWire); err != nil {
 				return err
 			}
-			if _, err := store.AddFileRef(ctx, tx, task.Checksum); err != nil {
+			if task.Checksum != expectedChecksum {
+				if err := store.DeleteFileRow(ctx, tx, task.Checksum); err != nil {
+					return err
+				}
+			}
+			if _, err := store.AddFileRef(ctx, tx, expectedChecksum); err != nil {
 				return err
 			}
-			file, err := store.GetFile(ctx, tx, task.Checksum)
+			file, err := store.GetFile(ctx, tx, expectedChecksum)
 			if err != nil {
 				return err
 			}
@@ -1107,6 +1290,14 @@ func (s *Service) abortUpload(ctx context.Context, task store.UploadTask) error 
 	}
 
 	return s.DB.InTx(ctx, func(tx store.Querier) error {
+		latest, err := store.GetUploadTask(ctx, tx, task.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		task = latest // 摘要可能在本次清理开始后才绑定，必须清理事务中的最新占位。
 		// 只有成功删除会话的调用拥有这笔预扣。并发收尾中后到的
 		// abort 会得到 ErrNotFound，不能删除共享内容池行或再次回退额度。
 		if err := store.DeleteUploadTask(ctx, tx, task.ID); err != nil {
@@ -1136,6 +1327,11 @@ func (s *Service) abortUpload(ctx context.Context, task store.UploadTask) error 
 			}
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return err
+		}
+		if task.ExpectedChecksum != "" && task.ExpectedChecksum != task.Checksum {
+			if err := store.DeleteFileRow(ctx, tx, task.ExpectedChecksum); err != nil {
+				return err
+			}
 		}
 
 		return s.releaseStorageQuotaQ(ctx, tx, task.UserID, task.SizePlain)

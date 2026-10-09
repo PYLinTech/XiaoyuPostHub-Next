@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -249,5 +250,44 @@ func TestParseContentRange(t *testing.T) {
 	}
 	if _, _, _, ok := parseContentRange("bytes 10-9/20"); ok {
 		t.Fatal("反向范围应被拒绝")
+	}
+}
+
+func TestHTTPRangeReaderReusesIgnoredRangeResponse(t *testing.T) {
+	payload := make([]byte, 2*rangeReadChunk+13)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	calls := 0
+	r := &httpRangeReader{
+		url: "https://cdn.example/object", size: -1,
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: http.StatusOK, ContentLength: -1,
+				Body: io.NopCloser(bytes.NewReader(payload)), Header: make(http.Header)}, nil
+		})},
+	}
+	defer r.Close()
+	first := make([]byte, 32)
+	if _, err := io.ReadFull(r, first); err != nil {
+		t.Fatal(err)
+	}
+	// 当前窗口内回退应复用缓冲，后续窗口仍从保留响应的正确位置读取。
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil || !bytes.Equal(got, payload) || calls != 1 {
+		t.Fatalf("sequential fallback must use one response: len=%d calls=%d err=%v", len(got), calls, err)
+	}
+	if _, err := r.Read(make([]byte, 1)); err != io.EOF || calls != 1 {
+		t.Fatalf("unknown-length EOF must not reopen: calls=%d err=%v", calls, err)
+	}
+	if _, err := r.Seek(100, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	got, err = io.ReadAll(r)
+	if err != nil || !bytes.Equal(got, payload[100:]) || calls != 2 {
+		t.Fatalf("seek must reopen from requested offset: len=%d calls=%d err=%v", len(got), calls, err)
 	}
 }

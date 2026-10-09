@@ -278,6 +278,17 @@ func CompleteUploadJobInTx(ctx context.Context, q Querier, sessionID, result str
 	return nil
 }
 
+// CompleteDedupUploadJob 持久化收片阶段的秒传结果，供重试和断点恢复复用。
+// 调用者必须在同一事务内确认任务尚未被 worker 领取。
+func CompleteDedupUploadJob(ctx context.Context, q Querier, job UploadJob, result string) error {
+	_, err := q.ExecContext(ctx, `INSERT INTO upload_jobs
+		(session_id, user_id, state, total_bytes, result_json, created_at, updated_at)
+		VALUES (?, ?, 'done', ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET state = 'done', error = '', result_json = excluded.result_json,
+		updated_at = excluded.updated_at`, job.SessionID, job.UserID, job.TotalBytes, result, Now(), Now())
+	return err
+}
+
 // ResetInterruptedUploadJobs 进程启动时重新排入上次中断的任务。
 func ResetInterruptedUploadJobs(ctx context.Context, q Querier) error {
 	if _, err := q.ExecContext(ctx, `UPDATE upload_jobs SET state = 'queued', updated_at = ?

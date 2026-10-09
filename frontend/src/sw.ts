@@ -152,12 +152,12 @@ async function handleStream(request: Request, session: StreamSession): Promise<R
         headers: { "Content-Range": `bytes */${total}` },
       });
     }
-    return respondRange(session, parsed.start, parsed.length);
+    return respondRange(session, parsed.start, parsed.length, request.signal);
   }
 
   // 无 Range 时必须给出完整内容（流式），而不是静默截断成一个块：
   // 截断会让播放器把残缺数据当成完整文件，用户看到的是一个能播但损坏的媒体。
-  return respondFull(session);
+  return respondFull(session, request.signal);
 }
 
 function baseHeaders(session: StreamSession, total: number): HeadersInit {
@@ -182,6 +182,7 @@ async function respondRange(
   session: StreamSession,
   start: number,
   length: number,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const end = start + length; // 不含
   const { first, last, start: cipherStart, end: cipherEnd } = chunkRange(session.header, start, length);
@@ -189,7 +190,7 @@ async function respondRange(
     return new Response(null, { status: 204 });
   }
 
-  const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1);
+  const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1, signal);
   const plain = await decryptCipherRange(
     session.key,
     session.header,
@@ -213,35 +214,57 @@ async function respondRange(
   return new Response(plain as unknown as BodyInit, { status: 206, headers });
 }
 
-async function respondFull(session: StreamSession): Promise<Response> {
+async function respondFull(session: StreamSession, requestSignal?: AbortSignal): Promise<Response> {
   const total = session.header.plainSize;
   const header = session.header;
   const key = session.key;
   const blockCount = header.blockCount;
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  if (requestSignal?.aborted) abort();
+  else requestSignal?.addEventListener("abort", abort, { once: true });
+  let first = 0;
+  const cleanup = (): void => requestSignal?.removeEventListener("abort", abort);
 
   const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
+    async pull(streamController) {
       try {
-        for (let first = 0; first < blockCount; first += BATCH_BLOCKS) {
-          const last = Math.min(first + BATCH_BLOCKS, blockCount) - 1;
-          const cipherStart = blockCipherOffset(header, first);
-          const cipherEnd = blockCipherOffset(header, last) + blockCipherLen(header, last);
-          const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1);
-          const from = first * header.blockSize;
-          const plain = await decryptCipherRange(
-            key,
-            header,
-            cipher,
-            { first, last, start: cipherStart, end: cipherEnd },
-            from,
-            Math.min(total, (last + 1) * header.blockSize) - from,
-          );
-          controller.enqueue(plain);
+        if (controller.signal.aborted) {
+          throw new DOMException("读取已取消", "AbortError");
         }
-        controller.close();
+        if (first >= blockCount) {
+          cleanup();
+          streamController.close();
+          return;
+        }
+        const batchFirst = first;
+        const last = Math.min(batchFirst + BATCH_BLOCKS, blockCount) - 1;
+        const cipherStart = blockCipherOffset(header, batchFirst);
+        const cipherEnd = blockCipherOffset(header, last) + blockCipherLen(header, last);
+        const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1, controller.signal);
+        const from = batchFirst * header.blockSize;
+        const plain = await decryptCipherRange(
+          key,
+          header,
+          cipher,
+          { first: batchFirst, last, start: cipherStart, end: cipherEnd },
+          from,
+          Math.min(total, (last + 1) * header.blockSize) - from,
+        );
+        first = last + 1;
+        streamController.enqueue(plain);
+        if (first >= blockCount) {
+          cleanup();
+          streamController.close();
+        }
       } catch (err) {
-        controller.error(err);
+        cleanup();
+        streamController.error(err);
       }
+    },
+    cancel() {
+      controller.abort();
+      cleanup();
     },
   });
 
@@ -305,10 +328,11 @@ function parseRange(header: string, total: number): ParsedRange {
  * 只带 Range 一个头：直链是跨域的，任何自定义头都会触发预检并被拒。
  * 同时校验实际收到的字节数——跨域下 Content-Length 未必可读，靠它判断会漏。
  */
-async function fetchCipherBytes(url: string, start: number, endInclusive: number): Promise<Uint8Array> {
+async function fetchCipherBytes(url: string, start: number, endInclusive: number, signal?: AbortSignal): Promise<Uint8Array> {
   const response = await fetch(url, {
     headers: { Range: `bytes=${start}-${endInclusive}` },
     cache: "no-store",
+    signal,
   });
   if (!response.ok && response.status !== 206) {
     throw new Error(`取密文失败：HTTP ${response.status}`);
@@ -325,20 +349,37 @@ async function fetchSessionCipherBytes(
   source: { cipherUrl: string; cipherParts?: Array<{ url: string; offset: number; size: number }> },
   start: number,
   endInclusive: number,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const endExclusive = endInclusive + 1;
   if (!source.cipherParts?.length) {
-    return fetchCipherBytes(source.cipherUrl, start, endInclusive);
+    return fetchCipherBytes(source.cipherUrl, start, endInclusive, signal);
   }
   const hits = source.cipherParts.filter((part) => part.offset < endExclusive && part.offset + part.size > start);
   if (!hits.length || hits[0].offset > start || hits[hits.length - 1].offset + hits[hits.length - 1].size < endExclusive) {
     throw new Error("分卷清单无法覆盖所请求的密文区间");
   }
-  const blocks = await Promise.all(hits.map((part) => {
-    const from = Math.max(start, part.offset);
-    const to = Math.min(endExclusive, part.offset + part.size);
-    return fetchCipherBytes(part.url, from - part.offset, to - part.offset - 1);
-  }));
+  if (hits.length === 1) {
+    const part = hits[0];
+    return fetchCipherBytes(part.url, start - part.offset, endInclusive - part.offset, signal);
+  }
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  let blocks: Uint8Array[];
+  try {
+    blocks = await Promise.all(hits.map((part) => {
+      const from = Math.max(start, part.offset);
+      const to = Math.min(endExclusive, part.offset + part.size);
+      return fetchCipherBytes(part.url, from - part.offset, to - part.offset - 1, controller.signal);
+    }));
+  } catch (err) {
+    controller.abort();
+    throw err;
+  } finally {
+    signal?.removeEventListener("abort", abort);
+  }
   const out = new Uint8Array(endExclusive - start);
   let offset = 0;
   for (const block of blocks) {

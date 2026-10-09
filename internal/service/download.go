@@ -676,6 +676,16 @@ type ServerStream struct {
 // 而这个尺寸只有拿到票据与文件记录后才知道。SW 播放未做 faststart 的 MP4
 // 时会请求尾部 moov，中转加密通道同样必须支持后缀式。
 func (s *Service) OpenServerStreamForActor(ctx context.Context, ticketID string, actor auth.Principal, rangeHeader string) (ServerStream, error) {
+	return s.serverStreamForActor(ctx, ticketID, actor, rangeHeader, true)
+}
+
+// HeadServerStreamForActor 返回与中转流相同的响应元数据，但不打开对象、不消费票据。
+// 浏览器和媒体元素会用 HEAD 探测长度；把它当 GET 会无谓读取整个大文件。
+func (s *Service) HeadServerStreamForActor(ctx context.Context, ticketID string, actor auth.Principal, rangeHeader string) (ServerStream, error) {
+	return s.serverStreamForActor(ctx, ticketID, actor, rangeHeader, false)
+}
+
+func (s *Service) serverStreamForActor(ctx context.Context, ticketID string, actor auth.Principal, rangeHeader string, consumeUse bool) (ServerStream, error) {
 	ticket, err := store.GetTicket(ctx, s.DB.R(), ticketID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -683,7 +693,7 @@ func (s *Service) OpenServerStreamForActor(ctx context.Context, ticketID string,
 		}
 		return ServerStream{}, err
 	}
-	if ticket.Revoked || time.Now().UTC().After(ticket.ExpiresAt) {
+	if ticket.Revoked || time.Now().UTC().After(ticket.ExpiresAt) || (ticket.MaxUses > 0 && ticket.UseCount >= ticket.MaxUses) {
 		return ServerStream{}, fmt.Errorf("%w: 票据已失效", ErrForbidden)
 	}
 	if err := s.authorizeTicketActor(ctx, ticket, actor); err != nil {
@@ -744,15 +754,17 @@ func (s *Service) OpenServerStreamForActor(ctx context.Context, ticketID string,
 		copy(decryptHdr.FileSalt[:], file.EncSalt)
 	}
 
-	// 在所有不会改变状态的校验通过后才消费票据次数。
-	consumed, err := store.ConsumeTicketUse(ctx, s.DB.W(), ticketID, s.Now())
-	if err != nil {
-		if errors.Is(err, store.ErrNoRowsAffected) {
-			return ServerStream{}, fmt.Errorf("%w: 票据已失效或已达使用上限", ErrForbidden)
+	// HEAD 只确认响应元数据，不应核销一次实际交付或预扣流量。
+	if consumeUse {
+		consumed, err := store.ConsumeTicketUse(ctx, s.DB.W(), ticketID, s.Now())
+		if err != nil {
+			if errors.Is(err, store.ErrNoRowsAffected) {
+				return ServerStream{}, fmt.Errorf("%w: 票据已失效或已达使用上限", ErrForbidden)
+			}
+			return ServerStream{}, err
 		}
-		return ServerStream{}, err
+		ticket = consumed
 	}
-	ticket = consumed
 
 	// MIME 是渲染层的修饰信息，查询失败不应让一次已经核销的交付整体失败：
 	// 降级为 octet-stream 并记日志，交付本身继续。
@@ -761,6 +773,11 @@ func (s *Service) OpenServerStreamForActor(ctx context.Context, ticketID string,
 		mimeType = mimeOf(name)
 	} else if !errors.Is(nameErr, store.ErrNotFound) {
 		log.Printf("service: 解析票据 %s 的交付类型失败，按 octet-stream 处理: %v", ticketID, nameErr)
+	}
+	if !consumeUse {
+		return ServerStream{Ticket: ticket, File: file, MimeType: mimeType,
+			ContentForm: contentForm, PlainSize: plainSize, CipherSize: cipherSize,
+			RangeRequested: rangeRequested, Offset: offset, Limit: limit}, nil
 	}
 
 	// 打开底层对象的公共闭包：密文区间已经是相对整个对象的绝对偏移

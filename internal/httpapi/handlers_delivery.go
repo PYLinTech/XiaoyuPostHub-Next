@@ -106,15 +106,24 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	// Range 解析在 service 层完成：后缀式区间需要票据口径下的对象总长度。
 	rangeHeader := strings.TrimSpace(r.Header.Get("Range"))
-	stream, err := s.Svc.OpenServerStreamForActor(r.Context(), ticketID, p, rangeHeader)
+	var stream service.ServerStream
+	var err error
+	headOnly := r.Method == http.MethodHead
+	if headOnly {
+		stream, err = s.Svc.HeadServerStreamForActor(r.Context(), ticketID, p, rangeHeader)
+	} else {
+		stream, err = s.Svc.OpenServerStreamForActor(r.Context(), ticketID, p, rangeHeader)
+	}
 	if err != nil {
 		// 区间不可满足的 416 映射在 errorStatus 里统一裁决，这里不再特判——
 		// 特判会让这条路径绕过 detailText，把完整哨兵链直接送给前端。
 		fail(w, err)
 		return
 	}
-	defer stream.Reader.Close()
 	reader, ticket, file := stream.Reader, stream.Ticket, stream.File
+	if reader != nil {
+		defer reader.Close()
+	}
 
 	w.Header().Set(service.HeaderContentForm, stream.ContentForm)
 	w.Header().Set(service.HeaderContentSHA256, file.Checksum)
@@ -143,6 +152,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", stream.Offset, end, size))
 		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 		w.WriteHeader(http.StatusPartialContent)
+	}
+	if headOnly {
+		return
 	}
 
 	written, copyErr := io.Copy(w, reader)

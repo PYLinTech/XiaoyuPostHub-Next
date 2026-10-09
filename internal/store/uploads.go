@@ -8,14 +8,14 @@ import (
 	"strings"
 )
 
-const uploadTaskColumns = `id, user_id, checksum, size_plain, streaming, volume_size, chunk_size, chunk_total, received_mask,
+const uploadTaskColumns = `id, user_id, checksum, expected_checksum, size_plain, streaming, volume_size, chunk_size, chunk_total, received_mask,
 	target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at`
 
 func scanUploadTask(row rowScanner) (UploadTask, error) {
 	var t UploadTask
 	var expires int64
 	var streaming int
-	err := row.Scan(&t.ID, &t.UserID, &t.Checksum, &t.SizePlain, &streaming, &t.VolumeSize, &t.ChunkSize, &t.ChunkTotal,
+	err := row.Scan(&t.ID, &t.UserID, &t.Checksum, &t.ExpectedChecksum, &t.SizePlain, &streaming, &t.VolumeSize, &t.ChunkSize, &t.ChunkTotal,
 		&t.ReceivedMask, &t.TargetParentPath, &t.TargetName, &t.ConflictAction,
 		&expires, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
@@ -49,19 +49,19 @@ func createUploadTask(ctx context.Context, q Querier, t UploadTask, limit int64)
 		t.CreatedAt = now
 	}
 	query := `
-		INSERT INTO upload_tasks (id, user_id, checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
+		INSERT INTO upload_tasks (id, user_id, checksum, expected_checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
 			received_mask, target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	args := []any{
-		t.ID, t.UserID, t.Checksum, t.SizePlain, boolToInt(t.Streaming), t.VolumeSize, t.ChunkSize, t.ChunkTotal,
+		t.ID, t.UserID, t.Checksum, t.ExpectedChecksum, t.SizePlain, boolToInt(t.Streaming), t.VolumeSize, t.ChunkSize, t.ChunkTotal,
 		t.ReceivedMask, t.TargetParentPath, t.TargetName, t.ConflictAction,
 		FromTime(t.ExpiresAt), t.CreatedAt, now,
 	}
 	if limit > 0 {
 		query = `
-			INSERT INTO upload_tasks (id, user_id, checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
+			INSERT INTO upload_tasks (id, user_id, checksum, expected_checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
 				received_mask, target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at)
-			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			WHERE (SELECT COUNT(*) FROM upload_tasks WHERE user_id = ?) < ?`
 		args = append(args, t.UserID, limit)
 	}
@@ -95,6 +95,19 @@ func GetUploadTask(ctx context.Context, q Querier, id string) (UploadTask, error
 		return UploadTask{}, fmt.Errorf("读取上传会话失败: %w", err)
 	}
 	return t, nil
+}
+
+// SetUploadExpectedChecksum 绑定客户端在并行收片期间算出的摘要；同一会话只允许绑定一次。
+func SetUploadExpectedChecksum(ctx context.Context, q Querier, id, checksum string) error {
+	res, err := q.ExecContext(ctx, `UPDATE upload_tasks SET expected_checksum = ?, updated_at = ?
+		WHERE id = ? AND (expected_checksum = '' OR expected_checksum = ?)`, checksum, Now(), id, checksum)
+	if err != nil {
+		return fmt.Errorf("保存上传校验码失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: 上传会话校验码已绑定或会话不存在", ErrConflict)
+	}
+	return nil
 }
 
 // MarkChunkReceived 置位某个分片并返回置位后的会话。
@@ -162,8 +175,8 @@ func DeleteUploadTask(ctx context.Context, q Querier, id string) error {
 func CountLiveUploadsByChecksum(ctx context.Context, q Querier, checksum string, now int64) (int64, error) {
 	var n int64
 	if err := q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM upload_tasks WHERE checksum = ? AND expires_at > ?`,
-		checksum, now).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM upload_tasks WHERE (checksum = ? OR expected_checksum = ?) AND expires_at > ?`,
+		checksum, checksum, now).Scan(&n); err != nil {
 		return 0, fmt.Errorf("统计有效上传会话失败: %w", err)
 	}
 	return n, nil

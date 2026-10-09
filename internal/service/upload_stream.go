@@ -35,6 +35,10 @@ func (s *Service) queueStreamingUploadIfReady(ctx context.Context, task store.Up
 	if !streamWindowReady(task, state.NextPlainOffset, task.VolumeSize, s.BlockSize(ctx)) {
 		return nil
 	}
+	if streamFinalWindowWaitingForChecksum(task, state.NextPlainOffset, task.VolumeSize, s.BlockSize(ctx)) {
+		// 最后一卷要用完整摘要做服务端交叉校验，必须等前端哈希完成并绑定摘要。
+		return nil
+	}
 	return s.DB.InTx(ctx, func(tx store.Querier) error {
 		return store.QueueReceivingUploadJob(ctx, tx, task.ID)
 	})
@@ -100,6 +104,23 @@ func streamWindowReady(task store.UploadTask, offset, maxVolume, blockSize int64
 	return true
 }
 
+func uploadExpectedChecksum(task store.UploadTask) string {
+	if task.ExpectedChecksum != "" {
+		return task.ExpectedChecksum
+	}
+	if !strings.HasPrefix(task.Checksum, "pending:") {
+		return task.Checksum
+	}
+	return ""
+}
+
+func streamFinalWindowWaitingForChecksum(task store.UploadTask, offset, maxVolume, blockSize int64) bool {
+	if !task.Complete() || uploadExpectedChecksum(task) != "" || offset < 0 || offset > task.SizePlain {
+		return false
+	}
+	return streamWindowSize(task, maxVolume, blockSize) >= task.SizePlain-offset
+}
+
 // processStreamingUploadWindow 每次只处理一卷，处理后将任务重新排队或退回收片态，
 // 使超大文件不会独占 worker，也不会把全部明文或密文堆在服务器暂存盘。
 func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Principal, task store.UploadTask) error {
@@ -120,6 +141,11 @@ func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Princ
 				_, err := tx.ExecContext(ctx, `UPDATE upload_jobs SET state = 'queued', updated_at = ? WHERE session_id = ? AND state = 'processing'`, store.Now(), task.ID)
 				return err
 			}
+			return store.SetUploadJobReceiving(ctx, tx, task.ID)
+		})
+	}
+	if streamFinalWindowWaitingForChecksum(task, state.NextPlainOffset, task.VolumeSize, s.BlockSize(ctx)) {
+		return s.DB.InTx(ctx, func(tx store.Querier) error {
 			return store.SetUploadJobReceiving(ctx, tx, task.ID)
 		})
 	}
@@ -200,9 +226,15 @@ func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Princ
 		PlainSize: plainSize, WireOffset: wireOffset, WireSize: info.Size(), CipherMD5: cipherMD5,
 	}
 	final := state.NextPlainOffset+plainSize == task.SizePlain
-	if final && !strings.EqualFold(plainDigest, task.Checksum) {
-		deleteErr := s.Backend.Delete(ctx, put.ObjectRef)
-		return errors.Join(fmt.Errorf("%w: 明文校验码与声明不一致", ErrBadRequest), deleteErr)
+	expectedChecksum := uploadExpectedChecksum(task)
+	if final {
+		if expectedChecksum == "" {
+			return errors.Join(fmt.Errorf("%w: 文件校验尚未完成", ErrBadRequest), s.Backend.Delete(ctx, put.ObjectRef))
+		}
+		if !strings.EqualFold(plainDigest, expectedChecksum) {
+			deleteErr := s.Backend.Delete(ctx, put.ObjectRef)
+			return errors.Join(fmt.Errorf("%w: 明文校验码与声明不一致", ErrBadRequest), deleteErr)
+		}
 	}
 	if err := cipherFile.Close(); err != nil {
 		return errors.Join(fmt.Errorf("关闭密文卷失败: %w", err), s.Backend.Delete(ctx, put.ObjectRef))
@@ -244,13 +276,18 @@ func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Princ
 			if err := s.requireFolderTx(ctx, tx, p.UserID(), task.TargetParentPath); err != nil {
 				return err
 			}
-			if err := store.FinalizeFile(ctx, tx, task.Checksum, ref, panDir+"/"+panName, totalWire); err != nil {
+			if err := store.FinalizeFile(ctx, tx, expectedChecksum, ref, panDir+"/"+panName, totalWire); err != nil {
 				return err
 			}
-			if _, err := store.AddFileRef(ctx, tx, task.Checksum); err != nil {
+			if task.Checksum != expectedChecksum {
+				if err := store.DeleteFileRow(ctx, tx, task.Checksum); err != nil {
+					return err
+				}
+			}
+			if _, err := store.AddFileRef(ctx, tx, expectedChecksum); err != nil {
 				return err
 			}
-			file, err := store.GetFile(ctx, tx, task.Checksum)
+			file, err := store.GetFile(ctx, tx, expectedChecksum)
 			if err != nil {
 				return err
 			}

@@ -38,6 +38,7 @@ func (s *Server) routes() http.Handler {
 
 	// ---- 上传 ----
 	mux.HandleFunc("POST /api/upload/init", s.handleUploadInit)
+	mux.HandleFunc("POST /api/upload/{session}/resolve", s.handleUploadResolve)
 	mux.HandleFunc("PUT /api/upload/{session}/chunk/{index}", s.handleUploadChunk)
 	mux.HandleFunc("POST /api/upload/{session}/complete", s.handleUploadComplete)
 	mux.HandleFunc("GET /api/upload/{session}", s.handleUploadStatus)

@@ -43,6 +43,9 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 			if taskErr != nil {
 				return UploadJobStatus{}, taskErr
 			}
+			if uploadExpectedChecksum(task) == "" {
+				return UploadJobStatus{}, fmt.Errorf("%w: 文件校验尚未完成", ErrConflict)
+			}
 			if !task.Complete() {
 				return UploadJobStatus{}, fmt.Errorf("%w: 分片尚未接收完整", ErrBadRequest)
 			}
@@ -61,6 +64,9 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 	task, err := s.ownUploadTask(ctx, p, sessionID)
 	if err != nil {
 		return UploadJobStatus{}, err
+	}
+	if uploadExpectedChecksum(task) == "" {
+		return UploadJobStatus{}, fmt.Errorf("%w: 文件校验尚未完成", ErrConflict)
 	}
 	if !task.Complete() {
 		return UploadJobStatus{}, fmt.Errorf("%w: 分片尚未接收完整", ErrBadRequest)
@@ -96,7 +102,7 @@ func (s *Service) UploadJobStatusForUser(ctx context.Context, p auth.Principal, 
 		return UploadJobStatus{}, false, ErrNotFound
 	}
 	if task, taskErr := store.GetUploadTask(ctx, s.DB.R(), sessionID); taskErr == nil &&
-		((!task.Complete() && job.State != "error") || job.State == "receiving") {
+		(((!task.Complete() || uploadExpectedChecksum(task) == "") && job.State != "error") || job.State == "receiving") {
 		// 大文件可能一边接收后续分片、一边后台处理已收齐的卷；恢复客户端
 		// 必须继续发送缺失块，不能把中间卷状态误当成最终收尾。
 		return UploadJobStatus{}, false, nil

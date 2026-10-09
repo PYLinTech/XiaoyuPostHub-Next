@@ -6,16 +6,15 @@ import { isAbortError } from "@/lib/async";
 
 // 分片上传编排。
 //
-// 后端把"内容"与"引用"分得很开：内容池按明文 SHA-256 去重，节点是用户自己的
-// 逻辑路径。因此上传的入口动作是先算校验码——它决定了能否秒传，也决定了
-// 断点续传能否找回原来的会话。
+// 内容摘要与逻辑路径分离。新会话先开始暂存分片，摘要在后台并行计算；摘要
+// 命中已有内容时撤销暂存会话并立即返回，未命中时再绑定摘要并提交收尾任务。
 
 export interface UploadProgressInfo {
   fileName: string;
   /** 当前阶段已处理字节数；前端只在传输阶段展示字节计数。 */
   sent: number;
   total: number;
-  /** 当前阶段进度；服务器收尾阶段未知时为 null，显示不确定态而不是虚假的 100%。 */
+  /** 哈希与传输并行时表示两项客户端工作的合成进度；服务器收尾阶段为 null。 */
   ratio: number | null;
   phase: "hashing" | "uploading" | "finishing" | "done";
   message: string;
@@ -25,7 +24,7 @@ export interface UploadProgressInfo {
 
 interface UploadOutcome {
   node: Node;
-  /** true 表示服务端已有同内容对象，本次没有真正传输数据。 */
+  /** true 表示复用服务端已有对象；并行哈希期间可能已发送部分分片。 */
   dedup: boolean;
 }
 
@@ -44,159 +43,249 @@ interface StoredSession {
   sessionId: string;
   checksum: string;
   savedAt: number;
+  parentPath?: string;
+  fileName?: string;
+  fileSize?: number;
+  lastModified?: number;
 }
 
 const SESSION_PREFIX = "xph.upload.";
 /** 会话有效期短于服务端的过期时间，避免拿着已经失效的会话去续传。 */
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
+const CLIENT_WORK_PROGRESS = 0.75;
+const SERVER_FINALIZE_PROGRESS = 0.24;
 
 export async function uploadFile(file: File, options: UploadOptions): Promise<UploadOutcome> {
   const report = options.onProgress ?? (() => {});
   const total = file.size;
-
-  report({
-    fileName: file.name,
-    sent: 0,
-    total,
-    ratio: 0,
-    phase: "hashing",
-    message: "正在计算校验码",
-  });
-  const checksum = await hashFile(file, options.signal, (processed) => {
-    const ratio = total > 0 ? processed / total : 1;
+  const hashController = new AbortController();
+  const chunksController = new AbortController();
+  const hashSignal = combineSignals(options.signal, hashController.signal);
+  const signal = combineSignals(options.signal, chunksController.signal);
+  try {
+    let hashRatio = 0;
+    let checksum = "";
+    let hashDone = false;
+    let transferStarted = false;
+    let transferSent = 0;
     report({
       fileName: file.name,
-      sent: processed,
+      sent: 0,
       total,
-      ratio,
+      ratio: 0,
       phase: "hashing",
-      message: `正在校验 ${Math.round(ratio * 100)}%`,
+      message: "正在计算校验码",
     });
-  });
-
-  const resumed = await tryResume(checksum, options.parentPath, file.name);
-  let session: InitUploadResult;
-  if (resumed) {
-    session = resumed;
-  } else {
-    session = await uploadApi.init({
-      checksum,
+    // 本地摘要与临时会话初始化同时启动，避免哈希阶段空等网络请求。
+    const hashPromise = hashFile(file, hashSignal, (processed) => {
+      hashRatio = total > 0 ? processed / total : 1;
+      const transferRatio = total > 0 ? transferSent / total : 0;
+      report({
+        fileName: file.name,
+        sent: transferStarted ? transferSent : processed,
+        total,
+        ratio: Math.min(0.99, CLIENT_WORK_PROGRESS * (hashRatio + transferRatio) / 2),
+        phase: transferStarted ? "uploading" : "hashing",
+        message: transferStarted
+          ? `正在发送 ${Math.round(Math.min(0.99, transferSent / Math.max(total, 1)) * 100)}%，校验 ${Math.round(hashRatio * 100)}%`
+          : `正在校验 ${Math.round(hashRatio * 100)}%`,
+      });
+    }).then((value) => {
+      checksum = value;
+      hashDone = true;
+      hashRatio = 1;
+      return value;
+    });
+    // 会话初始化可能比本地哈希更慢，提前挂起 rejection handler 避免短暂的未处理拒绝。
+    void hashPromise.catch(() => {});
+    const initSession = () => uploadApi.init({
+      checksum: hashDone ? checksum : undefined,
       sizePlain: total,
       parentPath: options.parentPath,
       name: file.name,
       conflictAction: options.conflictAction ?? "rename",
     });
-  }
-
-  if (session.dedup && session.node) {
-    report({
-      fileName: file.name,
-      sent: total,
-      total,
-      ratio: 1,
-      phase: "done",
-      message: "已秒传完成",
-    });
-    return { node: session.node, dedup: true };
-  }
-
-  if (session.completedNode) {
-    report({ fileName: file.name, sent: total, total, ratio: 1, phase: "done", message: "已完成", canCancel: false });
-    forgetSession(checksum, options.parentPath, file.name);
-    return { node: session.completedNode, dedup: false };
-  }
-
-  const sessionId = session.sessionId;
-  const chunkSize = session.chunkSize ?? 0;
-  const chunkTotal = session.chunkTotal ?? 0;
-  if (!sessionId) {
-    throw new Error("上传会话缺少标识");
-  }
-
-  options.onSessionId?.(sessionId);
-  rememberSession(checksum, options.parentPath, file.name, sessionId);
-
-  if (session.finalizing) {
-    report({
-      fileName: file.name,
-      sent: total,
-      total,
-      ratio: null,
-      phase: "finishing",
-      message: session.jobState === "queued" ? "等待服务器队列处理" : "服务器正在校验、加密并保存",
-      canCancel: session.jobState === "queued",
-    });
-    const node = await waitForUploadJob(sessionId, file, report, options.signal);
-    forgetSession(checksum, options.parentPath, file.name);
-    return { node, dedup: false };
-  }
-
-  if (chunkSize <= 0 || chunkTotal <= 0) {
-    // 空文件不会产生分片：服务端在 init 阶段就已经把节点建好了。
-    if (session.node) {
-      return { node: session.node, dedup: false };
+    let session: InitUploadResult;
+    // 已有断点会话时先算摘要确认本地文件身份，再安全续传；新上传则立即建会话，
+    // 哈希和分片网络传输并行进行。
+    if (hasStoredSession(options.parentPath, file.name)) {
+      checksum = await hashPromise;
+      const resumed = await tryResume(checksum, options.parentPath, file);
+      session = resumed ?? await initSession();
+    } else {
+      session = await initSession();
     }
-    throw new Error("上传会话缺少分片计划");
-  }
-
-  const pending = new Set<number>();
-  for (let i = 0; i < chunkTotal; i++) {
-    pending.add(i);
-  }
-  for (const index of session.received ?? []) {
-    pending.delete(index);
-  }
-
-  const confirmed = new Set<number>();
-  for (let i = 0; i < chunkTotal; i++) if (!pending.has(i)) confirmed.add(i);
-  const inFlight = new Map<number, number>();
-  const chunkLength = (index: number) => Math.min(chunkSize, total - index * chunkSize);
-  const reportTransfer = () => {
-    let sent = 0;
-    for (const index of confirmed) sent += chunkLength(index);
-    for (const [index, loaded] of inFlight) {
-      if (!confirmed.has(index)) sent += Math.min(chunkLength(index), loaded);
+    if (session.dedup && session.node) {
+      report({ fileName: file.name, sent: total, total, ratio: 1, phase: "done", message: "已秒传完成" });
+      return { node: session.node, dedup: true };
     }
-    sent = Math.min(total, sent);
-    report({
-      fileName: file.name,
-      sent,
-      total,
-      ratio: total > 0 ? sent / total : 1,
-      phase: "uploading",
-      message: `正在发送 ${Math.min(100, Math.round((sent / Math.max(total, 1)) * 100))}%`,
-    });
-  };
-  reportTransfer();
 
-  const concurrency = Math.max(1, options.concurrency ?? 3);
-  const queue = [...pending];
+    if (session.completedNode) {
+      report({ fileName: file.name, sent: total, total, ratio: 1, phase: "done", message: "已完成", canCancel: false });
+      forgetSession(checksum, options.parentPath, file, session.sessionId);
+      return { node: session.completedNode, dedup: false };
+    }
 
-  const pump = async (): Promise<void> => {
-    for (;;) {
-      if (options.signal?.aborted) {
-        throw new DOMException("已取消", "AbortError");
-      }
-      const index = queue.shift();
-      if (index === undefined) {
-        return;
-      }
-      const start = index * chunkSize;
-      const end = Math.min(start + chunkSize, total);
-      const slice = file.slice(start, end);
-      await putChunkWithRetry(sessionId, index, slice, options.signal, (loaded) => {
-        inFlight.set(index, loaded);
-        reportTransfer();
+    const sessionId = session.sessionId;
+    const chunkSize = session.chunkSize ?? 0;
+    const chunkTotal = session.chunkTotal ?? 0;
+    if (!sessionId) {
+      throw new Error("上传会话缺少标识");
+    }
+
+    options.onSessionId?.(sessionId);
+    rememberSession(checksum, options.parentPath, file, sessionId);
+    if (signal.aborted) {
+      await uploadApi.cancel(sessionId).catch(() => {});
+      forgetSession(checksum, options.parentPath, file, sessionId);
+      throw new DOMException("已取消", "AbortError");
+    }
+    if (session.finalizing) {
+      report({
+        fileName: file.name,
+        sent: total,
+        total,
+        ratio: null,
+        phase: "finishing",
+        message: session.jobState === "queued" ? "等待服务器队列处理" : "服务器正在校验、加密并保存",
+        canCancel: session.jobState === "queued",
       });
-      inFlight.delete(index);
-      confirmed.add(index);
-      reportTransfer();
+      const node = await waitForUploadJob(sessionId, file, report, options.signal);
+      forgetSession(checksum, options.parentPath, file, sessionId);
+      return { node, dedup: false };
     }
-  };
 
-  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, pump));
+    if (chunkSize <= 0 || (chunkTotal <= 0 && total > 0)) {
+      // 空文件没有分片，但仍需绑定 SHA-256 并走服务器收尾流程。
+      if (session.node) {
+        return { node: session.node, dedup: false };
+      }
+      throw new Error("上传会话缺少分片计划");
+    }
 
-  try {
+    const pending = new Set<number>();
+    for (let i = 0; i < chunkTotal; i++) {
+      pending.add(i);
+    }
+    for (const index of session.received ?? []) {
+      pending.delete(index);
+    }
+
+    const inFlight = new Map<number, number>();
+    const chunkLength = (index: number) => Math.min(chunkSize, total - index * chunkSize);
+    let confirmedBytes = 0;
+    for (let i = 0; i < chunkTotal; i++) if (!pending.has(i)) confirmedBytes += chunkLength(i);
+    const reportTransfer = () => {
+      let sent = confirmedBytes;
+      for (const [index, loaded] of inFlight) sent += Math.min(chunkLength(index), loaded);
+      sent = Math.min(total, sent);
+      transferSent = sent;
+      report({
+        fileName: file.name,
+        sent,
+        total,
+        ratio: Math.min(0.99, CLIENT_WORK_PROGRESS * (hashRatio + (total > 0 ? sent / total : 0)) / 2),
+        phase: "uploading",
+        message: hashDone
+          ? `校验完成，正在发送 ${Math.min(99, Math.round((sent / Math.max(total, 1)) * 100))}%`
+          : `正在发送 ${Math.min(99, Math.round((sent / Math.max(total, 1)) * 100))}%，校验 ${Math.round(hashRatio * 100)}%`,
+      });
+    };
+    transferStarted = true;
+    reportTransfer();
+
+    const concurrency = Math.max(1, options.concurrency ?? 3);
+    const queue = [...pending];
+    let nextChunk = 0;
+
+    const pump = async (): Promise<void> => {
+      for (;;) {
+        if (signal.aborted) {
+          throw new DOMException("已取消", "AbortError");
+        }
+        const index = queue[nextChunk++];
+        if (index === undefined) {
+          return;
+        }
+        const start = index * chunkSize;
+        const end = Math.min(start + chunkSize, total);
+        const slice = file.slice(start, end);
+        await putChunkWithRetry(sessionId, index, slice, signal, (loaded) => {
+          inFlight.set(index, Math.max(inFlight.get(index) ?? 0, loaded));
+          reportTransfer();
+        });
+        inFlight.delete(index);
+        confirmedBytes += chunkLength(index);
+        reportTransfer();
+      }
+    };
+
+    let transferFailed = false;
+    const handleClientWorkFailure = async (error: unknown): Promise<never> => {
+      chunksController.abort();
+      hashController.abort();
+      const permanentRejection = error instanceof ApiError &&
+        error.status >= 400 && error.status < 500 && error.status !== 429;
+      if (options.signal?.aborted || !transferFailed || permanentRejection) {
+        if (!options.signal?.aborted) await uploadApi.cancel(sessionId).catch(() => {});
+        forgetSession(checksum, options.parentPath, file, sessionId);
+      }
+      throw error;
+    };
+    const transferPromise = Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, pump)).catch((error) => {
+      transferFailed = true;
+      chunksController.abort();
+      throw error;
+    });
+    void transferPromise.catch(() => {});
+    const transferFailure = transferPromise.then(() => new Promise<never>(() => {}));
+
+    try {
+      checksum = await Promise.race([hashPromise, transferFailure]);
+      hashRatio = 1;
+      rememberSession(checksum, options.parentPath, file, sessionId);
+      reportTransfer();
+    } catch (error) {
+      await handleClientWorkFailure(error);
+    }
+
+    let resolveResult: { dedup: boolean; node?: Node | null };
+    let delay = 250;
+    const resolveDeadline = Date.now() + 60_000;
+    try {
+      for (;;) {
+        try {
+          resolveResult = await uploadApi.resolve(sessionId, checksum, options.signal);
+          break;
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.status !== 409 || options.signal?.aborted || Date.now() >= resolveDeadline) {
+            throw error;
+          }
+          await sleep(delay, options.signal);
+          delay = Math.min(2000, Math.round(delay * 1.5));
+        }
+      }
+    } catch (error) {
+      // 摘要绑定失败时停掉剩余分片，避免 UI 已报错但仍持续占用带宽。
+      // 会话和已收分片保留，用户重试时可从断点继续。
+      chunksController.abort();
+      throw error;
+    }
+
+    if (resolveResult.dedup && resolveResult.node) {
+      chunksController.abort();
+      void transferPromise.catch(() => {});
+      forgetSession(checksum, options.parentPath, file, sessionId);
+      report({ fileName: file.name, sent: total, total, ratio: 1, phase: "done", message: "已秒传完成", canCancel: false });
+      return { node: resolveResult.node, dedup: true };
+    }
+
+    try {
+      await transferPromise;
+    } catch (error) {
+      await handleClientWorkFailure(error);
+    }
+
     report({
       fileName: file.name,
       sent: total,
@@ -218,7 +307,7 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
     const node = initial.state === "done" && initial.node
       ? initial.node
       : await waitForUploadJob(sessionId, file, report, options.signal, initial);
-    forgetSession(checksum, options.parentPath, file.name);
+    forgetSession(checksum, options.parentPath, file, sessionId);
     report({
       fileName: file.name,
       sent: total,
@@ -229,10 +318,49 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
       canCancel: false,
     });
     return { node, dedup: false };
-  } catch (err) {
-    // 收尾失败时保留会话标识：若任务仍有效，下次可从状态接口恢复或重试入队。
-    throw err;
+  } finally {
+    // 每条退出路径都停止后台工作，并解除兼容实现中的父信号监听。
+    hashController.abort();
+    chunksController.abort();
   }
+}
+
+function combineSignals(parent: AbortSignal | undefined, local: AbortSignal): AbortSignal {
+  if (!parent) return local;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([parent, local]);
+  const controller = new AbortController();
+  const cleanup = () => {
+    parent.removeEventListener("abort", abort);
+    local.removeEventListener("abort", abort);
+  };
+  const abort = () => {
+    cleanup();
+    controller.abort();
+  };
+  if (parent.aborted || local.aborted) abort();
+  else {
+    parent.addEventListener("abort", abort, { once: true });
+    local.addEventListener("abort", abort, { once: true });
+  }
+  return controller.signal;
+}
+
+function hasStoredSession(parentPath: string, fileName: string): boolean {
+  try {
+    const suffix = `|${parentPath}|${fileName}`;
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(SESSION_PREFIX)) continue;
+      const record = parseStoredSession(localStorage.getItem(key));
+      if (!isStoredSessionValid(record)) continue;
+      if (key.endsWith(suffix)) return true; // 兼容旧版摘要键
+      if (key.startsWith(`${SESSION_PREFIX}session.`) &&
+          record.parentPath === parentPath && record.fileName === fileName) return true;
+    }
+  } catch {
+    // 禁用 localStorage 时按新会话上传。
+  }
+  return false;
 }
 
 /** 请求服务端取消尚未开始处理的上传任务。 */
@@ -256,16 +384,16 @@ export async function cancelUpload(sessionId: string): Promise<boolean> {
 async function tryResume(
   checksum: string,
   parentPath: string,
-  fileName: string,
+  file: File,
 ): Promise<InitUploadResult | null> {
-  const stored = readSession(checksum, parentPath, fileName);
+  const stored = readSession(checksum, parentPath, file);
   if (!stored) {
     return null;
   }
   try {
     const progress = await uploadApi.status(stored.sessionId);
     if (progress.state === "error") {
-      forgetSession(checksum, parentPath, fileName);
+      forgetSession(checksum, parentPath, file, stored.sessionId);
       return null;
     }
     if (progress.state === "done" && progress.node) {
@@ -289,7 +417,7 @@ async function tryResume(
     };
   } catch (err) {
     if (err instanceof ApiError && (err.status === 404 || err.status === 403)) {
-      forgetSession(checksum, parentPath, fileName);
+      forgetSession(checksum, parentPath, file, stored.sessionId);
       return null;
     }
     throw err;
@@ -337,6 +465,12 @@ async function waitForUploadJob(
 
 function uploadJobRatio(status: UploadJobStatus | UploadProgress, fallbackTotal: number): number | null {
   if (status.state === "done") return 1;
+  const stageRatio = uploadJobStageRatio(status, fallbackTotal);
+  if (stageRatio === null) return null;
+  return CLIENT_WORK_PROGRESS + SERVER_FINALIZE_PROGRESS * stageRatio;
+}
+
+function uploadJobStageRatio(status: UploadJobStatus | UploadProgress, fallbackTotal: number): number | null {
   const total = status.totalBytes || fallbackTotal;
   const done = status.progressBytes ?? 0;
   if (total <= 0 || done <= 0) return null;
@@ -346,7 +480,7 @@ function uploadJobRatio(status: UploadJobStatus | UploadProgress, fallbackTotal:
 function uploadJobMessage(status: UploadJobStatus | UploadProgress): string {
   if (status.state === "queued") return "等待服务器队列处理";
   if (status.state === "receiving") return "服务器在处理已接收部分，继续接收文件";
-  const ratio = uploadJobRatio(status, status.totalBytes ?? 0);
+  const ratio = uploadJobStageRatio(status, status.totalBytes ?? 0);
   if (ratio !== null) return `服务器正在加密并保存 ${Math.round(ratio * 100)}%`;
   return "服务器正在校验、加密并保存";
 }
@@ -391,6 +525,7 @@ async function putChunkWithRetry(
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("已取消", "AbortError"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
@@ -468,15 +603,27 @@ function sessionKey(checksum: string, parentPath: string, fileName: string): str
   return `${SESSION_PREFIX}${checksum}|${parentPath}|${fileName}`;
 }
 
+function sessionRecordKey(sessionId: string): string {
+  return `${SESSION_PREFIX}session.${sessionId}`;
+}
+
 function rememberSession(
   checksum: string,
   parentPath: string,
-  fileName: string,
+  file: File,
   sessionId: string,
 ): void {
-  const record: StoredSession = { sessionId, checksum, savedAt: Date.now() };
+  const record: StoredSession = {
+    sessionId,
+    checksum,
+    savedAt: Date.now(),
+    parentPath,
+    fileName: file.name,
+    fileSize: file.size,
+    lastModified: file.lastModified,
+  };
   try {
-    localStorage.setItem(sessionKey(checksum, parentPath, fileName), JSON.stringify(record));
+    localStorage.setItem(sessionRecordKey(sessionId), JSON.stringify(record));
   } catch {
     // 存不下只影响断点续传，上传本身照常。
   }
@@ -485,27 +632,55 @@ function rememberSession(
 function readSession(
   checksum: string,
   parentPath: string,
-  fileName: string,
+  file: File,
 ): StoredSession | null {
   try {
-    const raw = localStorage.getItem(sessionKey(checksum, parentPath, fileName));
-    if (!raw) {
-      return null;
+    const legacy = parseStoredSession(localStorage.getItem(sessionKey(checksum, parentPath, file.name)));
+    if (isStoredSessionValid(legacy)) return legacy;
+
+    const candidates: StoredSession[] = [];
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(`${SESSION_PREFIX}session.`)) continue;
+      const parsed = parseStoredSession(localStorage.getItem(key));
+      if (!isStoredSessionValid(parsed)) continue;
+      if (parsed.parentPath !== parentPath || parsed.fileName !== file.name ||
+          parsed.fileSize !== file.size || parsed.lastModified !== file.lastModified) continue;
+      if (parsed.checksum && parsed.checksum !== checksum) continue;
+      candidates.push(parsed);
     }
-    const parsed = JSON.parse(raw) as StoredSession;
-    if (!parsed.sessionId || Date.now() - parsed.savedAt > SESSION_MAX_AGE_MS) {
-      forgetSession(checksum, parentPath, fileName);
-      return null;
-    }
-    return parsed;
+    candidates.sort((a, b) => Number(b.checksum === checksum) - Number(a.checksum === checksum) || b.savedAt - a.savedAt);
+    return candidates[0] ?? null;
   } catch {
     return null;
   }
 }
 
-function forgetSession(checksum: string, parentPath: string, fileName: string): void {
+function parseStoredSession(raw: string | null): StoredSession | null {
+  if (!raw) return null;
   try {
-    localStorage.removeItem(sessionKey(checksum, parentPath, fileName));
+    return JSON.parse(raw) as StoredSession;
+  } catch {
+    return null;
+  }
+}
+
+function isStoredSessionValid(record: StoredSession | null): record is StoredSession {
+  return Boolean(record?.sessionId && Date.now() - record.savedAt <= SESSION_MAX_AGE_MS);
+}
+
+function forgetSession(checksum: string, parentPath: string, file: File, sessionId?: string): void {
+  try {
+    if (sessionId) {
+      const keys: string[] = [];
+      for (let index = 0; index < localStorage.length; index++) {
+        const key = localStorage.key(index);
+        if (key?.startsWith(SESSION_PREFIX) &&
+            parseStoredSession(localStorage.getItem(key))?.sessionId === sessionId) keys.push(key);
+      }
+      for (const key of keys) localStorage.removeItem(key);
+    }
+    if (checksum && !sessionId) localStorage.removeItem(sessionKey(checksum, parentPath, file.name));
   } catch {
     // 忽略。
   }

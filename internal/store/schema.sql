@@ -219,7 +219,8 @@ CREATE TABLE IF NOT EXISTS upload_tasks (
     created_at         INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL,
     streaming          INTEGER NOT NULL DEFAULT 0 CHECK (streaming IN (0, 1)),
-    volume_size        INTEGER NOT NULL DEFAULT 4294967296
+    volume_size        INTEGER NOT NULL DEFAULT 4294967296,
+    expected_checksum  TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_upload_tasks_user ON upload_tasks(user_id, expires_at);

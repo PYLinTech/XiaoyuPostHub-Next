@@ -127,12 +127,18 @@ export const fsApi = {
 
 export const uploadApi = {
   init: (input: {
-    checksum: string;
+    checksum?: string;
     sizePlain: number;
     parentPath: string;
     name: string;
     conflictAction?: string;
   }) => request<InitUploadResult>("/api/upload/init", { method: "POST", body: input }),
+
+  resolve: (sessionId: string, checksum: string, signal?: AbortSignal) =>
+    request<{ dedup: boolean; node?: Node | null }>(
+      `/api/upload/${encodeURIComponent(sessionId)}/resolve`,
+      { method: "POST", body: { checksum }, signal },
+    ),
 
   /** 分片按二进制原样发送：包一层 JSON 会让传输量膨胀三分之一。 */
   chunk: (

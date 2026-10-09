@@ -46,10 +46,14 @@ func TestInitUploadRejectsMalformedChecksum(t *testing.T) {
 	f := newShareFixture(t)
 	f.enableEncryption()
 
-	for _, bad := range []string{"", "abc", strings.Repeat("z", 64), strings.Repeat("a", 63)} {
+	for _, bad := range []string{"abc", strings.Repeat("z", 64), strings.Repeat("a", 63)} {
 		if _, err := f.initUpload(bad); !errors.Is(err, ErrBadRequest) {
 			t.Errorf("校验码 %q 应被拒绝，实得: %v", bad, err)
 		}
+	}
+	// 空摘要现在表示客户端会在传输期间并行计算；初始化应继续到存储就绪校验。
+	if _, err := f.initUpload(""); !errors.Is(err, ErrStorageNotReady) {
+		t.Errorf("缺省校验码应允许初始化，实得: %v", err)
 	}
 }
 
@@ -126,10 +130,11 @@ func TestStreamingUploadSupportsFileLargerThanStagingLimit(t *testing.T) {
 		t.Fatalf("设置小型流式测试参数失败: %v", err)
 	}
 
-	payload := bytes.Repeat([]byte("stream"), (2<<20)/len("stream"))
+	// 首卷在摘要绑定前到齐：流式路径必须允许先提交非末卷。
+	payload := bytes.Repeat([]byte("stream"), (4<<20)/len("stream"))
 	digest := sha256.Sum256(payload)
 	result, err := f.svc.InitUpload(ctx, f.user, InitUploadRequest{
-		Checksum: hex.EncodeToString(digest[:]), SizePlain: int64(len(payload)),
+		SizePlain:  int64(len(payload)),
 		ParentPath: "/a", Name: "larger-than-staging.bin",
 	})
 	if err != nil {
@@ -151,7 +156,7 @@ func TestStreamingUploadSupportsFileLargerThanStagingLimit(t *testing.T) {
 		}
 	}()
 
-	for index := 0; index < result.ChunkTotal; index++ {
+	for index := 0; index < 1; index++ {
 		start := int64(index) * result.ChunkSize
 		end := start + result.ChunkSize
 		if end > int64(len(payload)) {
@@ -161,6 +166,37 @@ func TestStreamingUploadSupportsFileLargerThanStagingLimit(t *testing.T) {
 			bytes.NewReader(payload[start:end])); err != nil {
 			t.Fatalf("接收第 %d 片失败: %v", index, err)
 		}
+	}
+	// 等待第一个非末卷真正完成；旧逻辑会因摘要尚未绑定而把整项任务终止。
+	streamDeadline := time.After(10 * time.Second)
+	for {
+		state, stateErr := store.GetUploadStreamState(ctx, f.db.R(), result.SessionID)
+		if stateErr == nil && state.NextPlainOffset > 0 {
+			break
+		}
+		if _, taskErr := store.GetUploadTask(ctx, f.db.R(), result.SessionID); taskErr != nil {
+			status, _, _ := f.svc.UploadJobStatusForUser(ctx, f.user, result.SessionID)
+			t.Fatalf("摘要绑定前处理首卷应成功，任务已消失，状态=%+v err=%v", status, stateErr)
+		}
+		select {
+		case <-streamDeadline:
+			t.Fatalf("等待首个流式分卷超时：state=%+v err=%v", state, stateErr)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	for index := 1; index < result.ChunkTotal; index++ {
+		start := int64(index) * result.ChunkSize
+		end := start + result.ChunkSize
+		if end > int64(len(payload)) {
+			end = int64(len(payload))
+		}
+		if _, err := f.svc.UploadChunk(ctx, f.user, result.SessionID, index,
+			bytes.NewReader(payload[start:end])); err != nil {
+			t.Fatalf("接收第 %d 片失败: %v", index, err)
+		}
+	}
+	if _, err := f.svc.ResolveUploadChecksum(ctx, f.user, result.SessionID, hex.EncodeToString(digest[:])); err != nil {
+		t.Fatalf("绑定并行计算出的校验码失败: %v", err)
 	}
 	if _, err := f.svc.QueueUploadCompletion(ctx, f.user, result.SessionID); err != nil {
 		t.Fatalf("提交流式收尾失败: %v", err)
@@ -190,10 +226,178 @@ func TestStreamingUploadSupportsFileLargerThanStagingLimit(t *testing.T) {
 		t.Fatalf("超大文件内容池登记失败：file=%+v err=%v", file, err)
 	}
 	parts, err := backend.SplitObjectRef(file.PanFileID, file.PanSizeWire)
-	if err != nil || len(parts) != 2 {
-		t.Fatalf("文件应由两卷合成一个对象，parts=%+v err=%v", parts, err)
+	if err != nil || len(parts) != 4 {
+		t.Fatalf("4 个密文分卷应合成为一个对象，parts=%+v err=%v", parts, err)
 	}
 	if used, err := store.UploadStagingUsage(ctx, f.db.R()); err != nil || used != 0 {
 		t.Fatalf("完成后应释放全部暂存记录，used=%d err=%v", used, err)
+	}
+}
+
+func TestParallelChecksumReupload(t *testing.T) {
+	for _, purge := range []bool{false, true} {
+		t.Run(map[bool]string{false: "archive", true: "purged"}[purge], func(t *testing.T) {
+			f := newShareFixture(t)
+			f.enableEncryption()
+			f.enableStorage()
+			ctx := context.Background()
+			completeUpload(t, f, contentA, "old.bin")
+			batch := stagedThenArchiveDeleted(t, f, "/a/old.bin")
+			if purge {
+				purgeBatch(t, f, batch)
+			}
+			result, err := f.svc.InitUpload(ctx, f.user, InitUploadRequest{
+				SizePlain: int64(len(contentA)), ParentPath: "/a", Name: "new.bin",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.svc.UploadChunk(ctx, f.user, result.SessionID, 0, bytes.NewReader(contentA)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.svc.ResolveUploadChecksum(ctx, f.user, result.SessionID, csA); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.svc.CompleteUpload(ctx, f.user, result.SessionID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAbortUploadUsesLatestChecksum(t *testing.T) {
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	ctx := context.Background()
+	result, err := f.initUpload("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := store.GetUploadTask(ctx, f.db.R(), result.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.ResolveUploadChecksum(ctx, f.user, result.SessionID, csA); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := store.CountLiveUploadsByChecksum(ctx, f.db.R(), csA, f.svc.Now()); err != nil || n != 1 {
+		t.Fatalf("bound checksum must retain its owner: count=%d err=%v", n, err)
+	}
+	if _, err := f.initUpload(csA); !errors.Is(err, ErrBusy) {
+		t.Fatalf("known-checksum upload must not replace the bound placeholder: %v", err)
+	}
+	if _, err := store.GetFile(ctx, f.db.R(), csA); err != nil {
+		t.Fatalf("competing upload deleted bound placeholder: %v", err)
+	}
+	if err := f.svc.abortUpload(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	for _, checksum := range []string{csA, stale.Checksum} {
+		if _, err := store.GetFile(ctx, f.db.R(), checksum); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("placeholder %s remains: %v", checksum, err)
+		}
+	}
+}
+
+func TestParallelDedupIsRecoverable(t *testing.T) {
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	ctx := context.Background()
+	completeUpload(t, f, contentA, "existing.bin")
+	if err := f.svc.Settings.SetMany(ctx, map[settings.Key]string{settings.KeyDedupScope: "global"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"existing.bin", "copy.bin"} {
+		result, err := f.svc.InitUpload(ctx, f.user, InitUploadRequest{
+			SizePlain: int64(len(contentA)), ParentPath: "/a", Name: name, ConflictAction: ConflictReject,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		node, err := f.svc.ResolveUploadChecksum(ctx, f.user, result.SessionID, csA)
+		if name == "existing.bin" {
+			if !errors.Is(err, ErrConflict) {
+				t.Fatalf("expected name conflict: %v", err)
+			}
+			if _, err := store.GetUploadTask(ctx, f.db.R(), result.SessionID); err != nil {
+				t.Fatalf("conflict destroyed resumable session: %v", err)
+			}
+			if err := f.svc.CancelUpload(ctx, f.user, result.SessionID); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err != nil || node == nil {
+			t.Fatalf("dedup failed: node=%+v err=%v", node, err)
+		}
+		retry, err := f.svc.ResolveUploadChecksum(ctx, f.user, result.SessionID, csA)
+		if err != nil || retry == nil || retry.LogicalPath != node.LogicalPath {
+			t.Fatalf("lost response must return same node: %+v %v", retry, err)
+		}
+	}
+}
+
+func TestChecksumPendingJobStillAcceptsResume(t *testing.T) {
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	ctx := context.Background()
+	result, err := f.initUpload("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.UploadChunk(ctx, f.user, result.SessionID, 0, bytes.NewReader(contentA)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateUploadJob(ctx, f.db, store.UploadJob{SessionID: result.SessionID, UserID: f.user.UserID()}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := f.svc.UploadJobStatusForUser(ctx, f.user, result.SessionID); err != nil || found {
+		t.Fatalf("pending checksum must resume client work: found=%v err=%v", found, err)
+	}
+}
+
+func TestHeadStreamDoesNotOpenOrConsume(t *testing.T) {
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	ctx := context.Background()
+	if err := f.svc.Settings.SetMany(ctx, map[settings.Key]string{
+		settings.KeyDeliveryDirect: "false", settings.KeyDeliveryProxyDecrypt: "false",
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	completeUpload(t, f, contentA, "sample.bin")
+	plan := proxyCipherPlan(t, f)
+	f.svc.Backend.(*storageStub).openErr = errors.New("HEAD must not open storage")
+	stream, err := f.svc.HeadServerStreamForActor(ctx, plan.TicketID, f.user, "bytes=0-9")
+	if err != nil || stream.Reader != nil || stream.Limit != 10 {
+		t.Fatalf("invalid HEAD metadata: %+v %v", stream, err)
+	}
+	ticket, err := store.GetTicket(ctx, f.db.R(), plan.TicketID)
+	if err != nil || ticket.UseCount != 0 || ticket.SettledBytes != 0 {
+		t.Fatalf("HEAD consumed ticket: %+v %v", ticket, err)
+	}
+}
+
+func TestParallelEmptyUploadRequiresChecksum(t *testing.T) {
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	ctx := context.Background()
+	result, err := f.svc.InitUpload(ctx, f.user, InitUploadRequest{ParentPath: "/a", Name: "empty-parallel.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.svc.QueueUploadCompletion(ctx, f.user, result.SessionID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unbound checksum must not enter completion queue: %v", err)
+	}
+	if _, err := f.svc.ResolveUploadChecksum(ctx, f.user, result.SessionID, payloadChecksum(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if node, err := f.svc.CompleteUpload(ctx, f.user, result.SessionID); err != nil || node.SizePlain != 0 {
+		t.Fatalf("empty parallel upload failed: %+v %v", node, err)
 	}
 }

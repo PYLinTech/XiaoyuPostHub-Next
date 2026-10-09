@@ -38,7 +38,9 @@ const (
 	apiUploadCreate      = "/upload/v2/file/create"
 	apiUploadFinish      = "/upload/v2/file/upload_complete"
 
-	rangeReadChunk = 1 << 20
+	// 服务端解密器按加密块顺序读取；默认块为 1 MiB。4 MiB 窗口减少
+	// 中转大文件的上游 Range 请求，同时把每个活跃读取器的缓冲控制在 4 MiB。
+	rangeReadChunk = 4 << 20
 )
 
 // limiter 是滑窗式的接口频率限制器：保证任意两次调用之间至少间隔 interval。
@@ -1351,7 +1353,10 @@ type httpRangeReader struct {
 	pos    int64
 	buf    []byte
 	bufAt  int64
-	closed bool
+	// 上游忽略 Range 并返回 200 时保留顺序响应流，避免后续窗口反复从
+	// 对象开头下载并丢弃前缀，使大文件读取退化为 O(n²) 流量。
+	fallback io.ReadCloser
+	closed   bool
 }
 
 func (r *httpRangeReader) Read(p []byte) (int, error) {
@@ -1392,6 +1397,9 @@ func (r *httpRangeReader) fetchWindow() error {
 		r.bufAt = r.pos
 		return nil
 	}
+	if r.fallback != nil {
+		return r.readFallbackWindow()
+	}
 	end := r.pos + rangeReadChunk - 1
 	// 区间末端必须截断到对象最后一个字节：部分上游 CDN 不按 RFC 把越界区间
 	// 收敛为实际长度，而是直接回 416，导致小于读取窗口的对象（含 1 字节
@@ -1409,14 +1417,18 @@ func (r *httpRangeReader) fetchWindow() error {
 	if err != nil {
 		return fmt.Errorf("backend: 范围读取失败: %w", err)
 	}
-	defer res.Body.Close()
+	keepBody := false
+	defer func() {
+		if !keepBody {
+			_ = res.Body.Close()
+		}
+	}()
 	if res.StatusCode != http.StatusPartialContent && res.StatusCode != http.StatusOK {
 		return fmt.Errorf("backend: 范围读取失败，HTTP %d", res.StatusCode)
 	}
 	// 某些上游会忽略 Range 并返回 200 + 整个对象。不能直接 ReadAll，
-	// 否则一次从文件尾部读取就会把整份大对象载入内存。对 200 响应先
-	// 流式丢弃到目标偏移，再只缓存一个读取窗口；对 206 响应则拒绝
-	// 超出窗口的异常响应。
+	// 否则一次从文件尾部读取就会把整份大对象载入内存。先流式跳到起始
+	// 偏移，再保留该响应流、逐窗口读取；对 206 响应拒绝超出窗口的异常响应。
 	var data []byte
 	if res.StatusCode == http.StatusOK {
 		if r.pos > 0 {
@@ -1429,7 +1441,12 @@ func (r *httpRangeReader) fetchWindow() error {
 				return fmt.Errorf("backend: 跳过对象前缀失败: %w", err)
 			}
 		}
-		data, err = io.ReadAll(io.LimitReader(res.Body, rangeReadChunk+1))
+		r.fallback = res.Body
+		keepBody = true
+		if r.size < 0 && res.ContentLength >= 0 {
+			r.size = res.ContentLength
+		}
+		return r.readFallbackWindow()
 	} else {
 		data, err = io.ReadAll(io.LimitReader(res.Body, rangeReadChunk+1))
 		if err == nil && len(data) > rangeReadChunk {
@@ -1448,12 +1465,7 @@ func (r *httpRangeReader) fetchWindow() error {
 	if err != nil {
 		return fmt.Errorf("backend: 读取响应体失败: %w", err)
 	}
-	if res.StatusCode == http.StatusOK {
-		// data 已经从 r.pos 开始读取，不需要再次切片。
-		if len(data) > rangeReadChunk {
-			data = data[:rangeReadChunk]
-		}
-	}
+
 	r.buf = data
 	r.bufAt = r.pos
 	if r.size < 0 && res.ContentLength > 0 {
@@ -1463,6 +1475,27 @@ func (r *httpRangeReader) fetchWindow() error {
 			r.size = r.bufAt + res.ContentLength
 		}
 	}
+	return nil
+}
+
+// readFallbackWindow 消费保留的顺序响应；短窗口标记 EOF，避免未知长度时重复请求。
+func (r *httpRangeReader) readFallbackWindow() error {
+	limit := int64(rangeReadChunk)
+	if r.size >= 0 && r.size-r.pos < limit {
+		limit = r.size - r.pos
+	}
+	data, err := io.ReadAll(io.LimitReader(r.fallback, limit))
+	if err != nil || int64(len(data)) < limit || (r.size >= 0 && r.pos+int64(len(data)) >= r.size) {
+		_ = r.fallback.Close()
+		r.fallback = nil
+	}
+	if err != nil {
+		return fmt.Errorf("backend: 顺序读取响应失败: %w", err)
+	}
+	if int64(len(data)) < limit && r.size < 0 {
+		r.size = r.pos + int64(len(data))
+	}
+	r.buf, r.bufAt = data, r.pos
 	return nil
 }
 
@@ -1529,6 +1562,11 @@ func (r *httpRangeReader) Seek(offset int64, whence int) (int64, error) {
 	if target < 0 {
 		return 0, fmt.Errorf("backend: Seek 位置无效")
 	}
+	bufferEnd := r.bufAt + int64(len(r.buf))
+	if r.fallback != nil && (target < r.bufAt || target > bufferEnd) {
+		_ = r.fallback.Close()
+		r.fallback = nil
+	}
 	r.pos = target
 	return target, nil
 }
@@ -1548,5 +1586,10 @@ func addInt64(a, b int64) (int64, bool) {
 func (r *httpRangeReader) Close() error {
 	r.closed = true
 	r.buf = nil
+	if r.fallback != nil {
+		err := r.fallback.Close()
+		r.fallback = nil
+		return err
+	}
 	return nil
 }

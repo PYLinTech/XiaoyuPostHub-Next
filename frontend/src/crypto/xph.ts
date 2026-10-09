@@ -259,7 +259,7 @@ export async function decryptCipherRange(
 export async function decryptAll(
   key: CryptoKey,
   header: XphHeader,
-  readRange: (start: number, endExclusive: number) => Promise<Uint8Array>,
+  readRange: (start: number, endExclusive: number, signal?: AbortSignal) => Promise<Uint8Array>,
   onBlock: (plain: Uint8Array, index: number) => void | Promise<void>,
   options: { concurrency?: number; batchBlocks?: number; signal?: AbortSignal } = {},
 ): Promise<void> {
@@ -269,11 +269,52 @@ export async function decryptAll(
   const concurrency = Math.max(1, options.concurrency ?? 6);
   const batchBlocks = Math.max(1, options.batchBlocks ?? 8);
   const batchCount = Math.ceil(header.blockCount / batchBlocks);
+  const workController = new AbortController();
+  const abortWork = (): void => workController.abort();
+  if (options.signal?.aborted) abortWork();
+  else options.signal?.addEventListener("abort", abortWork, { once: true });
+  const signal = workController.signal;
 
   /** 已解密但还没轮到交付的批次。 */
   const pending = new Map<number, Uint8Array[]>();
   let deliverIndex = 0;
   let deliverError: unknown = null;
+  const windowWaiters = new Set<() => void>();
+  const wakeWindowWaiters = (): void => {
+    for (const wake of [...windowWaiters]) {
+      wake();
+    }
+  };
+  const waitForWindow = async (batchIndex: number): Promise<boolean> => {
+    while (batchIndex >= deliverIndex + concurrency) {
+      if (deliverError) {
+        return false;
+      }
+      if (signal.aborted) {
+        throw new DOMException("已取消", "AbortError");
+      }
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = (): void => {
+          windowWaiters.delete(wake);
+          signal.removeEventListener("abort", abort);
+        };
+        const wake = (): void => {
+          cleanup();
+          resolve();
+        };
+        const abort = (): void => {
+          cleanup();
+          reject(new DOMException("已取消", "AbortError"));
+        };
+        windowWaiters.add(wake);
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) {
+          abort();
+        }
+      });
+    }
+    return !deliverError;
+  };
   // 串成一条 promise 链，保证同一时刻只有一处调用 onBlock，且严格按块序。
   let delivery: Promise<void> = Promise.resolve();
 
@@ -286,10 +327,12 @@ export async function decryptAll(
         }
         pending.delete(deliverIndex);
         const base = deliverIndex * batchBlocks;
-        deliverIndex += 1;
         for (let i = 0; i < blocks.length; i++) {
+          if (signal.aborted) throw new DOMException("已取消", "AbortError");
           await onBlock(blocks[i], base + i);
         }
+        deliverIndex += 1;
+        wakeWindowWaiters();
       }
     });
     // 交付侧失败（写盘被拒、Blob 分配失败）要**立刻**让在途 worker 看到。
@@ -299,14 +342,16 @@ export async function decryptAll(
     // 这里另挂一个处理器只做记录：原 promise 仍然会 reject，末尾的
     // `await delivery` 照样把错误抛给调用方。
     void delivery.catch((err: unknown) => {
-      deliverError = err;
+      deliverError ??= err;
+      workController.abort();
+      wakeWindowWaiters();
     });
   };
 
   let nextBatch = 0;
   const worker = async (): Promise<void> => {
     for (;;) {
-      if (options.signal?.aborted) {
+      if (signal.aborted) {
         throw new DOMException("已取消", "AbortError");
       }
       if (deliverError) {
@@ -316,11 +361,14 @@ export async function decryptAll(
       if (batchIndex >= batchCount) {
         return;
       }
+      if (!(await waitForWindow(batchIndex))) {
+        return;
+      }
       const first = batchIndex * batchBlocks;
       const last = Math.min(first + batchBlocks, header.blockCount) - 1;
       const start = blockCipherOffset(header, first);
       const end = blockCipherOffset(header, last) + blockCipherLen(header, last);
-      const cipher = await readRange(start, end);
+      const cipher = await readRange(start, end, signal);
 
       const blocks: Uint8Array[] = [];
       let cursor = 0;
@@ -329,20 +377,28 @@ export async function decryptAll(
         blocks.push(await decryptBlock(key, header, index, cipher.subarray(cursor, cursor + len)));
         cursor += len;
       }
+      if (signal.aborted) throw new DOMException("已取消", "AbortError");
       pending.set(batchIndex, blocks);
       scheduleDelivery();
     }
   };
 
+  const workers = Array.from({ length: Math.min(concurrency, batchCount) }, worker);
   try {
-    await Promise.all(Array.from({ length: Math.min(concurrency, batchCount) }, worker));
+    await Promise.all(workers);
     await delivery;
   } catch (err) {
-    deliverError = err;
+    workController.abort();
+    deliverError ??= err;
+    await Promise.allSettled(workers);
+    await delivery.catch(() => {});
     // 没人会再来取这些块了：整批明文继续留在 map 里就是纯粹的内存驻留。
     pending.clear();
+    wakeWindowWaiters();
     // 交付侧已经失败时，让在途的取数尽快结束，不再继续下载密文。
-    throw err;
+    throw deliverError;
+  } finally {
+    options.signal?.removeEventListener("abort", abortWork);
   }
 }
 

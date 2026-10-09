@@ -153,8 +153,8 @@ async function receiveCiphertext(
   // 密文有两个来源，处理路径完全一致——区别只在 URL：
   //   direct：123 直链绝对地址，跨域、只带 Range 头；
   //   proxy ：本机中转地址（纯反向代理），同源、票据与令牌走查询串。
-  const fetchRange = (start: number, endExclusive: number) => {
-    return fetchCipherPlanRange(plan, start, endExclusive - 1, signal);
+  const fetchRange = (start: number, endExclusive: number, rangeSignal = signal) => {
+    return fetchCipherPlanRange(plan, start, endExclusive - 1, rangeSignal);
   };
 
   // 先取文件头：块大小、明文长度、nonce 前缀都在里面，而它们必须与交付元数据
@@ -227,7 +227,7 @@ async function receiveCiphertext(
     // 一条分支上 abort，异常路径下 sink 一直开着：浏览器会继续锁住用户刚选
     // 定的目标文件，再下载同一路径直接失败，必须重启标签页才解锁。
     // abort() 内部对已关闭是幂等的，成功路径上重复调用也安全。
-    await sink?.abort();
+    await sink?.abort().catch(() => {});
     throw err;
   }
 }
@@ -243,6 +243,10 @@ async function fetchCipherPartsRange(
   const hits = parts.filter((part) => part.offset < endExclusive && part.offset + part.size > start);
   if (!hits.length || hits[0].offset > start || hits[hits.length - 1].offset + hits[hits.length - 1].size < endExclusive) {
     throw new Error("分卷清单无法覆盖所请求的密文区间");
+  }
+  if (hits.length === 1) {
+    const part = hits[0];
+    return fetchCipherRange(part.url, start - part.offset, endInclusive - part.offset, signal);
   }
   const blocks = await Promise.all(hits.map((part) => {
     const from = Math.max(start, part.offset);
@@ -285,72 +289,75 @@ async function receivePlaintext(
 
   // 这条路径下服务端推过来的已经是明文，字节必须原样保存。
   // 这里唯一可信的对照是内容摘要——本地没有任何可独立校验的素材。
-  const sink =
-    response.body && plan.plainSize >= (options.streamToDiskAbove ?? DEFAULT_STREAM_THRESHOLD)
-      ? await tryOpenDiskSink(plan.fileName)
-      : null;
-
+  let sink: DiskSink | null = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   const parts: Uint8Array[] = [];
   const hasher = new Sha256();
   let done = 0;
+  try {
+    reader = response.body?.getReader() ?? null;
+    sink =
+      reader && plan.plainSize >= (options.streamToDiskAbove ?? DEFAULT_STREAM_THRESHOLD)
+        ? await tryOpenDiskSink(plan.fileName)
+        : null;
 
-  if (response.body) {
-    const reader = response.body.getReader();
-    for (;;) {
-      const { done: finished, value } = await reader.read();
-      if (finished) {
-        break;
+    if (reader) {
+      for (;;) {
+        const { done: finished, value } = await reader.read();
+        if (finished) {
+          break;
+        }
+        if (!value) {
+          continue;
+        }
+        hasher.update(value);
+        if (sink) {
+          await sink.write(value);
+        } else {
+          parts.push(value);
+        }
+        done += value.byteLength;
+        report({ phase: "fetching", bytesDone: done, bytesTotal: plan.plainSize, message: "正在接收" });
       }
-      if (!value) {
-        continue;
-      }
-      hasher.update(value);
-      if (sink) {
-        await sink.write(value);
-      } else {
-        parts.push(value);
-      }
-      done += value.byteLength;
-      report({ phase: "fetching", bytesDone: done, bytesTotal: plan.plainSize, message: "正在接收" });
     }
-  }
 
-  report({ phase: "verifying", bytesDone: done, bytesTotal: plan.plainSize, message: "正在校验完整性" });
-  // 长度核对与摘要缺一不可：摘要防篡改/截断，但摘要缺失时长度核对是唯一
-  // 能发现"流被截断却正常结束"的关卡。
-  if (plan.plainSize && done !== plan.plainSize) {
+    report({ phase: "verifying", bytesDone: done, bytesTotal: plan.plainSize, message: "正在校验完整性" });
+    // 长度核对与摘要缺一不可：摘要防篡改/截断，但摘要缺失时长度核对是唯一
+    // 能发现"流被截断却正常结束"的关卡。
+    if (plan.plainSize && done !== plan.plainSize) {
+      throw new Error(`内容长度不一致：期望 ${plan.plainSize} 字节，实得 ${done} 字节`);
+    }
+    const digest = bytesToHex(hasher.digest());
+    if (plan.checksum && digest !== plan.checksum) {
+      throw new Error(`内容校验失败：期望 ${plan.checksum}，实得 ${digest}`);
+    }
+
     if (sink) {
-      await sink.abort();
+      await sink.close();
+      return {
+        fileName: plan.fileName,
+        mimeType: plan.mimeType,
+        checksum: digest,
+        bytes: done,
+        blob: null,
+        savedAs: sink.name,
+      };
     }
-    throw new Error(`内容长度不一致：期望 ${plan.plainSize} 字节，实得 ${done} 字节`);
-  }
-  const digest = bytesToHex(hasher.digest());
-  if (plan.checksum && digest !== plan.checksum) {
-    if (sink) {
-      await sink.abort();
-    }
-    throw new Error(`内容校验失败：期望 ${plan.checksum}，实得 ${digest}`);
-  }
-
-  if (sink) {
-    await sink.close();
     return {
       fileName: plan.fileName,
       mimeType: plan.mimeType,
       checksum: digest,
       bytes: done,
-      blob: null,
-      savedAs: sink.name,
+      blob: new Blob(parts as BlobPart[], { type: plan.mimeType || "application/octet-stream" }),
+      savedAs: null,
     };
+  } catch (err) {
+    await reader?.cancel(err).catch(() => {});
+    await sink?.abort().catch(() => {});
+    throw err;
+  } finally {
+    reader?.releaseLock();
   }
-  return {
-    fileName: plan.fileName,
-    mimeType: plan.mimeType,
-    checksum: digest,
-    bytes: done,
-    blob: new Blob(parts as BlobPart[], { type: plan.mimeType || "application/octet-stream" }),
-    savedAs: null,
-  };
 }
 
 export function assertHeaderMatchesMeta(header: XphHeader, meta: DeliveryPlan["encryption"]): void {
@@ -408,8 +415,8 @@ async function tryOpenDiskSink(fileName: string): Promise<DiskSink | null> {
       },
       async close() {
         if (!closed) {
-          closed = true;
           await writable.close();
+          closed = true;
         }
       },
       async abort() {
@@ -419,8 +426,13 @@ async function tryOpenDiskSink(fileName: string): Promise<DiskSink | null> {
         }
       },
     };
-  } catch {
-    // 用户取消选择也会走到这里，按"不走流式"处理。
+  } catch (err) {
+    // 用户取消保存选择就应取消下载；把它当作"不走流式"会继续把超大文件
+    // 全部堆进内存，既违背用户意图，也会表现为下载耗时很久甚至页面卡死。
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw err;
+    }
+    // 其它文件系统错误仍回落到浏览器内存下载。
     return null;
   }
 }
