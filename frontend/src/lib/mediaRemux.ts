@@ -9,6 +9,7 @@ import { supportsMediaSourceType } from "./mediaSourceSupport";
 import { durationFromTail } from "./isoDuration";
 
 /** 尾部探测窗口。实测最后一个 moof 距文件末尾 11.9 MiB，取 16 MiB 留出余量。 */
+/** 尾部探测窗口。实测最后一个 moof 距文件末尾 11.9 MiB，取 16 MiB 留出余量。 */
 const TAIL_WINDOW = 16 * 1024 * 1024;
 
 /** 在字节里读 4 字符的 box 类型。 */
@@ -136,32 +137,31 @@ export class MediaDemuxSession {
     // 所以先读头部元数据；拿不到再从文件尾部找最后一个 moof 反推——那里的
     // tfdt 带着最后一片的起始时间。两处都失败就返回 null，让播放器留空，
     // 也不要给一个猜出来的值：错的时长会让进度条提前到底然后停住。
-    const head = await this.probe(() => {
-      const input = this.source.input(AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]), 2 * 1024 * 1024);
-      try { return input.computeDuration(undefined, { metadataOnly: true }); } finally { queueMicrotask(() => input.dispose()); }
+    const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]);
+    const head = await this.probe(async () => {
+      const input = this.source.input(signal, 2 * 1024 * 1024);
+      try { return await input.computeDuration(undefined, { metadataOnly: true }); }
+      finally { input.dispose(); }
     });
     if (head !== null && head > origin) return head - origin;
 
-    const tail = await this.probe(() => this.tailDuration());
+    const tail = await this.probe(() => this.tailDuration(signal));
     if (tail !== null && tail > origin) return tail - origin;
     return null;
   }
 
   /** 读文件尾部窗口，从最后一个 moof 反推容器时长。 */
-  private async tailDuration(): Promise<number | null> {
-    const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]);
-    // 16 MiB：实测最后一个 moof 距文件末尾 11.9 MiB，再大只是白花流量。
-    const window = TAIL_WINDOW;
+  private async tailDuration(signal: AbortSignal): Promise<number | null> {
     const head = await this.source.read(0, Math.min(this.source.size, 1024 * 1024), signal);
     const moovStart = findBox(head, "moov");
     // moov 可能超过 1 MiB（长索引表），按需再取一次。
-    const moov = moovStart < 0 ? null : moovStart + readBoxSize(head, moovStart) <= head.byteLength
-      ? head.subarray(moovStart)
-      : await this.source.read(moovStart, Math.min(this.source.size, moovStart + 4 * 1024 * 1024), signal).then(bytes => bytes.subarray(0, readBoxSize(bytes, 0)));
+    const moov = moovStart < 0 ? null
+      : moovStart + readBoxSize(head, moovStart) <= head.byteLength ? head.subarray(moovStart)
+        : await this.source.read(moovStart, Math.min(this.source.size, moovStart + 4 * 1024 * 1024), signal)
+          .then(bytes => bytes.subarray(0, readBoxSize(bytes, 0)));
     if (!moov || readTypeAt(moov, 4) !== "moov") return null;
-    const tail = await this.source.tail(window, signal);
-    const duration = durationFromTail(moov, tail.data);
-    return duration;
+    const tail = await this.source.tail(TAIL_WINDOW, signal);
+    return durationFromTail(moov, tail);
   }
 
   /** 探测失败（超时、读预算耗尽、上游不支持）一律当作"拿不到"，不让它打断播放。 */

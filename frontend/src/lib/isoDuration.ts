@@ -4,11 +4,6 @@
 // tfdt 里，所以"读头部拿时长"对这类文件必然失败。解析需要按轨道分别取
 // timescale，混在 mediaRemux 里会把那已经很长的函数继续撑大。
 
-/** ISO BMFF 的 box 类型白名单：只在这些类型里找边界，避免把 mdat 载荷误判成 box。 */
-const BOX_TYPES = new Set([
-  "ftyp", "moov", "mdat", "moof", "mfra", "free", "skip", "wide", "styp", "sidx", "meta", "emsg",
-]);
-
 const MAX_BOX_SIZE = 64 * 1024 * 1024;
 
 /** 从 moof 里解析出的单轨时间信息（尚未除以 timescale）。 */
@@ -88,7 +83,9 @@ export function parseMoovTimings(moov: Uint8Array): TrackDeclaration[] {
         });
       }
     });
-    if (trackId && timescale) tracks.push({ trackId, timescale });
+    // timescale 必须非零，否则后面换算会除零；track_ID 0 在规范里是合法值，
+    // 所以判据只能落在 timescale 上，不能顺带把 trackId 一起排掉。
+    if (timescale) tracks.push({ trackId, timescale });
   });
 
   return tracks;
@@ -101,9 +98,9 @@ export function parseMoovTimings(moov: Uint8Array): TrackDeclaration[] {
  * 试探 box 边界，并用"类型合法 + 尺寸合理 + 内部结构自洽"三重校验排掉
  * 载荷里恰好出现 moof 字样的巧合。
  */
-export function findLastMoof(window: Uint8Array, limit = 32): Map<number, TrackTiming> {
+export function findLastMoof(window: Uint8Array): Map<number, TrackTiming> {
   const view = new DataView(window.buffer, window.byteOffset, window.byteLength);
-  const best = new Map<number, { position: number; timing: Omit<TrackTiming, "trackId"> }>();
+  const best = new Map<number, Omit<TrackTiming, "trackId">>();
 
   for (let offset = 0; offset + 8 <= window.byteLength; offset++) {
     if (readType(view, offset + 4) !== "moof") continue;
@@ -115,19 +112,16 @@ export function findLastMoof(window: Uint8Array, limit = 32): Map<number, TrackT
     if (first !== "mfhd" && first !== "traf") continue;
 
     const timing = parseMoof(view, offset, offset + size);
-    if (!timing.size) continue;
     for (const [trackId, value] of timing) {
       const previous = best.get(trackId);
-      // 同一轨道可能有多个 moof 落在窗口里，取时间最大的那个。
-      if (!previous || value.baseTime >= previous.timing.baseTime) {
-        best.set(trackId, { position: offset, timing: value });
-      }
+      // 严格取时间最大的那个。窗口内的 moof 通常按时间递增排列，但不必依赖这一点：
+      // 载荷里的假阳性可能乱序出现，用 >= 会让它们覆盖掉真正的末尾片段。
+      if (!previous || value.baseTime > previous.baseTime) best.set(trackId, value);
     }
-    if (best.size >= limit) break;
   }
 
   const merged: Array<[number, TrackTiming]> = [];
-  for (const [id, value] of best) merged.push([id, { ...value.timing, trackId: id }]);
+  for (const [id, value] of best) merged.push([id, { ...value, trackId: id }]);
   return new Map(merged);
 }
 
@@ -222,5 +216,3 @@ export function durationFromTail(moov: Uint8Array, window: Uint8Array): number |
   }
   return best;
 }
-
-export { BOX_TYPES };

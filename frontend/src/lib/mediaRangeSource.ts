@@ -130,11 +130,9 @@ export class MediaRangeSource {
    * 必须从尾部反向进行。这也是唯一需要"倒着读"的场景，因此单独开一个入口，
    * 不去改动既有正向读取的语义。
    */
-  async tail(length: number, signal: AbortSignal): Promise<{ data: Uint8Array; offset: number }> {
+  async tail(length: number, signal: AbortSignal): Promise<Uint8Array> {
     const start = Math.max(0, this.size - length);
-    const data = await this.read(start, this.size, signal);
-    // 返回窗口在文件中的绝对起点：调用方解析 box 时需要知道真实偏移。
-    return { data, offset: start };
+    return this.read(start, this.size, signal);
   }
 
   /** 一次预取覆盖的块数。批次内与跨批次预取必须用同一份，否则两处窗口会不一致。 */
