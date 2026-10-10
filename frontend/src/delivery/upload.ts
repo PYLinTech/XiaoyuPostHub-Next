@@ -22,13 +22,13 @@ export interface UploadProgressInfo {
   canCancel?: boolean;
 }
 
-interface UploadOutcome {
+export interface UploadOutcome {
   node: Node;
   /** true 表示复用服务端已有对象；并行哈希期间可能已发送部分分片。 */
   dedup: boolean;
 }
 
-interface UploadOptions {
+export interface UploadOptions {
   parentPath: string;
   conflictAction?: ConflictAction;
   onProgress?: (info: UploadProgressInfo) => void;
@@ -49,6 +49,12 @@ interface StoredSession {
   lastModified?: number;
 }
 
+let workerSessionStore: Pick<Storage, "length" | "key" | "getItem" | "setItem" | "removeItem"> | undefined;
+export function configureUploadSessionStore(store: NonNullable<typeof workerSessionStore>): void {
+  workerSessionStore = store;
+}
+function sessionStore() { return workerSessionStore ?? localStorage; }
+
 const SESSION_PREFIX = "xph.upload.";
 /** 会话有效期短于服务端的过期时间，避免拿着已经失效的会话去续传。 */
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -56,6 +62,7 @@ const CLIENT_WORK_PROGRESS = 0.75;
 const SERVER_FINALIZE_PROGRESS = 0.24;
 
 export async function uploadFile(file: File, options: UploadOptions): Promise<UploadOutcome> {
+  options.signal?.throwIfAborted();
   const report = options.onProgress ?? (() => {});
   const total = file.size;
   const hashController = new AbortController();
@@ -141,6 +148,9 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
       throw new DOMException("已取消", "AbortError");
     }
     if (session.finalizing) {
+      // 服务端已接收并处理文件，无需让并行摘要继续占用客户端工作额度。
+      hashController.abort();
+      await hashPromise.catch(() => {});
       report({
         fileName: file.name,
         sent: total,
@@ -211,7 +221,7 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
         const end = Math.min(start + chunkSize, total);
         const slice = file.slice(start, end);
         await putChunkWithRetry(sessionId, index, slice, signal, (loaded) => {
-          inFlight.set(index, Math.max(inFlight.get(index) ?? 0, loaded));
+          inFlight.set(index, loaded);
           reportTransfer();
         });
         inFlight.delete(index);
@@ -348,10 +358,10 @@ function combineSignals(parent: AbortSignal | undefined, local: AbortSignal): Ab
 function hasStoredSession(parentPath: string, fileName: string): boolean {
   try {
     const suffix = `|${parentPath}|${fileName}`;
-    for (let index = 0; index < localStorage.length; index++) {
-      const key = localStorage.key(index);
+    for (let index = 0; index < sessionStore().length; index++) {
+      const key = sessionStore().key(index);
       if (!key?.startsWith(SESSION_PREFIX)) continue;
-      const record = parseStoredSession(localStorage.getItem(key));
+      const record = parseStoredSession(sessionStore().getItem(key));
       if (!isStoredSessionValid(record)) continue;
       if (key.endsWith(suffix)) return true; // 兼容旧版摘要键
       if (key.startsWith(`${SESSION_PREFIX}session.`) &&
@@ -499,6 +509,7 @@ async function putChunkWithRetry(
       throw new DOMException("已取消", "AbortError");
     }
     try {
+      onProgress?.(0);
       await uploadApi.chunk(sessionId, index, data, signal, (loaded) => onProgress?.(loaded));
       return;
     } catch (err) {
@@ -545,14 +556,7 @@ async function hashFile(
   signal?: AbortSignal,
   onProgress?: (processed: number) => void,
 ): Promise<string> {
-  if (typeof Worker !== "undefined") {
-    try {
-      return await hashInWorker(file, signal, onProgress);
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      // Worker 不可用时退回主线程实现，保证旧浏览器仍能上传。
-    }
-  }
+  // 整条上传链已运行在传输 Worker 内，不再创建嵌套校验线程。
   const sliceSize = 4 * 1024 * 1024;
   const hasher = new Sha256();
   for (let offset = 0; offset < file.size; offset += sliceSize) {
@@ -560,43 +564,11 @@ async function hashFile(
       throw new DOMException("已取消", "AbortError");
     }
     const buffer = await file.slice(offset, Math.min(offset + sliceSize, file.size)).arrayBuffer();
+    signal?.throwIfAborted();
     hasher.update(new Uint8Array(buffer));
     onProgress?.(Math.min(offset + buffer.byteLength, file.size));
   }
   return bytesToHex(hasher.digest());
-}
-
-function hashInWorker(file: File, signal?: AbortSignal, onProgress?: (processed: number) => void): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./hash.worker.ts", import.meta.url), { type: "module" });
-    const cleanup = () => {
-      signal?.removeEventListener("abort", abort);
-      worker.terminate();
-    };
-    const abort = () => {
-      cleanup();
-      reject(new DOMException("已取消", "AbortError"));
-    };
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) return abort();
-    worker.onerror = (event) => {
-      cleanup();
-      reject(new Error(event.message || "文件校验失败"));
-    };
-    worker.onmessage = (event: MessageEvent<{ type: string; processed?: number; checksum?: string; message?: string }>) => {
-      const result = event.data;
-      if (result.type === "progress") onProgress?.(result.processed ?? 0);
-      if (result.type === "done") {
-        cleanup();
-        resolve(result.checksum ?? "");
-      }
-      if (result.type === "error") {
-        cleanup();
-        reject(new Error(result.message || "文件校验失败"));
-      }
-    };
-    worker.postMessage({ file });
-  });
 }
 
 function sessionKey(checksum: string, parentPath: string, fileName: string): string {
@@ -623,7 +595,7 @@ function rememberSession(
     lastModified: file.lastModified,
   };
   try {
-    localStorage.setItem(sessionRecordKey(sessionId), JSON.stringify(record));
+    sessionStore().setItem(sessionRecordKey(sessionId), JSON.stringify(record));
   } catch {
     // 存不下只影响断点续传，上传本身照常。
   }
@@ -635,14 +607,14 @@ function readSession(
   file: File,
 ): StoredSession | null {
   try {
-    const legacy = parseStoredSession(localStorage.getItem(sessionKey(checksum, parentPath, file.name)));
+    const legacy = parseStoredSession(sessionStore().getItem(sessionKey(checksum, parentPath, file.name)));
     if (isStoredSessionValid(legacy)) return legacy;
 
     const candidates: StoredSession[] = [];
-    for (let index = 0; index < localStorage.length; index++) {
-      const key = localStorage.key(index);
+    for (let index = 0; index < sessionStore().length; index++) {
+      const key = sessionStore().key(index);
       if (!key?.startsWith(`${SESSION_PREFIX}session.`)) continue;
-      const parsed = parseStoredSession(localStorage.getItem(key));
+      const parsed = parseStoredSession(sessionStore().getItem(key));
       if (!isStoredSessionValid(parsed)) continue;
       if (parsed.parentPath !== parentPath || parsed.fileName !== file.name ||
           parsed.fileSize !== file.size || parsed.lastModified !== file.lastModified) continue;
@@ -673,14 +645,14 @@ function forgetSession(checksum: string, parentPath: string, file: File, session
   try {
     if (sessionId) {
       const keys: string[] = [];
-      for (let index = 0; index < localStorage.length; index++) {
-        const key = localStorage.key(index);
+      for (let index = 0; index < sessionStore().length; index++) {
+        const key = sessionStore().key(index);
         if (key?.startsWith(SESSION_PREFIX) &&
-            parseStoredSession(localStorage.getItem(key))?.sessionId === sessionId) keys.push(key);
+            parseStoredSession(sessionStore().getItem(key))?.sessionId === sessionId) keys.push(key);
       }
-      for (const key of keys) localStorage.removeItem(key);
+      for (const key of keys) sessionStore().removeItem(key);
     }
-    if (checksum && !sessionId) localStorage.removeItem(sessionKey(checksum, parentPath, file.name));
+    if (checksum && !sessionId) sessionStore().removeItem(sessionKey(checksum, parentPath, file.name));
   } catch {
     // 忽略。
   }

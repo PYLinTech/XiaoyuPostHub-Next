@@ -1,7 +1,8 @@
+import { uploadFile } from "@/delivery/transferClient";
 import { computed, reactive } from "vue";
 import type { ConflictAction, Node } from "@/api/types";
-import { cancelUpload, uploadFile, type UploadProgressInfo } from "@/delivery/upload";
-import { describeError, isAbortError } from "@/lib/async";
+import { cancelUpload, type UploadProgressInfo } from "@/delivery/upload";
+import { describeError, isAbortError, logError } from "@/lib/async";
 import { useSession } from "./session";
 import { useToasts } from "./toast";
 import { showTransfer } from "./transferPanel";
@@ -43,9 +44,10 @@ function uploadLimits(): { maxTasks: number; maxConcurrency: number } {
 }
 
 /** 上传完成后的回调（用于刷新目录列表）。 */
-const completionListeners = new Set<(node: Node, parentPath: string) => void>();
+type CompletionListener = (node: Node, parentPath: string) => void | Promise<void>;
+const completionListeners = new Set<CompletionListener>();
 
-export function onUploadComplete(listener: (node: Node, parentPath: string) => void): () => void {
+export function onUploadComplete(listener: CompletionListener): () => void {
   completionListeners.add(listener);
   return () => completionListeners.delete(listener);
 }
@@ -120,7 +122,11 @@ async function runItem(item: UploadItem): Promise<void> {
     item.dedup = outcome.dedup;
     item.status = "done";
     for (const listener of completionListeners) {
-      listener(outcome.node, item.parentPath);
+      try {
+        void Promise.resolve(listener(outcome.node, item.parentPath)).catch((error) => logError("upload-completion", error));
+      } catch (error) {
+        logError("upload-completion", error);
+      }
     }
   } catch (err) {
     if (isAbortError(err)) {
@@ -142,7 +148,7 @@ async function runItem(item: UploadItem): Promise<void> {
 /** 取消一个排队中或进行中的上传。 */
 export async function cancelUploadItem(id: string): Promise<void> {
   const item = state.items.find((entry) => entry.id === id);
-  if (!item) {
+  if (!item || (item.status !== "queued" && item.status !== "running")) {
     return;
   }
   if (item.status === "queued") {
@@ -153,18 +159,21 @@ export async function cancelUploadItem(id: string): Promise<void> {
   }
   // 收尾排队期间先让服务端原子取消，再停止前端轮询；worker 已经领取时
   // 服务端会拒绝取消，界面不能误报成“已取消”。
-  if (item.progress.phase === "finishing" && item.sessionId) {
-    const canceled = await cancelUpload(item.sessionId);
+  const controller = item.controller;
+  const sessionId = item.sessionId;
+  if (item.progress.phase === "finishing" && sessionId) {
+    const canceled = await cancelUpload(sessionId);
+    if (item.controller !== controller || item.status !== "running") return;
     if (!canceled) {
       useToasts().info("服务器已开始处理，此任务暂时不能取消");
       return;
     }
-    item.controller?.abort();
+    controller?.abort();
     return;
   }
-  item.controller?.abort();
+  controller?.abort();
   // 服务端会话也要清掉，否则临时文件与预扣的额度会挂到过期为止。
-  if (item.sessionId) await cancelUpload(item.sessionId);
+  if (sessionId) await cancelUpload(sessionId);
 }
 
 /** 重试一个失败的上传。 */
@@ -182,7 +191,7 @@ export function retryUpload(id: string): void {
 
 export function removeUpload(id: string): void {
   const index = state.items.findIndex((entry) => entry.id === id);
-  if (index >= 0) {
+  if (index >= 0 && state.items[index].status !== "queued" && state.items[index].status !== "running") {
     state.items.splice(index, 1);
   }
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { runDelivery } from "@/delivery/transferClient";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { createRequestGate, toastApiError } from "@/lib/async";
 import AppButton from "@/components/ui/AppButton.vue";
@@ -6,7 +7,7 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import { mailApi } from "@/api/endpoints";
 import type { MailDetail, MailPart } from "@/api/types";
 import { mailPartDeliverySource } from "@/delivery/sources";
-import { runDelivery, saveBlob } from "@/delivery/download";
+import { saveBlob } from "@/delivery/download";
 import { useToasts } from "@/stores/toast";
 import { formatBytes, formatTime } from "@/lib/format";
 
@@ -47,6 +48,7 @@ let activeMonitorChannel = "";
 let activeProxyController: AbortController | null = null;
 /** 正文渲染的序号守卫：只有最新一次调用可以写 srcdoc（切信会连开好几次）。 */
 const renderGate = createRequestGate();
+let renderAbort: AbortController | null = null;
 
 interface ExternalResourceFailure {
   url: string;
@@ -158,6 +160,9 @@ async function renderBody(): Promise<void> {
   // 序号守卫：切信时上一轮的内嵌图循环还在 await，它回来后会往（早已被换掉的）
   // blobUrls 里 push 自己的 blob，并用它那份旧 HTML 覆写同一个 srcdoc——
   // 结果是"上一封的正文配这一封的附件"，而且旧 blob 永远没人回收。
+  renderAbort?.abort();
+  const controller = new AbortController();
+  renderAbort = controller;
   const token = renderGate.next();
   rendering.value = true;
   // 本轮建出来的 blob 先扣在本地：只有确认自己仍是最新一轮才移交给 blobUrls。
@@ -173,7 +178,7 @@ async function renderBody(): Promise<void> {
   blobUrls = [];
   el.srcdoc = "";
   try {
-    const result = await runDelivery(mailPartDeliverySource(part.id));
+    const result = await runDelivery(mailPartDeliverySource(part.id), { signal: controller.signal });
     if (!renderGate.isCurrent(token)) return;
     if (!result.blob) {
       throw new Error("正文获取失败");
@@ -195,7 +200,7 @@ async function renderBody(): Promise<void> {
       if (!inline.contentId) {
         continue;
       }
-      const r = await runDelivery(mailPartDeliverySource(inline.id));
+      const r = await runDelivery(mailPartDeliverySource(inline.id), { signal: controller.signal });
       // 每次 await 之后都要验一次：过期就是过期，直接收工，别再往下走。
       if (!renderGate.isCurrent(token)) {
         dropMine();
@@ -424,6 +429,9 @@ async function confirmPurge(): Promise<void> {
 watch(
   () => props.detail.message.id,
   async () => {
+    renderGate.next();
+    renderAbort?.abort();
+    renderAbort = null;
     activeProxyController?.abort();
     activeProxyController = null;
     externalProxyBusy.value = false;
@@ -444,6 +452,8 @@ window.addEventListener("message", onExternalResourceMessage);
 
 onBeforeUnmount(() => {
   renderGate.next();
+  renderAbort?.abort();
+  renderAbort = null;
   activeProxyController?.abort();
   activeProxyController = null;
   window.removeEventListener("message", onExternalResourceMessage);

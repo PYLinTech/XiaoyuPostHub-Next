@@ -1,6 +1,7 @@
+import { runDelivery } from "@/delivery/transferClient";
 import { addDownload, canCancelDownload } from "@/stores/downloads";
 import { ref } from "vue";
-import { runDelivery, saveBlob, type DeliverySource } from "./download";
+import { saveBlob, type DeliverySource } from "./download";
 import { describeError, isAbortError, logError } from "@/lib/async";
 import { useToasts } from "@/stores/toast";
 

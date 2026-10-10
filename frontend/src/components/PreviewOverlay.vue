@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { runDelivery } from "@/delivery/transferClient";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import AppButton from "@/components/ui/AppButton.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import AppModal from "@/components/ui/AppModal.vue";
@@ -7,7 +8,7 @@ import { fileKind, previewElement } from "@/lib/filekind";
 import { createRequestGate, describeError, logError } from "@/lib/async";
 import { formatBytes } from "@/lib/format";
 import { preparePreview, type PreviewHandle } from "@/delivery/preview";
-import { runDelivery, saveBlob, type DeliverySource } from "@/delivery/download";
+import { saveBlob, type DeliverySource } from "@/delivery/download";
 import { useToasts } from "@/stores/toast";
 
 // 预览浮层。
@@ -41,6 +42,7 @@ const element = computed(() => previewElement(kind.value));
 // 更要紧的是 close() 只把 handle 置空，在途请求照样会再赋值一次——那个会话再也没人
 // release，额度不结算，等于泄漏。
 const gate = createRequestGate();
+let previewAbort: AbortController | null = null;
 
 const modeLabel = computed(() => {
   switch (handle.value?.mode) {
@@ -56,9 +58,10 @@ const modeLabel = computed(() => {
 });
 
 async function loadPreview(): Promise<void> {
-  if (!props.source) {
-    return;
-  }
+  void resetPreview()?.release();
+  if (!props.source) return;
+  const controller = new AbortController();
+  previewAbort = controller;
   const token = gate.next();
   error.value = "";
   textContent.value = "";
@@ -66,7 +69,7 @@ async function loadPreview(): Promise<void> {
   try {
     if (kind.value === "text") {
       // 文本没有流式渲染的必要，直接整份取回后放进 <pre>。
-      const result = await runDelivery(props.source);
+      const result = await runDelivery(props.source, { signal: controller.signal });
       if (!gate.isCurrent(token)) return;
       if (!result.blob) {
         throw new Error("文本内容未能载入");
@@ -77,7 +80,7 @@ async function loadPreview(): Promise<void> {
       loading.value = false;
       return;
     }
-    const prepared = await preparePreview(props.source);
+    const prepared = await preparePreview(props.source, { signal: controller.signal });
     // 过期结果绝不写进 handle.value：那样界面会显示上一个文件的画面，
     // 而这个会话也再没人管。preparePreview 已经把额度预扣了，必须就地释放。
     if (!gate.isCurrent(token)) {
@@ -96,15 +99,20 @@ async function loadPreview(): Promise<void> {
   }
 }
 
-async function close(): Promise<void> {
-  // 先作废在途请求，再清理：否则这次 loadPreview 回来后仍会把 handle 写回去，
-  // 已经关掉的预览会话就此泄漏（release 负责结算额度与吊销 SW 会话）。
+function resetPreview(): PreviewHandle | null {
   gate.next();
+  previewAbort?.abort();
+  previewAbort = null;
   const current = handle.value;
   handle.value = null;
   textContent.value = "";
+  loading.value = false;
+  return current;
+}
+
+async function close(): Promise<void> {
+  const current = resetPreview();
   emit("close");
-  // 释放要放在关闭之后：它会去吊销 SW 会话并结算额度，不该卡住界面。
   await current?.release();
 }
 
@@ -127,20 +135,14 @@ async function downloadToo(): Promise<void> {
 }
 
 watch(
-  () => props.open,
-  (isOpen) => {
-    if (isOpen) {
-      void loadPreview();
-    } else if (handle.value) {
-      const current = handle.value;
-      handle.value = null;
-      void current.release();
-    }
+  () => [props.open, props.source] as const,
+  ([isOpen]) => {
+    if (isOpen) void loadPreview();
+    else void resetPreview()?.release();
   },
-  // immediate：挂载时就处于打开态也要走一次 loadPreview，否则那个预览会一直空着，
-  // 而 watch 从不触发时连关闭分支（释放会话）也永远不会执行。
   { immediate: true },
 );
+onBeforeUnmount(() => { void resetPreview()?.release(); });
 </script>
 
 <template>

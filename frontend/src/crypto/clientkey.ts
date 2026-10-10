@@ -21,7 +21,7 @@ export interface ClientKeyPair {
  * 根本用不了的密钥。
  */
 export function encryptionSupported(): boolean {
-  return typeof crypto !== "undefined" && !!crypto.subtle && window.isSecureContext;
+  return typeof crypto !== "undefined" && !!crypto.subtle && globalThis.isSecureContext;
 }
 
 /**

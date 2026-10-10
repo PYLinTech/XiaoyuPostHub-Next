@@ -68,13 +68,16 @@ export async function preparePreview(
   source: DeliverySource,
   options: { signal?: AbortSignal } = {},
 ): Promise<PreviewHandle> {
+  options.signal?.throwIfAborted();
   const pair = encryptionSupported() ? await createClientKeyPair() : null;
+  options.signal?.throwIfAborted();
   const plan = await source.plan(pair);
   // plan 一到手，服务端就已经按 reservedBytes 预扣了额度。此后任何一步失败
   // （取内容密钥、注册 SW、解密、拼 Blob）都必须结算，否则这笔预扣要等维护
   // 任务回收才释放——用户反复点开一个坏文件就能把额度吃光。下载路径本来就有
   // 这个兜底，预览路径原先漏了。
   try {
+    options.signal?.throwIfAborted();
     return await buildHandle(plan, pair, options);
   } catch (err) {
     await settleQuietly(plan);

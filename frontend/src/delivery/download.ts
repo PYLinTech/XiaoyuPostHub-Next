@@ -29,7 +29,7 @@ export interface DeliveryProgress {
   message: string;
 }
 
-interface DeliveryResult {
+export interface DeliveryResult {
   fileName: string;
   mimeType: string;
   checksum: string;
@@ -40,11 +40,12 @@ interface DeliveryResult {
   savedAs: string | null;
 }
 
-interface DeliveryOptions {
+export interface DeliveryOptions {
   onProgress?: (progress: DeliveryProgress) => void;
   signal?: AbortSignal;
   /** 超过该大小时优先流式落盘，避免整份文件驻留内存。 */
   streamToDiskAbove?: number;
+  openDiskSink?: (fileName: string) => Promise<DiskSink | null>;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 256 * 1024 * 1024;
@@ -172,7 +173,7 @@ async function receiveCiphertext(
 
   const sink =
     meta.plainSize >= (options.streamToDiskAbove ?? DEFAULT_STREAM_THRESHOLD)
-      ? await tryOpenDiskSink(plan.fileName)
+      ? await (options.openDiskSink ?? tryOpenDiskSink)(plan.fileName)
       : null;
 
   const parts: Uint8Array[] = [];
@@ -302,7 +303,7 @@ async function receivePlaintext(
     reader = response.body?.getReader() ?? null;
     sink =
       reader && plan.plainSize >= (options.streamToDiskAbove ?? DEFAULT_STREAM_THRESHOLD)
-        ? await tryOpenDiskSink(plan.fileName)
+        ? await (options.openDiskSink ?? tryOpenDiskSink)(plan.fileName)
         : null;
 
     if (reader) {
@@ -314,6 +315,7 @@ async function receivePlaintext(
         if (!value) {
           continue;
         }
+        signal?.throwIfAborted();
         hasher.update(value);
         if (sink) {
           await sink.write(value);
@@ -388,7 +390,7 @@ export function assertHeaderMatchesMeta(header: XphHeader, meta: DeliveryPlan["e
   }
 }
 
-interface DiskSink {
+export interface DiskSink {
   name: string;
   write(chunk: Uint8Array): Promise<void>;
   close(): Promise<void>;
@@ -405,7 +407,7 @@ interface SaveFilePickerWindow {
  * 只在支持 File System Access 的浏览器上可用；不支持时返回 null，由调用方
  * 回落到内存累积。"不能流式"不是失败，只是另一种交付方式，因此这里不报错。
  */
-async function tryOpenDiskSink(fileName: string): Promise<DiskSink | null> {
+export async function tryOpenDiskSink(fileName: string): Promise<DiskSink | null> {
   const picker = (window as unknown as SaveFilePickerWindow).showSaveFilePicker;
   if (typeof picker !== "function") {
     return null;

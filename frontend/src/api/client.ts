@@ -66,6 +66,14 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   onUnauthorized = handler;
 }
 
+/** Worker 的未授权通知也走同一个会话出口。 */
+export function notifyUnauthorized(): void {
+  if (onUnauthorized && !unauthorizedFired) {
+    unauthorizedFired = true;
+    try { onUnauthorized(); } catch { /* 与请求中的通知一样不影响交付错误。 */ }
+  }
+}
+
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** 任意可 JSON 序列化的请求体；传 Blob/ArrayBuffer 时按二进制原样发送。 */
@@ -141,20 +149,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   }
 
   if (!response.ok) {
-    if (response.status === 401 && clearSessionOn401 && onUnauthorized) {
-      // 一个列表页并发五六个请求，令牌同时过期时会连着进来六次 401。
-      // 去重不是为了省请求，而是避免"清会话 → 通知界面"这条链被触发六遍
-      // （界面侧会跟着重拉公告、跳登录页）。令牌一旦写回就复位。
-      if (!unauthorizedFired) {
-        unauthorizedFired = true;
-        try {
-          onUnauthorized();
-        } catch {
-          // 刻意吞掉：这里的异常会顶掉下面那个真正的 ApiError，
-          // 于是界面上显示的是一句与本次请求毫不相干的话。
-        }
-      }
-    }
+    if (response.status === 401 && clearSessionOn401) notifyUnauthorized();
     const shape: ApiErrorShape | undefined = payload?.error;
     throw new ApiError(
       response.status,
@@ -200,10 +195,7 @@ export async function requestBlob(path: string, body: unknown, signal?: AbortSig
     throw new ApiError(0, "网络连接失败，请检查网络后重试", String(err));
   }
   if (!response.ok) {
-    if (response.status === 401 && onUnauthorized && !unauthorizedFired) {
-      unauthorizedFired = true;
-      try { onUnauthorized(); } catch { /* 保留原始 API 错误。 */ }
-    }
+    if (response.status === 401) notifyUnauthorized();
     const text = await response.text();
     let payload: ApiEnvelope<unknown> | null = null;
     try { payload = text ? JSON.parse(text) as ApiEnvelope<unknown> : null; } catch { payload = null; }
@@ -259,10 +251,7 @@ export function requestWithUploadProgress<T>(
         try { payload = JSON.parse(xhr.responseText) as ApiEnvelope<T>; } catch { payload = null; }
       }
       if (xhr.status < 200 || xhr.status >= 300) {
-        if (xhr.status === 401 && onUnauthorized && !unauthorizedFired) {
-          unauthorizedFired = true;
-          try { onUnauthorized(); } catch { /* 保留原始 API 错误。 */ }
-        }
+        if (xhr.status === 401) notifyUnauthorized();
         const shape: ApiErrorShape | undefined = payload?.error;
         reject(new ApiError(xhr.status, shape?.message ?? defaultMessageFor(xhr.status), shape?.detail, retryAfter));
         return;
