@@ -144,9 +144,9 @@ test('一个 Range 批次未下载完即可交付已认证的首块',async()=>{
   try{assert.equal((await f.source.read(0,10,f.abort.signal)).length,10);assert.equal(typeof finish,'function');finish()}
   finally{f.close()}
 });
-test('多个随机区间共享四路并发上限，队列取消不遗留请求',async()=>{
-  const plain=new Uint8Array(512*100),f=await fixture(plain);
-  try{await Promise.all([0,9000,18000,27000,36000,45000].map(start=>f.source.read(start,start+20,f.abort.signal)));assert.equal(f.max(),4)}finally{f.close()}
+test('多个随机区间共享并发上限，队列取消不遗留请求',async()=>{
+  const plain=new Uint8Array(512*200),f=await fixture(plain);
+  try{await Promise.all([0,9000,18000,27000,36000,45000,54000,63000,72000].map(start=>f.source.read(start,start+20,f.abort.signal)));assert.equal(f.max(),8)}finally{f.close()}
 });
 test('最后一块在响应长度核对后交付，额外密文字节不可静默忽略',async()=>{
   const f=await fixture(new Uint8Array(100));

@@ -8,7 +8,49 @@ export interface MediaCipherSource { url: string; parts?: CipherPart[]; key: Uin
 import { FULL_PREVIEW_LIMIT } from "./mediaPreviewLimits";
 export { FULL_PREVIEW_LIMIT } from "./mediaPreviewLimits";
 const CACHE_BYTES = 32 * 1024 * 1024;
-const BATCH_BYTES = 4 * 1024 * 1024;
+/**
+ * 单次预取的目标字节数，取 1 MiB 对齐默认加密块。
+ *
+ * 对齐后 batchCount 恒为 1（1 MiB 块 ÷ 1 MiB 目标），一个 HTTP Range 请求
+ * 恰好对应一个完整加密块。这样"首批可交付字节"不再等整批：读到一个块就认证、
+ * 就交付，无需等齐同一批里的其他块——慢网下这是首帧延迟的直接下限。
+ *
+ * 代价是请求数变为字节数的 4 倍，所以并发从 4 提到 6（见 MAX_CONCURRENT）
+ * 来补偿吞吐；两者叠加后首帧更快，且在途总量反而比"4 MiB 批 × 4 路"更可控。
+ */
+const BATCH_BYTES = 1024 * 1024;
+/**
+ * 同时在途的批次数上限。
+ *
+ * BATCH_BYTES 已与加密块对齐（batchCount 恒为 1），所以一个批次就是一次请求、
+ * 一块数据，并发数直接等于同时下载的块数。
+ *
+ * 取 8：浏览器对同源 HTTP/1.1 的连接数上限是 6，多出来的 2 路在多数浏览器里
+ * 仍能生效（HTTP/2 下无此限制，且部分浏览器对同源连接有更高余量），而它们
+ * 能让"预取深度 > 并发数"时多几块先在途。若部署在严格 6 连接的链路上，
+ * 超出的部分只会在浏览器内部排队，不会变慢也不会报错。
+ *
+ * 在途上限 = 并发 × PREFETCH_BLOCKS。取 8 × 4 = 32 块 ≈ 32 MiB，与 CACHE_BYTES
+ * 同量级，缓存装得下这些块，seek 时命中率高，不必回头重下。
+ */
+const MAX_CONCURRENT = 8;
+/**
+ * 跨批预取的窗口深度（以**块**为单位，不是批）。
+ *
+ * 这个深度必须在消费追上之前把后续请求放出去，否则每消耗完一块就把一段完整
+ * 往返暴露给播放器，首帧卡顿正是这么来的。旧写法用 batchCount 兼表窗口深度，
+ * 一旦 BATCH_BYTES 调到与加密块同大小、batchCount 退化成 1，窗口就塌成"只预取
+ * 下一块"——而那一块要么已在同批 pending 里空转，要么仍要等消费推进才发起，正是
+ * 要避免的形态。所以窗口深度改为直接按块计，与批次大小彻底解耦：批怎么调，
+ * 深度都是 PREFETCH_BLOCKS。
+ *
+ * 取 8 块（8 MiB 预取视野）：与 MAX_CONCURRENT 同深，两者相乘即"最多同时有
+ * 多少 MiB 在途"的上限，实际由两者中较小者决定在途量，深窗口只保证"请求发得
+ * 出去、不至于被消费卡住发起时机"。再深只会让快网白下数据、挤占 seek 与后续
+ * 分片的带宽；真正的缓冲深度由播放器侧的 ahead（秒）控制，那一层会在数据跟不上
+ * 时主动收缩。
+ */
+const PREFETCH_BLOCKS = 8;
 export class MediaSourceError extends Error {
   constructor(message: string, public readonly code: "auth" | "range" | "network" | "size") { super(message); this.name = "MediaSourceError"; }
 }
@@ -89,21 +131,12 @@ export class MediaRangeSource {
           if (position >= end) { output.close(); return; }
           const index = Math.floor(position / this.header.blockSize);
           const current = this.block(index, prefetch);
-          // 预取窗口要够深，且必须跨过批次边界。
-          //
-          // block(index) 只组建 [index, index+count) 一批；若这里只预取 index+1，
-          // 它在批次内部必然已在 pending 或 cache 而空转，下一批要等消费推进到
-          // 边界才发起——那正是缓存刚好耗尽的时刻，于是每跨一个边界就暴露一次
-          // 完整网络往返（首帧卡顿即源于此）。
-          //
-          // 深度取"一个批次 + 一个批次"，而不是再多加几批：预取的意义是让请求在
-          // 消费追上之前就在途，超过两批的部分会让快网白下数据、挤占 seek 和
-          // 后续分片的带宽。真正的缓冲深度由播放器侧的 ahead（秒）控制，
-          // 那一层已经会在数据跟不上时主动收缩。
+          // 预取窗口按块推进，必须跨过批次边界：消费消耗完当前块时，下一块的请求
+          // 早已在途，才能把网络往返藏在消费背后。深度取 PREFETCH_BLOCKS，与
+          // 批次大小解耦——见该常量注释。
           if (prefetch && lookahead) {
-            const ahead = this.batchCount(true);
-            const batchEnd = Math.min(this.header.blockCount, index + ahead);
-            for (let i = batchEnd; i < Math.min(this.header.blockCount, batchEnd + ahead); i++) {
+            for (let i = index + 1; i <= index + PREFETCH_BLOCKS; i++) {
+              if (i >= this.header.blockCount) break;
               void this.block(i).catch(() => {});
             }
           }
@@ -141,7 +174,16 @@ export class MediaRangeSource {
     return this.read(start, this.size, signal);
   }
 
-  /** 一次预取覆盖的块数。批次内与跨批次预取必须用同一份，否则两处窗口会不一致。 */
+  /**
+   * 一次 Range 请求覆盖多少个加密块。
+   *
+   * 按 BATCH_BYTES 目标折算，并封顶 8 块——封顶只为在加密块异常小（格式下限
+   * 512 B）时不至于把整份文件一次性预取进内存。当前默认 1 MiB 块配 1 MiB
+   * 目标下恒为 1，即一个请求对应一个完整加密块。
+   *
+   * 预取**窗口深度**不由这里决定：那是 PREFETCH_BLOCKS 的职责，两者已解耦，
+   * 批次调小才不会连带把窗口压塌。
+   */
   private batchCount(prefetch: boolean): number {
     return prefetch ? Math.max(1, Math.min(8, Math.floor(BATCH_BYTES / this.header.blockSize))) : 1;
   }
@@ -215,9 +257,16 @@ export class MediaRangeSource {
     }
   }
 
+  /**
+   * 取一个请求槽位。没有槽位就排队，等前面的批次完成再补位。
+   *
+   * 并发只决定同时在途多少个请求，不影响预取窗口深度——后者由
+   * PREFETCH_BLOCKS 固定，两者已解耦。调大并发能在慢网上摊平单个请求的
+   * 等待（往返延迟被流水线藏起来），代价是多占连接。
+   */
   private async acquire() {
     this.signal.throwIfAborted();
-    if (this.active < 4) { this.active++; return; }
+    if (this.active < MAX_CONCURRENT) { this.active++; return; }
     await new Promise<void>((resolve, reject) => {
       const ready = () => { this.signal.removeEventListener("abort", abort); this.active++; resolve(); };
       const abort = () => { const i = this.queue.indexOf(ready); if (i >= 0) this.queue.splice(i, 1); reject(this.signal.reason); };

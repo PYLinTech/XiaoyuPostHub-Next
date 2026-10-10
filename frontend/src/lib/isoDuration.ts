@@ -99,8 +99,8 @@ export function parseMoovTimings(moov: Uint8Array): TrackDeclaration[] {
  * 载荷里恰好出现 moof 字样的巧合。
  *
  * 尾部窗口里的 moof 按时间递增排列，也就是遇到的**第一个**合法 moof 就是最后
- * 一个——拿到它就返回。慢网上这一点直接决定成败：扫完整个 16 MiB 窗口才返回，
- * 等于把窗口里所有分片都读了一遍，而其中一个 moof 只有几 KB。
+ * 一个——拿到它就返回。慢网上这一点直接决定成败：扫完整个窗口才返回，等于把
+ * 窗口里所有分片都读了一遍，而其中一个 moof 只有几 KB。
  */
 export function findLastMoof(window: Uint8Array): Map<number, TrackTiming> {
   const view = new DataView(window.buffer, window.byteOffset, window.byteLength);

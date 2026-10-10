@@ -8,23 +8,41 @@ import { MediaRangeSource } from "./mediaRangeSource";
 import { supportsMediaSourceType } from "./mediaSourceSupport";
 import { durationFromTail } from "./isoDuration";
 
-/** 尾部探测窗口。实测最后一个 moof 距文件末尾 11.9 MiB，取 16 MiB 留出余量。 */
 /**
- * 尾部探测的渐进窗口（字节），命中即止。
+ * 尾部探测的窗口起点序列（字节），命中即止。
  *
- * 末尾 moof 离文件尾多远取决于最后一个分片的大小：常见在几百 KiB 以内，
- * 但实测遇到过 11.9 MiB 的长分片。逐级放大比每次读满更划算——顺风局只付
- * 最小那档的钱，逆风局最多也就走到最后一档。
+ * 末尾 moof 离文件尾多远，只取决于**最后一个分片有多大**，也就是码率 ×
+ * 末片时长：这个值没有任何天然上界。16 Mbps 的文件常见末片只有几百 KiB，
+ * 但高码率（4K/8K）动辄上百 MiB——实测 25 Mbps 配 6 秒末片就已经超过
+ * 16 MiB，100 Mbps 更是差一个数量级。任何写死的上限都只是"刚好没爆"，
+ * 换个码率就静默失效，所以这里不设上限，改用几何级数一路放大。
+ *
+ * 起始档仍取 256 KiB：绝大多数文件在这一档就命中，顺风局不会多付钱。
+ * 每档 ×4 保证慢网上档位数少（8 档就到 64 MiB 档），不至于把预算耗在
+ * 逐级试探上。
  */
-const TAIL_WINDOWS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
+const TAIL_WINDOW_START = 256 * 1024;
+const TAIL_WINDOW_GROWTH = 4;
+
+/**
+ * 探测尾部窗口最多能放大到多大。
+ *
+ * 这是防止病态大文件把内存吃掉的兜底，不是"典型范围"。64 MiB 已经覆盖到
+ * 约 100 Mbps × 14 秒末片的规模；再往上单个 Uint8Array 本身就逼近浏览器
+ * 可承受的连续分配上限（多数引擎单次分配上限约 2 GiB，但 GC 停顿明显）。
+ * 越过这里的文件让 duration() 返回 null、进度条留空，比拖垮标签页划算。
+ */
+const TAIL_WINDOW_MAX = 64 * 1024 * 1024;
 
 /**
  * 时长探测的总预算。
  *
  * 慢网下 8 秒连最小一档都读不完，于是总时长永远拿不到——而总时长对进度条是
  * 必需的，缺了它用户就得从头拖到尾才知道有多长。宁可多等：底层 cipher() 还有
- * 30 秒无数据等待超时兜底，这里放宽到 45 秒足够慢网读完 16 MiB 的同时不至于
- * 在顺风局上无谓等待（顺风局命中第一档就走完了）。
+ * 30 秒无数据等待超时兜底，这里放宽到 45 秒。
+ *
+ * 这个预算同时是尾部搜索的真正终止条件：窗口按几何级数放大，预算耗尽即
+ * 放弃（返回 null，进度条留空）。顺风局命中第一档就走完，不会碰到预算。
  */
 const PROBE_TIMEOUT = 45_000;
 
@@ -154,10 +172,11 @@ export class MediaDemuxSession {
     // tfdt 带着最后一片的起始时间。两处都失败就返回 null，让播放器留空，
     // 也不要给一个猜出来的值：错的时长会让进度条提前到底然后停住。
     //
-    // 探测要有耐心但不能贪心：慢网上固定 8 秒必然读不完 16 MiB，于是永远
-    // 拿不到总时长；而一开始就铺满窗口又会在顺风局白读十几 MiB。所以改用
-    // 渐进窗口——命中即止，总预算放宽到 PROBE_TIMEOUT。底层 cipher() 另有
-    // 30 秒无数据等待超时兜底，这里管的是"整体允许花多久"。
+    // 探测要有耐心但不能贪心：慢网上固定 8 秒必然读不完最小几档，于是永远
+    // 拿不到总时长；而一开始就铺满窗口又会在顺风局白读十几 MiB。所以用
+    // 几何级数放大的窗口——命中即止，总预算 PROBE_TIMEOUT 是唯一的终止
+    // 条件。底层 cipher() 另有 30 秒无数据等待超时兜底，这里管的是
+    // "整体允许花多久"。
     const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(PROBE_TIMEOUT)]);
     const head = await this.probe(async () => {
       const input = this.source.input(signal, 2 * 1024 * 1024);
@@ -174,9 +193,10 @@ export class MediaDemuxSession {
   /**
    * 从文件尾部反推容器时长：渐进放大窗口，命中即止。
    *
-   * 末尾 moof 离文件尾的距离取决于最后一个分片有多大——本项目实测过的极端
-   * 案例是 11.9 MiB，但常见的多在几百 KiB 以内。所以从 256 KiB 起步，找不到
-   * 再逐级放大到 16 MiB，而不是每次都读满。顺风局只付最小那一档的钱。
+   * 末尾 moof 离文件尾的距离取决于最后一个分片有多大（码率 × 末片时长），
+   * 这个值没有天然上界——本项目实测过的极端案例是 11.9 MiB，但高码率片源
+   * 轻松超过。所以从 256 KiB 起步逐级放大到 TAIL_WINDOW_MAX，而不是每次读满，
+   * 顺风局只付最小那一档的钱。
    */
   private async tailDuration(signal: AbortSignal): Promise<number | null> {
     const head = await this.source.read(0, Math.min(this.source.size, 1024 * 1024), signal);
@@ -188,14 +208,22 @@ export class MediaDemuxSession {
           .then(bytes => bytes.subarray(0, readBoxSize(bytes, 0)));
     if (!moov || readTypeAt(moov, 4) !== "moov") return null;
 
-    for (const window of TAIL_WINDOWS) {
+    // 窗口按 256 KiB → 1 MiB → 4 MiB … 一路放大到 TAIL_WINDOW_MAX，命中即止。
+    // 放大到上限仍未命中就返回 null：让进度条留空，也不给猜出来的值——错的
+    // 时长会让进度条提前到底然后停住，危害大于不显示。外层 PROBE_TIMEOUT
+    // 还会在慢网上更早叫停，所以这里不会真的读到上限那么远。
+    const total = this.source.size;
+    for (let window = Math.min(TAIL_WINDOW_START, total); ; window *= TAIL_WINDOW_GROWTH) {
       signal.throwIfAborted();
-      const tail = await this.source.tail(window, signal);
+      // 请求量收敛到上限后不再增长，避免同一段尾部被反复读取。
+      const reach = Math.min(window, TAIL_WINDOW_MAX, total);
+      const tail = await this.source.tail(reach, signal);
       const duration = durationFromTail(moov, tail);
       // 找到就用，不继续放大：再往后读到的 moof 只会更早，tfdt 更小。
       if (duration !== null) return duration;
+      // 已经读满整个文件（或上限）还没找到，没有下一档可试。
+      if (reach >= total || window >= TAIL_WINDOW_MAX) return null;
     }
-    return null;
   }
 
   /** 探测失败（超时、读预算耗尽、上游不支持）一律当作"拿不到"，不让它打断播放。 */
