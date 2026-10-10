@@ -62,13 +62,16 @@ export async function runDelivery(
   const report = options.onProgress ?? (() => {});
   const signal = options.signal;
 
+  signal?.throwIfAborted();
   report({ phase: "preparing", bytesDone: 0, bytesTotal: 0, message: "正在准备" });
 
   const pair = encryptionSupported() ? await createClientKeyPair() : null;
+  signal?.throwIfAborted();
   const plan = await source.plan(pair);
 
   let result: DeliveryResult;
   try {
+    signal?.throwIfAborted();
     result =
       plan.contentForm === "ciphertext"
         ? await receiveCiphertext(plan, pair, report, signal, options)
@@ -201,6 +204,8 @@ async function receiveCiphertext(
       throw new Error(`内容校验失败：期望 ${plan.checksum}，实得 ${digest}`);
     }
 
+    signal?.throwIfAborted();
+    report({ phase: "delivering", bytesDone: done, bytesTotal: total, message: "正在保存" });
     if (sink) {
       await sink.close();
       return {
@@ -213,7 +218,6 @@ async function receiveCiphertext(
       };
     }
 
-    report({ phase: "delivering", bytesDone: done, bytesTotal: total, message: "正在交付" });
     return {
       fileName: plan.fileName,
       mimeType: plan.mimeType,
@@ -332,6 +336,8 @@ async function receivePlaintext(
       throw new Error(`内容校验失败：期望 ${plan.checksum}，实得 ${digest}`);
     }
 
+    signal?.throwIfAborted();
+    report({ phase: "delivering", bytesDone: done, bytesTotal: plan.plainSize, message: "正在保存" });
     if (sink) {
       await sink.close();
       return {

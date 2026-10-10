@@ -13,15 +13,16 @@ import (
 // ---------------------------------------------------------------- 分享管理
 
 type createShareRequest struct {
-	Path          string `json:"path"`
-	Kind          string `json:"kind"`
-	AccessMode    string `json:"accessMode"`
-	Password      string `json:"password"`
-	AllowDownload *bool  `json:"allowDownload"`
-	AllowPreview  *bool  `json:"allowPreview"`
-	AllowSubpath  *bool  `json:"allowSubpath"`
-	ExpiresAt     int64  `json:"expiresAt"`
-	MaxVisits     int    `json:"maxVisits"`
+	Path           string `json:"path"`
+	Kind           string `json:"kind"`
+	AccessMode     string `json:"accessMode"`
+	Password       string `json:"password"`
+	AllowDownload  *bool  `json:"allowDownload"`
+	AllowPreview   *bool  `json:"allowPreview"`
+	AllowSubpath   *bool  `json:"allowSubpath"`
+	ShowSharerName *bool  `json:"showSharerName"`
+	ExpiresAt      int64  `json:"expiresAt"`
+	MaxVisits      int    `json:"maxVisits"`
 }
 
 // handleCreateShare 创建分享。
@@ -37,15 +38,16 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 	kind := store.ShareKind(strings.TrimSpace(req.Kind))
 	mode := store.AccessMode(strings.TrimSpace(req.AccessMode))
 	share, err := s.Svc.CreateShare(r.Context(), p, service.CreateShareRequest{
-		Path:          req.Path,
-		Kind:          kind,
-		AccessMode:    mode,
-		Password:      req.Password,
-		AllowDownload: boolOr(req.AllowDownload, true),
-		AllowPreview:  boolOr(req.AllowPreview, true),
-		AllowSubpath:  boolOr(req.AllowSubpath, true),
-		ExpiresAt:     req.ExpiresAt,
-		MaxVisits:     req.MaxVisits,
+		Path:           req.Path,
+		Kind:           kind,
+		AccessMode:     mode,
+		Password:       req.Password,
+		AllowDownload:  boolOr(req.AllowDownload, true),
+		AllowPreview:   boolOr(req.AllowPreview, true),
+		AllowSubpath:   boolOr(req.AllowSubpath, true),
+		ShowSharerName: boolOr(req.ShowSharerName, true),
+		ExpiresAt:      req.ExpiresAt,
+		MaxVisits:      req.MaxVisits,
 	})
 	if err != nil {
 		fail(w, err)
@@ -75,6 +77,7 @@ type updateShareRequest struct {
 	AllowDownload   *bool   `json:"allowDownload"`
 	AllowPreview    *bool   `json:"allowPreview"`
 	AllowSubpath    *bool   `json:"allowSubpath"`
+	ShowSharerName  *bool   `json:"showSharerName"`
 	ExpiresAt       *int64  `json:"expiresAt"`
 	MaxVisits       *int    `json:"maxVisits"`
 	Disabled        *bool   `json:"disabled"`
@@ -97,6 +100,7 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		AllowDownload:   req.AllowDownload,
 		AllowPreview:    req.AllowPreview,
 		AllowSubpath:    req.AllowSubpath,
+		ShowSharerName:  req.ShowSharerName,
 		ExpiresAt:       req.ExpiresAt,
 		MaxVisits:       req.MaxVisits,
 		Disabled:        req.Disabled,
@@ -220,7 +224,9 @@ type guestShare struct {
 	// RootName 是分享内容的展示名（不含属主路径层级）。
 	RootName string `json:"rootName"`
 	// IsOwner 供受限分享判断"访问者是否就是创建者"，替代暴露 ownerId。
-	IsOwner bool `json:"isOwner"`
+	IsOwner    bool   `json:"isOwner"`
+	SharerName string `json:"sharerName,omitempty"`
+	Size       int64  `json:"size"`
 }
 
 // guestTarget 只保留展示名。访客的目录导航走 share 内相对路径，不消费绝对路径。
@@ -229,6 +235,10 @@ type guestTarget struct {
 }
 
 func guestShareView(share store.Share, p auth.Principal) (guestShare, guestTarget) {
+	sharerName := ""
+	if share.ShowSharerName {
+		sharerName = share.SharerName
+	}
 	rootName := vpath.Base(share.RootPath)
 	if share.RootPath == vpath.Root {
 		rootName = "根目录"
@@ -245,6 +255,8 @@ func guestShareView(share store.Share, p auth.Principal) (guestShare, guestTarge
 		MaxVisits:     share.MaxVisits,
 		Visits:        share.Visits,
 		RootName:      rootName,
+		SharerName:    sharerName,
+		Size:          share.Size,
 		IsOwner:       !p.IsGuest() && p.UserID() == share.OwnerID,
 	}, guestTarget{Path: rootName}
 }

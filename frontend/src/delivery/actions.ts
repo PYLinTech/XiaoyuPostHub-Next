@@ -1,5 +1,6 @@
+import { addDownload, canCancelDownload } from "@/stores/downloads";
 import { ref } from "vue";
-import { runDelivery, saveBlob, type DeliveryProgress, type DeliverySource } from "./download";
+import { runDelivery, saveBlob, type DeliverySource } from "./download";
 import { describeError, isAbortError, logError } from "@/lib/async";
 import { useToasts } from "@/stores/toast";
 
@@ -11,30 +12,36 @@ import { useToasts } from "@/stores/toast";
 
 export function useDeliveryAction() {
   const busy = ref(false);
-  const progress = ref<DeliveryProgress | null>(null);
-  const controller = ref<AbortController | null>(null);
 
-  async function run(source: DeliverySource, options: { silent?: boolean } = {}): Promise<boolean> {
+  async function run(source: DeliverySource, options: { silent?: boolean; fileName?: string } = {}): Promise<boolean> {
     if (busy.value) {
       return false;
     }
     const toasts = useToasts();
     const abort = new AbortController();
-    controller.value = abort;
+    const item = addDownload(options.fileName ?? "正在准备文件", () => {
+      if (canCancelDownload(item)) abort.abort();
+    });
     busy.value = true;
-    progress.value = { phase: "preparing", bytesDone: 0, bytesTotal: 0, message: "正在准备" };
 
     try {
-      const result = await runDelivery(source, {
+      const result = await runDelivery({
+        async plan(pair) {
+          const plan = await source.plan(pair);
+          item.fileName = plan.fileName;
+          return plan;
+        },
+      }, {
         signal: abort.signal,
         onProgress: (info) => {
-          progress.value = info;
+          item.progress = info;
         },
       });
 
       if (result.blob) {
         saveBlob(result.blob, result.fileName);
       }
+      item.status = "done";
       if (!options.silent) {
         toasts.success(
           result.savedAs ? `已保存到 ${result.savedAs}` : `已下载 ${result.fileName}`,
@@ -44,22 +51,20 @@ export function useDeliveryAction() {
       return true;
     } catch (err) {
       if (isAbortError(err)) {
+        item.status = "canceled";
         toasts.info("已取消");
         return false;
       }
+      item.status = "error";
+      item.errorMessage = describeError(err);
       logError("download", err);
       toasts.error("下载失败", describeError(err));
       return false;
     } finally {
+      item.cancel = () => {};
       busy.value = false;
-      progress.value = null;
-      controller.value = null;
     }
   }
 
-  function cancel(): void {
-    controller.value?.abort();
-  }
-
-  return { busy, progress, run, cancel };
+  return { busy, run };
 }

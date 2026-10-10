@@ -6,7 +6,7 @@ import AppSideNav from "@/components/AppSideNav.vue";
 import AppTickerBar from "@/components/AppTickerBar.vue";
 import AppToast from "@/components/AppToast.vue";
 import AppTopBar from "@/components/AppTopBar.vue";
-import AppUploadDock from "@/components/AppUploadDock.vue";
+import AppTransferDock from "@/components/AppTransferDock.vue";
 import { useOverlayScroll } from "@/lib/overlayScroll";
 import { onSessionChange, useSession } from "@/stores/session";
 import { loadAnnouncements } from "@/stores/site";
@@ -132,7 +132,7 @@ void loadAnnouncements();
     </div>
   </div>
 
-  <AppUploadDock />
+  <AppTransferDock />
   <AppToast />
 </template>
 

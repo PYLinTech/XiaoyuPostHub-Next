@@ -6,7 +6,6 @@ import AppButton from "@/components/ui/AppButton.vue";
 import AppEmpty from "@/components/ui/AppEmpty.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import AppModal from "@/components/ui/AppModal.vue";
-import AppProgress from "@/components/ui/AppProgress.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import FormField from "@/components/ui/FormField.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
@@ -275,7 +274,7 @@ async function downloadOne(item: ListNode): Promise<void> {
     toasts.info("目录不能整体下载，请进入目录逐个下载文件");
     return;
   }
-  await downloads.run(fileDeliverySource(item.path, "download"));
+  await downloads.run(fileDeliverySource(item.path, "download"), { fileName: item.name });
 }
 
 /**
@@ -294,7 +293,7 @@ async function downloadSelected(): Promise<void> {
     return;
   }
   for (const item of targets) {
-    const ok = await downloads.run(fileDeliverySource(item.path, "download"), { silent: true });
+    const ok = await downloads.run(fileDeliverySource(item.path, "download"), { silent: true, fileName: item.name });
     if (!ok) {
       toasts.error(`批量下载中断于 ${item.name}`);
       return;
@@ -595,19 +594,6 @@ async function shareItem(item: ListNode): Promise<void> {
          "0 个文件 · 0 个文件夹 · 共 0 B"——那是一条明确的错误信息，不能当统计读。
          因此在这里单独提示一次，而不是让页脚沉默。 -->
     <p v-if="stats.error.value" class="notice notice--danger">读取统计失败：{{ stats.error.value }}</p>
-
-    <div v-if="downloads.busy.value || downloads.progress.value" class="card files__progress">
-      <AppProgress
-        :ratio="
-          downloads.progress.value && downloads.progress.value.bytesTotal > 0
-            ? downloads.progress.value.bytesDone / downloads.progress.value.bytesTotal
-            : null
-        "
-        :bytes-done="downloads.progress.value?.bytesDone ?? 0"
-        :bytes-total="downloads.progress.value?.bytesTotal ?? 0"
-        :label="downloads.progress.value?.message ?? '正在准备'"
-      />
-    </div>
 
     <div class="card files__list">
       <!-- 表头：未选中时是列名，选中后原位换成批量条 -->
@@ -976,10 +962,6 @@ async function shareItem(item: ListNode): Promise<void> {
   min-height: 28px;
   padding: 0 10px;
   font-size: var(--fs-sm);
-}
-
-.files__progress {
-  padding: var(--sp-3) var(--sp-4);
 }
 
 /* ---------------------------------------------------------------- 列表 */

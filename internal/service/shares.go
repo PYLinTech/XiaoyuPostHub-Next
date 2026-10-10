@@ -25,29 +25,31 @@ const maxShareSecretBytes = 128
 // 只开放预览或只开放下载都是合法配置，猜调用方意图会让"我明明关掉了下载"
 // 失效。默认值由 HTTP 层在构造请求时决定。
 type CreateShareRequest struct {
-	Path          string
-	Kind          store.ShareKind
-	AccessMode    store.AccessMode
-	Password      string
-	AllowDownload bool
-	AllowPreview  bool
-	AllowSubpath  bool
-	ExpiresAt     int64
-	MaxVisits     int
+	Path           string
+	Kind           store.ShareKind
+	AccessMode     store.AccessMode
+	Password       string
+	AllowDownload  bool
+	AllowPreview   bool
+	ShowSharerName bool
+	AllowSubpath   bool
+	ExpiresAt      int64
+	MaxVisits      int
 }
 
 // UpdateShareRequest 是分享的部分更新。指针为 nil 表示该字段不变——
 // 用零值表示"不变"就无法把 MaxVisits 改成 0（不限次数）或把 Disabled
 // 改成 false（重新启用）。
 type UpdateShareRequest struct {
-	AccessMode    *store.AccessMode
-	Password      *string
-	AllowDownload *bool
-	AllowPreview  *bool
-	AllowSubpath  *bool
-	ExpiresAt     *int64
-	MaxVisits     *int
-	Disabled      *bool
+	AccessMode     *store.AccessMode
+	Password       *string
+	AllowDownload  *bool
+	AllowPreview   *bool
+	ShowSharerName *bool
+	AllowSubpath   *bool
+	ExpiresAt      *int64
+	MaxVisits      *int
+	Disabled       *bool
 	// ExpectUpdatedAt 是调用方读到的分享版本（store.Share.UpdatedAt）。
 	//
 	// 非零时按乐观锁提交：版本已被别人推进则返回 ErrConflict，而不是静默覆盖
@@ -139,10 +141,11 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 		AllowPreview:  req.AllowPreview,
 		// 文件分享没有"子路径"这个概念，落库为假以免前端据此渲染出
 		// 一个永远不会生效的开关。
-		AllowSubpath: kind == store.ShareFolder && req.AllowSubpath,
-		ExpiresAt:    req.ExpiresAt,
-		MaxVisits:    req.MaxVisits,
-		CreatedAt:    s.Now(),
+		AllowSubpath:   kind == store.ShareFolder && req.AllowSubpath,
+		ShowSharerName: req.ShowSharerName,
+		ExpiresAt:      req.ExpiresAt,
+		MaxVisits:      req.MaxVisits,
+		CreatedAt:      s.Now(),
 		// 乐观锁版本从非零起版：零是"调用方未声明版本"的哨兵值，创建时就落零
 		// 会让它无法与"未声明"区分。
 		UpdatedAt: s.Now(),
@@ -234,6 +237,9 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 			share.PwdHash = hashed
 		}
 		share.HasPassword = share.PwdHash != ""
+	}
+	if req.ShowSharerName != nil {
+		share.ShowSharerName = *req.ShowSharerName
 	}
 	if req.AllowDownload != nil {
 		share.AllowDownload = *req.AllowDownload
@@ -459,6 +465,12 @@ func (s *Service) resolveShare(ctx context.Context, id, password string, p auth.
 	if recordAccess {
 		_ = store.InsertShareAccess(ctx, s.DB.W(), share.ID, p.Actor, p.UserID(), p.ClientIP.String(), action)
 	}
+
+	// 展示字段仅在访问授权通过后填充；不以账号或邮箱作为名称回退。
+	if share.ShowSharerName {
+		share.SharerName = strings.TrimSpace(owner.DisplayName)
+	}
+	share.Size = node.SizePlain
 
 	// 返回的快照与库内保持一致，调用方不必再查一次。
 	return DeliveryTarget{

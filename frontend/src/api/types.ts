@@ -173,15 +173,21 @@ export interface Share {
   allowDownload: boolean;
   allowPreview: boolean;
   allowSubpath: boolean;
+  showSharerName: boolean;
   expiresAt?: number;
   maxVisits: number;
   visits: number;
   disabled: boolean;
   createdAt: number;
-  /** 访客视角（/api/s 与 /api/p 的 resolve）才有的脱敏字段：只暴露内容名称 */
-  rootName?: string;
-  /** 访客视角：当前登录用户是否就是分享创建者（用于受限分享的自访判定） */
-  isOwner?: boolean;
+  updatedAt?: number;
+}
+
+/** 访客解析接口的脱敏视图，不包含属主账号与绝对路径。 */
+export interface GuestShare extends Pick<Share, "id" | "kind" | "accessMode" | "hasPassword" | "allowDownload" | "allowPreview" | "allowSubpath" | "expiresAt" | "maxVisits" | "visits"> {
+  rootName: string;
+  isOwner: boolean;
+  sharerName?: string;
+  size: number;
 }
 
 export interface PickupCode {
@@ -353,10 +359,8 @@ export interface DeliveryPlan {
 }
 
 /** 分享解析结果。target 描述"要交付哪个用户的哪条路径"。 */
-export interface DeliveryTarget {
-  ownerUserId: number;
+export interface GuestTarget {
   path: string;
-  shareId?: string;
 }
 
 // ---------------------------------------------------------------- 上传

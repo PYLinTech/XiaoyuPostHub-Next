@@ -2,13 +2,12 @@
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppButton from "@/components/ui/AppButton.vue";
-import AppProgress from "@/components/ui/AppProgress.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
 import PreviewOverlay from "@/components/PreviewOverlay.vue";
 import logoUrl from "@/assets/logo.svg";
 import { guestApi } from "@/api/endpoints";
 import { ApiError } from "@/api/client";
-import { type DeliveryTarget, type Share } from "@/api/types";
+import { type GuestTarget, type GuestShare } from "@/api/types";
 import { pickupDeliverySource, shareDeliverySource } from "@/delivery/sources";
 import { useDeliveryAction } from "@/delivery/actions";
 import { describeError, logError } from "@/lib/async";
@@ -34,11 +33,11 @@ const cellIndices = Array.from({ length: CODE_LEN }, (_, index) => index);
 const code = computed(() => cells.value.join(""));
 const resolving = ref(false);
 const error = ref("");
-const share = ref<Share | null>(null);
-const target = ref<DeliveryTarget | null>(null);
+const share = ref<GuestShare | null>(null);
+const target = ref<GuestTarget | null>(null);
 const previewOpen = ref(false);
 
-const { busy: downloading, progress: downloadProgress, run: runDownload } = useDeliveryAction();
+const { busy: downloading, run: runDownload } = useDeliveryAction();
 
 const fileName = computed(() => (target.value ? baseName(target.value.path) : ""));
 const isFileShare = computed(() => share.value?.kind === "file");
@@ -93,14 +92,6 @@ const canDownload = computed(() => share.value !== null);
 const previewSource = computed(() => {
   const current = share.value;
   return current ? shareDeliverySource(current.id, "", "", "preview") : null;
-});
-
-const progressRatio = computed(() => {
-  const info = downloadProgress.value;
-  if (!info || info.bytesTotal <= 0) {
-    return null;
-  }
-  return info.bytesDone / info.bytesTotal;
 });
 
 function normalizeCode(raw: string): string {
@@ -261,7 +252,7 @@ function reset(): void {
 }
 
 async function download(): Promise<void> {
-  await runDownload(pickupDeliverySource(code.value));
+  await runDownload(pickupDeliverySource(code.value), { fileName: fileName.value || share.value?.rootName });
 }
 
 onMounted(() => {
@@ -352,13 +343,6 @@ onMounted(() => {
               下载
             </AppButton>
           </div>
-          <AppProgress
-            v-if="downloading"
-            :ratio="progressRatio"
-            :bytes-done="downloadProgress?.bytesDone"
-            :bytes-total="downloadProgress?.bytesTotal"
-            :label="downloadProgress?.message"
-          />
           <p class="faint" style="font-size: var(--fs-xs)">
             预览走的是分享通道，会再消耗一次分享的访问次数，但不消耗取件码的使用次数。
           </p>

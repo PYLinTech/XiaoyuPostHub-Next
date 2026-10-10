@@ -4,6 +4,7 @@ import { cancelUpload, uploadFile, type UploadProgressInfo } from "@/delivery/up
 import { describeError, isAbortError } from "@/lib/async";
 import { useSession } from "./session";
 import { useToasts } from "./toast";
+import { showTransfer } from "./transferPanel";
 
 // 全局上传队列。
 //
@@ -79,6 +80,7 @@ export function enqueueUploads(
     });
     ids.push(id);
   }
+  if (ids.length) showTransfer("upload");
   void pump();
   return ids;
 }
@@ -171,6 +173,7 @@ export function retryUpload(id: string): void {
   if (!item || item.status !== "error") {
     return;
   }
+  showTransfer("upload");
   item.status = "queued";
   item.errorMessage = "";
   item.progress = emptyProgress(item.file.name, item.file.size);

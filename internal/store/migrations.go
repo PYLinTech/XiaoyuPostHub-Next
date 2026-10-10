@@ -53,6 +53,7 @@ var migrations = []migration{
 	{Version: 2, Name: "mail_unbind_requests", File: "0001_mail_unbind.sql"},
 	{Version: 3, Name: "upload_platform", File: "0002_upload_platform.sql"},
 	{Version: 4, Name: "parallel_upload_checksum", File: "0003_parallel_upload_checksum.sql"},
+	{Version: 5, Name: "share_sharer_name", File: "0004_share_sharer_name.sql"},
 }
 
 // loadMigrations 按注册表读取每个迁移的 SQL 并做完整性校验。

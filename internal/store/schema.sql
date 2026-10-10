@@ -459,7 +459,8 @@ CREATE TABLE IF NOT EXISTS shares (
     disabled       INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
     -- 乐观锁版本：每次更新自增，并发的陈旧写回按此判定冲突。
-    updated_at     INTEGER NOT NULL DEFAULT 0
+    updated_at     INTEGER NOT NULL DEFAULT 0,
+    show_sharer_name INTEGER NOT NULL DEFAULT 1
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id, created_at);

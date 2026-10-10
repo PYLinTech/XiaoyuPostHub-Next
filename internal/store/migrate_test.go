@@ -139,6 +139,7 @@ func normalizeSQL(s string) string {
 func rewindToBaselineSchema(t *testing.T, db *DB) {
 	t.Helper()
 	for _, stmt := range []string{
+		`ALTER TABLE shares DROP COLUMN show_sharer_name`,
 		`ALTER TABLE upload_tasks DROP COLUMN expected_checksum`,
 		`DROP TABLE upload_job_parts`,
 		`DROP TABLE upload_stream_state`,

@@ -160,6 +160,7 @@ const form = reactive({
   allowDownload: true,
   allowPreview: true,
   allowSubpath: true,
+  showSharerName: true,
   expiresAtLocal: "",
   maxVisits: "0",
   disabled: false,
@@ -175,6 +176,7 @@ function openCreate(path: string, kind: ShareKind): void {
     allowDownload: true,
     allowPreview: true,
     allowSubpath: true,
+    showSharerName: true,
     expiresAtLocal: "",
     maxVisits: "0",
     disabled: false,
@@ -194,6 +196,7 @@ function openEdit(share: Share): void {
     allowDownload: share.allowDownload,
     allowPreview: share.allowPreview,
     allowSubpath: share.allowSubpath,
+    showSharerName: share.showSharerName,
     expiresAtLocal: unixToDateTimeLocal(share.expiresAt),
     maxVisits: String(share.maxVisits),
     disabled: share.disabled,
@@ -212,6 +215,9 @@ const expiresInPast = computed(() => {
  *  maxVisits、expiresAt 这类字段用零值覆盖掉。 */
 function buildPatch(original: Share, expiresAt: number, maxVisits: number): UpdateShareInput {
   const patch: UpdateShareInput = {};
+  if (form.showSharerName !== original.showSharerName) {
+    patch.showSharerName = form.showSharerName;
+  }
   // expiresAt 是可选字段，缺失即"永久"，而表单留空读出来是 0。直接拿它和
   // original.expiresAt 比，0 !== undefined 恒真，于是每次保存都会多带一个
   // expiresAt: 0，与这个函数声明的"不回写零值"相悖。先归一，缺失与 0 在
@@ -280,6 +286,7 @@ async function submit(): Promise<void> {
         allowDownload: form.allowDownload,
         allowPreview: form.allowPreview,
         allowSubpath: form.kind === "folder" && form.allowSubpath,
+        showSharerName: form.showSharerName,
         expiresAt,
         maxVisits,
       });
@@ -751,6 +758,10 @@ onMounted(() => {
               <span>允许浏览子目录</span>
               <span class="faint">关闭后访客只能看到分享根目录这一层。</span>
             </span>
+          </label>
+          <label class="check">
+            <input v-model="form.showSharerName" type="checkbox" />
+            <span class="check__text"><span>展示分享者名称</span><span class="faint">在分享页展示你的名称。</span></span>
           </label>
           <label v-if="editing" class="check">
             <input v-model="form.disabled" type="checkbox" />

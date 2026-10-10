@@ -12,7 +12,8 @@ import type {
   ConfigEntry,
   DatabaseStats,
   DeliveryPlan,
-  DeliveryTarget,
+  GuestTarget,
+  GuestShare,
   Group,
   GroupDetail,
   InitUploadResult,
@@ -183,6 +184,7 @@ interface CreateShareInput {
   allowDownload?: boolean;
   allowPreview?: boolean;
   allowSubpath?: boolean;
+  showSharerName?: boolean;
   expiresAt?: number;
   maxVisits?: number;
 }
@@ -193,6 +195,7 @@ export interface UpdateShareInput {
   allowDownload?: boolean;
   allowPreview?: boolean;
   allowSubpath?: boolean;
+  showSharerName?: boolean;
   expiresAt?: number;
   maxVisits?: number;
   disabled?: boolean;
@@ -231,7 +234,7 @@ interface GuestAccessInput {
 
 export const guestApi = {
   resolveShare: (id: string, input: GuestAccessInput) =>
-    request<{ share: Share; target: DeliveryTarget }>(`/api/s/${encodeURIComponent(id)}/resolve`, {
+    request<{ share: GuestShare; target: GuestTarget }>(`/api/s/${encodeURIComponent(id)}/resolve`, {
       method: "POST",
       body: { password: input.password ?? "", relPath: input.relPath ?? "" },
       clearSessionOn401: false,
@@ -263,7 +266,7 @@ export const guestApi = {
       clearSessionOn401: false,
     }),
   resolvePickup: (code: string) =>
-    request<{ share: Share; target: DeliveryTarget }>(
+    request<{ share: GuestShare; target: GuestTarget }>(
       `/api/p/${encodeURIComponent(code)}/resolve`,
       { method: "POST", body: {}, clearSessionOn401: false },
     ),

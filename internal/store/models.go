@@ -468,24 +468,28 @@ type InviteUse struct {
 
 // Share 是一次分享。
 type Share struct {
-	ID            string     `json:"id"`
-	OwnerID       int64      `json:"ownerId"`
-	RootPath      string     `json:"rootPath"`
-	Kind          ShareKind  `json:"kind"`
-	AccessMode    AccessMode `json:"accessMode"`
-	PwdHash       string     `json:"-"`
-	PwdSalt       string     `json:"-"`
-	HasPassword   bool       `json:"hasPassword"`
-	AllowDownload bool       `json:"allowDownload"`
-	AllowPreview  bool       `json:"allowPreview"`
-	AllowSubpath  bool       `json:"allowSubpath"`
-	ExpiresAt     int64      `json:"expiresAt,omitempty"`
-	MaxVisits     int        `json:"maxVisits"`
-	Visits        int        `json:"visits"`
-	Disabled      bool       `json:"disabled"`
-	CreatedAt     int64      `json:"createdAt"`
+	ID             string     `json:"id"`
+	OwnerID        int64      `json:"ownerId"`
+	RootPath       string     `json:"rootPath"`
+	Kind           ShareKind  `json:"kind"`
+	AccessMode     AccessMode `json:"accessMode"`
+	PwdHash        string     `json:"-"`
+	PwdSalt        string     `json:"-"`
+	HasPassword    bool       `json:"hasPassword"`
+	AllowDownload  bool       `json:"allowDownload"`
+	AllowPreview   bool       `json:"allowPreview"`
+	AllowSubpath   bool       `json:"allowSubpath"`
+	ShowSharerName bool       `json:"showSharerName"`
+	ExpiresAt      int64      `json:"expiresAt,omitempty"`
+	MaxVisits      int        `json:"maxVisits"`
+	Visits         int        `json:"visits"`
+	Disabled       bool       `json:"disabled"`
+	CreatedAt      int64      `json:"createdAt"`
 	// UpdatedAt 是乐观锁版本，每次更新自增。
 	UpdatedAt int64 `json:"updatedAt,omitempty"`
+	// 解析分享时填充的访客展示字段，不持久化。
+	SharerName string `json:"-"`
+	Size       int64  `json:"-"`
 }
 
 // PickupCode 是分享的短码别名。
