@@ -18,9 +18,10 @@ export const loadPreviewLibrary=async()=>({getFileType:({name})=>name.endsWith('
 export const createRequestGate=()=>{let n=0;return {next:()=>++n,isCurrent:i=>i===n}};export const describeError=e=>e.message;export const logError=()=>{};`);
 const state=(await import(mock)).state;
 const modal=url(`import {h} from ${JSON.stringify(vue)};export default {props:['open','title'],setup(p,{slots}){return ()=>p.open?h('section',[h('h2',p.title),slots.actions?.(),slots.default?.()]):null}}`);
+const media=url(`import {h,onBeforeUnmount} from ${JSON.stringify(vue)};import {state} from ${JSON.stringify(mock)};export default {props:['source','fileName','kind'],setup(p){state.media=p;onBeforeUnmount(()=>state.media=null);return ()=>h(p.kind,'独立媒体播放器')}}`);
 const button=url(`import {h} from ${JSON.stringify(vue)};export default {setup(p,{slots,attrs}){return ()=>h('button',attrs,slots.default?.())}}`),icon=url(`export default {render(){return null}}`);
 let code=compileScript(parse(await readFile(new URL('../src/components/FilePreviewDialog.vue',import.meta.url),'utf8')).descriptor,{id:'preview-test',inlineTemplate:true}).content;
-code=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText.replace(/from ["']([^"']+)["']/g,(_,n)=>`from ${JSON.stringify(n==='vue'?vue:n.endsWith('AppModal.vue')?modal:n.endsWith('AppButton.vue')?button:n.endsWith('AppIcon.vue')?icon:n.endsWith('mediaFormats')?formats:mock)}`);
+code=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText.replace(/from ["']([^"']+)["']/g,(_,n)=>`from ${JSON.stringify(n==='vue'?vue:n.endsWith('MediaPreview.vue')?media:n.endsWith('AppModal.vue')?modal:n.endsWith('AppButton.vue')?button:n.endsWith('AppIcon.vue')?icon:n.endsWith('mediaFormats')?formats:mock)}`);
 const component=(await import(url(code))).default;
 const node=text=>({text,children:[],parent:null,attrs:{}});
 function remove(el){if(el.parent)el.parent.children.splice(el.parent.children.indexOf(el),1);el.parent=null}
@@ -33,47 +34,10 @@ test('支持格式使用 headless 内容，关闭释放会话',async()=>{const {
 test('关闭准备中的预览会取消，迟到资源仍被释放',async()=>{const {props,app}=mount('说明.txt');let resolve;state.wait=new Promise(r=>resolve=r);try{await flush();props.open=false;await flush();assert.equal(state.prepared[0].options.signal.aborted,true);resolve();await flush();assert.equal(state.released,1)}finally{app.unmount();state.wait=null}});
 test('发布包识别 Office、PDF、ZIP、代码与未知类型',()=>{for(const [name,type] of [['a.docx','docx'],['a.xlsx','xlsx'],['a.pdf','pdf'],['a.zip','zip'],['a.ts','text'],['a.exe','unsupported']])assert.equal(getFileType({name,type:'',url:''}),type)});
 
-function errorTarget(root){return root.attrs.onErrorCapture?root:root.children.map(errorTarget).find(Boolean)}
-globalThis.location={href:'https://preview.test/'};
-globalThis.HTMLMediaElement=class{constructor(src){this.currentSrc=src;this.src=src}};
-test('播放流失败仅回落一次，完整获取期间显示兼容提示，关闭后取消并释放迟到资源',async()=>{
-  const {props,root,app}=mount('视频.mp4');let resolve;state.fullWait=new Promise(r=>resolve=r);
-  try{
-    await flush();
-    const listener=errorTarget(root).attrs.onErrorCapture;
-    listener({target:new HTMLMediaElement('blob:test')});
-    await flush();
-    assert.match(text(root),/流式预览失败，正在自动尝试兼容方法（需先完整获取文件）/);
-    assert.equal(state.prepared.length,2);
-    assert.equal(state.prepared[1].options.forceFull,true);
-    listener({target:new HTMLMediaElement('blob:test')});
-    assert.equal(state.prepared.length,2);
-    props.open=false;await flush();
-    assert.equal(state.prepared[1].options.signal.aborted,true);
-    resolve();await flush();
-    assert.equal(state.released,2);
-  }finally{app.unmount();state.fullWait=null}
-});
-test('流式准备失败也自动回落，完整预览再次播放失败不循环重取',async()=>{
-  const {root,app}=mount('视频.mp4');state.streamError=true;
-  try{
-    await flush();await flush();
-    assert.equal(state.prepared.length,2);
-    assert.equal(state.prepared[0].options.streamingOnly,true);
-    assert.equal(state.prepared[1].options.forceFull,true);
-    assert.match(text(root),/预览内容/);
-    errorTarget(root).attrs.onErrorCapture({target:new HTMLMediaElement('blob:test')});
-    await flush();assert.equal(state.prepared.length,2);
-  }finally{app.unmount();state.streamError=false}
-});
-
-test('播放器自身的非原生错误也触发兼容取数',async()=>{
-  const {root,app}=mount('视频.mp4');
-  try{
-    await flush();
-    errorTarget(root).attrs.onXphPreviewError({detail:{url:'blob:test'}});
-    await flush();await flush();
-    assert.equal(state.prepared.length,2);
-    assert.equal(state.prepared[1].options.forceFull,true);
+test('音视频直接使用专用播放器，不创建 SW 预览或重复票据',async()=>{
+  const {props,root,app}=mount('视频.mp4');
+  try{await flush();assert.match(text(root),/独立媒体播放器/);assert.equal(state.prepared.length,0);assert.equal(state.media.kind,'video');
+    props.source={id:'new-preview'};await flush();assert.equal(state.media.source.id,'new-preview');
+    props.open=false;await flush();assert.equal(state.media,null);
   }finally{app.unmount()}
 });

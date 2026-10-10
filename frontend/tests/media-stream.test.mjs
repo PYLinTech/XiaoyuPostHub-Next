@@ -43,7 +43,7 @@ test('开放式 Range 立即响应，首批可解密播放，未读取部分不�
     assert.equal(reads.length,1); // 只有文件头，响应无需等待内容。
     const reader=result.body.getReader();
     const first=await reader.read();
-    assert.deepEqual(first.value,plain.slice(0,512*8));
+    assert.deepEqual(first.value,plain.slice(0,512));
     assert.equal(reads.length,2);
     await reader.cancel();
     assert.equal(reads.at(-1)[1],64+8*528-1);
@@ -117,4 +117,34 @@ test('注册期间关闭预览会取消文件头读取，不留下迟到会话',
   await work;
   assert.equal(result.ok, false);
   assert.equal((await response(id)).status, 404);
+});
+
+test('完整批次尚未下载时首个认证块即可播放，取消会终止等待中的响应体',async()=>{
+  const id=await register();let cancelled=false;
+  try{
+    globalThis.fetch=async(_url,{headers})=>{
+      const [,begin,end]=/^bytes=(\d+)-(\d+)$/.exec(headers.Range);
+      return new Response(new ReadableStream({
+        start(output){output.enqueue(cipher.slice(+begin,+begin+528));},
+        cancel(){cancelled=true},
+      }),{status:206,headers:{'Content-Range':`bytes ${begin}-${end}/${cipher.length}`}});
+    };
+    const result=await response(id,'bytes=0-');const reader=result.body.getReader();
+    const first=await Promise.race([reader.read(),new Promise((_,reject)=>setTimeout(()=>reject(Error('首块等待了整个批次')),500))]);
+    assert.deepEqual(first.value,plain.slice(0,512));
+    await reader.cancel();await new Promise(r=>setTimeout(r,0));
+    assert.equal(cancelled,true);
+  }finally{revoke(id)}
+});
+
+test('不同明文小区间共享完整认证块，后续命中缓存不会再请求密文',async()=>{
+  const id=await register();try{
+    const before=reads.length;
+    const [a,b]=await Promise.all([response(id,'bytes=10-30'),response(id,'bytes=100-120')]);
+    const [av,bv]=await Promise.all([a.arrayBuffer(),b.arrayBuffer()]);
+    assert.deepEqual(new Uint8Array(av),plain.slice(10,31));assert.deepEqual(new Uint8Array(bv),plain.slice(100,121));
+    assert.equal(reads.length-before,1);
+    const cached=await response(id,'bytes=200-250');assert.deepEqual(new Uint8Array(await cached.arrayBuffer()),plain.slice(200,251));
+    assert.equal(reads.length-before,1);
+  }finally{revoke(id)}
 });

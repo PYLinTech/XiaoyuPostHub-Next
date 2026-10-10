@@ -1,4 +1,4 @@
-import { readCipherParts } from "@/delivery/cipherParts";
+import { cipherPartRanges, readCipherParts } from "@/delivery/cipherParts";
 /// <reference lib="webworker" />
 //
 // 解密用的 Service Worker。
@@ -18,7 +18,7 @@ import {
   base64ToBytes,
   blockCipherLen,
   blockCipherOffset,
-  decryptCipherRange,
+  decryptBlock,
   importContentKey,
   parseXphHeader,
   HEADER_SIZE,
@@ -39,6 +39,17 @@ interface StreamSession {
   fileName: string;
   createdAt: number;
   controller: AbortController;
+  plainBlocks: Map<number, Uint8Array>;
+  plainBytes: number;
+  pendingBlocks: Map<number, BlockRead>;
+}
+
+interface BlockRead {
+  controller: AbortController;
+  readers: number;
+  indices: number[];
+  blocks: Map<number, Promise<Uint8Array>>;
+  settled: boolean;
 }
 
 const sessions = new Map<string, StreamSession>();
@@ -49,6 +60,7 @@ const MAX_SESSIONS = 8;
 /** 单次取密的块数。取太小会让请求数暴涨并快速耗尽票据次数。 */
 const BATCH_BLOCKS = 8;
 const BATCH_BYTES = 4 * 1024 * 1024;
+const PLAIN_CACHE_BYTES = 32 * 1024 * 1024;
 
 interface RegisterMessage {
   type: "xph:register";
@@ -91,6 +103,7 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
   if (data.type === "xph:revoke") {
     pendingSessions.get(data.id)?.abort();
     sessions.get(data.id)?.controller.abort();
+    sessions.get(data.id)?.plainBlocks.clear();
     sessions.delete(data.id);
     port?.postMessage({ ok: true });
   }
@@ -125,6 +138,7 @@ async function registerSession(message: RegisterMessage): Promise<string> {
       fileName: message.fileName,
       createdAt: Date.now(),
       controller,
+      plainBlocks: new Map(), plainBytes: 0, pendingBlocks: new Map(),
     });
     return id;
   } finally { pendingSessions.delete(id); }
@@ -195,7 +209,7 @@ function baseHeaders(session: StreamSession, total: number): HeadersInit {
 function respondStream(
   session: StreamSession, start: number, length: number, partial: boolean, requestSignal?: AbortSignal,
 ): Response {
-  const { header, key } = session;
+  const { header } = session;
   const end = start + length;
   const batchBlocks = Math.max(1, Math.min(BATCH_BLOCKS, Math.floor(BATCH_BYTES / header.blockSize)));
   const controller = new AbortController();
@@ -203,19 +217,22 @@ function respondStream(
     : AbortSignal.any([session.controller.signal, controller.signal]);
   let position = start;
   let cancelled = false;
+  let reads: Promise<Uint8Array>[] = [];
   const stream = new ReadableStream<Uint8Array>({
     async pull(output) {
       try {
         signal.throwIfAborted();
         if (position >= end) { output.close(); return; }
         const first = Math.floor(position / header.blockSize);
-        const last = Math.min(first + batchBlocks - 1, Math.ceil(end / header.blockSize) - 1);
-        const cipherStart = blockCipherOffset(header, first);
-        const cipherEnd = blockCipherOffset(header, last) + blockCipherLen(header, last);
-        const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1, signal);
-        const next = Math.min(end, (last + 1) * header.blockSize);
-        const plain = await decryptCipherRange(key, header, cipher,
-          { first, last, start: cipherStart, end: cipherEnd }, position, next - position);
+        if (!reads.length) {
+          const last = Math.min(first + batchBlocks - 1, Math.ceil(end / header.blockSize) - 1);
+          reads = readPlainBlocks(session, first, last, signal);
+          // 后续认证块仍在下载时，首块已经可以交付。
+          for (const read of reads) void read.catch(() => {});
+        }
+        const block = await reads.shift()!;
+        const next = Math.min(end, (first + 1) * header.blockSize);
+        const plain = block.subarray(position - first * header.blockSize, next - first * header.blockSize);
         signal.throwIfAborted();
         position = next;
         if (cancelled) return;
@@ -231,6 +248,105 @@ function respondStream(
   headers.set("Content-Length", String(length));
   if (partial) headers.set("Content-Range", `bytes ${start}-${end - 1}/${header.plainSize}`);
   return new Response(stream, { status: partial ? 206 : 200, headers });
+}
+
+/** 小明文 Range 共享完整认证块；取消单个读者不会打断其他轨道的同块读取。 */
+function readPlainBlocks(session: StreamSession, first: number, last: number, signal: AbortSignal): Promise<Uint8Array>[] {
+  signal.throwIfAborted();
+  const reads: Promise<Uint8Array>[] = [];
+  for (let index = first; index <= last; index++) {
+    const cached = session.plainBlocks.get(index);
+    if (cached) {
+      session.plainBlocks.delete(index);
+      session.plainBlocks.set(index, cached);
+      reads.push(Promise.resolve(cached));
+      continue;
+    }
+    let entry = session.pendingBlocks.get(index);
+    if (!entry) {
+      const indices = [index];
+      for (let next = index + 1; next <= last && !session.plainBlocks.has(next) && !session.pendingBlocks.has(next); next++) indices.push(next);
+      const controller = new AbortController();
+      const combined = AbortSignal.any([session.controller.signal, controller.signal]);
+      const begin = blockCipherOffset(session.header, index);
+      const final = indices.at(-1)!;
+      const end = blockCipherOffset(session.header, final) + blockCipherLen(session.header, final);
+      const deferred = new Map<number, { resolve(bytes: Uint8Array): void; reject(error: unknown): void }>();
+      const blocks = new Map<number, Promise<Uint8Array>>();
+      for (const block of indices) {
+        blocks.set(block, new Promise((resolve, reject) => deferred.set(block, { resolve, reject })));
+      }
+      entry = { controller, indices, readers: 0, blocks, settled: false };
+      const pending = entry;
+      for (const block of indices) session.pendingBlocks.set(block, pending);
+      void (async () => {
+        let blockIndex = index;
+        let filled = 0;
+        let cipherBlock = new Uint8Array(blockCipherLen(session.header, blockIndex));
+        const publish = (block: number, plain: Uint8Array) => {
+          const previous = session.plainBlocks.get(block);
+          if (previous) session.plainBytes -= previous.byteLength;
+          session.plainBlocks.delete(block);
+          session.plainBlocks.set(block, plain);
+          session.plainBytes += plain.byteLength;
+          while (session.plainBytes > PLAIN_CACHE_BYTES) {
+            const oldest = session.plainBlocks.keys().next().value!;
+            session.plainBytes -= session.plainBlocks.get(oldest)!.byteLength;
+            session.plainBlocks.delete(oldest);
+          }
+          deferred.get(block)!.resolve(plain);
+        };
+        let tail: Uint8Array | undefined;
+        try {
+          for await (const bytes of streamSessionCipherBytes(session, begin, end - 1, combined)) {
+            let offset = 0;
+            while (offset < bytes.byteLength) {
+              combined.throwIfAborted();
+              const count = Math.min(bytes.byteLength - offset, cipherBlock.byteLength - filled);
+              cipherBlock.set(bytes.subarray(offset, offset + count), filled);
+              filled += count; offset += count;
+              if (filled === cipherBlock.byteLength) {
+                const plain = await decryptBlock(session.key, session.header, blockIndex, cipherBlock);
+                combined.throwIfAborted();
+                if (blockIndex === final) tail = plain; else publish(blockIndex, plain);
+                blockIndex++; filled = 0;
+                if (blockIndex <= final) cipherBlock = new Uint8Array(blockCipherLen(session.header, blockIndex));
+              }
+            }
+          }
+          combined.throwIfAborted();
+          if (blockIndex !== final + 1 || filled || !tail) throw new Error("密文认证块被截断");
+          pending.settled = true;
+          publish(final, tail);
+        } catch (error) {
+          pending.settled = true;
+          for (const value of deferred.values()) value.reject(error);
+        } finally {
+          for (const block of indices) if (session.pendingBlocks.get(block) === pending) session.pendingBlocks.delete(block);
+        }
+      })();
+    }
+    const pending = entry;
+    const block = index;
+    pending.readers++;
+    reads.push(new Promise<Uint8Array>((resolve, reject) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return false;
+        finished = true;
+        signal.removeEventListener("abort", abort);
+        if (--pending.readers === 0 && !pending.settled) {
+          pending.controller.abort();
+          for (const i of pending.indices) if (session.pendingBlocks.get(i) === pending) session.pendingBlocks.delete(i);
+        }
+        return true;
+      };
+      const abort = () => { if (finish()) reject(signal.reason); };
+      signal.addEventListener("abort", abort, { once: true });
+      pending.blocks.get(block)!.then(bytes => { if (finish()) resolve(bytes); }, error => { if (finish()) reject(error); });
+    }));
+  }
+  return reads;
 }
 
 interface ParsedRange {
@@ -318,4 +434,42 @@ async function fetchSessionCipherBytes(
 function randomId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** 按物理卷顺序读取有界密文区间；不先拼出整批密文。 */
+async function* streamSessionCipherBytes(
+  source: { cipherUrl: string; cipherParts?: Array<{ url: string; offset: number; size: number }> },
+  start: number, end: number, signal: AbortSignal,
+): AsyncGenerator<Uint8Array> {
+  const ranges = source.cipherParts?.length ? cipherPartRanges(source.cipherParts, start, end)
+    : [{ url: source.cipherUrl, start, end }];
+  for (const range of ranges) {
+    signal.throwIfAborted();
+    const response = await fetch(range.url, { headers: { Range: `bytes=${range.start}-${range.end}` }, signal, cache: "no-store" });
+    const expected = range.end - range.start + 1;
+    const contentRange = response.headers.get("Content-Range");
+    const parsed = contentRange?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+    if ((response.status !== 206 && !(response.status === 200 && range.start === 0 && response.headers.get("Content-Length") === String(expected)))
+      || (contentRange && (!parsed || Number(parsed[1]) !== range.start || Number(parsed[2]) !== range.end))) {
+      await response.body?.cancel();
+      throw new Error(`取密文失败：HTTP ${response.status} 或区间不匹配`);
+    }
+    if (!response.body) throw new Error("密文响应为空");
+    const reader = response.body.getReader();
+    let received = 0;
+    const abort = () => { void reader.cancel(signal.reason).catch(() => {}); };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        if (received > expected) throw new Error("密文长度不符：响应超出区间");
+        yield value;
+      }
+      signal.throwIfAborted();
+      if (received !== expected) throw new Error(`密文长度不符：期望 ${expected}，实得 ${received}`);
+    } finally { signal.removeEventListener("abort", abort); await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  }
 }

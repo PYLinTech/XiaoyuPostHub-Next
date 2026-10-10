@@ -1,4 +1,3 @@
-import { runDelivery } from "./transferClient";
 import { getToken } from "@/api/client";
 import { createPreviewParser } from "@/lib/previewParser";
 import { streamUrlWithToken } from "@/api/endpoints";
@@ -8,16 +7,7 @@ import { bytesToBase64 } from "@/crypto/xph";
 import { cipherSourceUrl, settleQuietly, type DeliverySource } from "./download";
 import { mediaMimeType } from "@/lib/mediaFormats";
 
-// 预览的取数通道。
-//
-// 音视频必须支持浏览器的原生 Range/seek，而浏览器不会替我们解密，因此这里有
-// 三种通道，按能力从优到劣：
-//
-//   sw     —— Service Worker 暴露一个本源"虚拟明文文件"，浏览器按 Range 取密文
-//             （直链 URL 或本机中转 URL 皆可）、页面本地解密，支持 seek。
-//   stream —— 中转解密：服务端下发明文流，浏览器直接播放。全部出流量经服务端。
-//   blob   —— 不支持 SW 时（老浏览器、非安全上下文）退化为先整份解密再预览。
-//             也作为音视频流式预览失败后的兼容通道。
+// 文档、图片等通用预览通道。音视频由 mediaPreview 独立管理。
 
 type PreviewMode = "sw" | "stream" | "blob";
 
@@ -85,18 +75,9 @@ function ensureXphWorker(): Promise<ServiceWorkerRegistration | null> {
 /** 准备一次预览。 */
 export async function preparePreview(
   source: DeliverySource,
-  options: { signal?: AbortSignal; streamingOnly?: boolean; forceFull?: boolean } = {},
+  options: { signal?: AbortSignal } = {},
 ): Promise<PreviewHandle> {
   options.signal?.throwIfAborted();
-  if (options.forceFull) {
-    let plan: DeliveryPlan | null = null;
-    const result = await runDelivery({ async plan(pair) { plan = await source.plan(pair); return plan; } },
-      { signal: options.signal, streamToDiskAbove: Infinity });
-    options.signal?.throwIfAborted();
-    if (!result.blob || !plan) throw new Error("未能获取完整的预览文件");
-    const url = URL.createObjectURL(result.blob);
-    return { url, mode: "blob", plan, async release() { URL.revokeObjectURL(url); } };
-  }
   const pair = encryptionSupported() ? await createClientKeyPair() : null;
   options.signal?.throwIfAborted();
   const plan = await source.plan(pair);
@@ -116,7 +97,7 @@ export async function preparePreview(
 async function buildHandle(
   plan: DeliveryPlan,
   pair: ClientKeyPair | null,
-  options: { signal?: AbortSignal; streamingOnly?: boolean; forceFull?: boolean },
+  options: { signal?: AbortSignal },
 ): Promise<PreviewHandle> {
   // 中转解密：服务端已把明文准备好，直接把（带令牌的）中转地址交给媒体元素。
   if (plan.mode === "proxy_decrypt") {
@@ -150,7 +131,6 @@ async function buildHandle(
   }
 
   options.signal?.throwIfAborted();
-  if (options.streamingOnly) throw new Error("当前浏览器流式预览不可用，尝试完整解密预览");
 
   // 没有 SW 时，在独立线程中解密为 Blob。
   const parser = createPreviewParser();

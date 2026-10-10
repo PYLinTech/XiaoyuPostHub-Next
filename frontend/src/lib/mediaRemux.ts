@@ -1,6 +1,6 @@
 import {
-  AudioSampleSink, AudioSampleSource, BufferTarget, EncodedAudioPacketSource, EncodedPacketSink,
-  EncodedVideoPacketSource, InputAudioTrack, InputVideoTrack, Mp4OutputFormat, Output,
+  AudioSampleSink, AudioSampleSource, EncodedAudioPacketSource, EncodedPacketSink,
+  EncodedVideoPacketSource, InputAudioTrack, InputVideoTrack, Mp4OutputFormat, NullTarget, Output,
   VideoSampleSink, VideoSampleSource, WebMOutputFormat, canEncodeAudio, canEncodeVideo,
 } from "mediabunny";
 import type { AudioCodec, Input, VideoCodec } from "mediabunny";
@@ -16,8 +16,9 @@ export type MediaTrackSpec = {
 };
 
 export type MediaInfo = { tracks: MediaTrackSpec[]; duration: number | null; origin: number };
-export type MediaSlice = { data: Uint8Array<ArrayBuffer>; mime: string; start: number; end: number; eof: boolean };
-
+class MediaCodecError extends Error {
+  constructor(message: string) { super(message); this.name = "MediaCodecError"; }
+}
 let ac3Decoder: Promise<void> | undefined;
 let dtsDecoder: Promise<void> | undefined;
 let aacEncoder: Promise<void> | undefined;
@@ -34,11 +35,14 @@ async function enableAudioDecoder(codec: AudioCodec | VideoCodec | null): Promis
   }
 }
 
-function containerFor(type: "audio" | "video", codec: AudioCodec | VideoCodec, parameter: string): MediaTrackSpec | null {
+let mediaSupportCheck = async (mime: string) => supportsMediaSourceType(mime);
+export function setMediaSupportCheck(check: (mime: string) => Promise<boolean>): void { mediaSupportCheck = check; }
+
+async function containerFor(type: "audio" | "video", codec: AudioCodec | VideoCodec, parameter: string): Promise<MediaTrackSpec | null> {
   for (const container of ["mp4", "webm"] as const) {
     const format = container === "mp4" ? new Mp4OutputFormat() : new WebMOutputFormat();
     const mime = `${type}/${container}; codecs="${parameter}"`;
-    if (format.getSupportedCodecs().includes(codec) && supportsMediaSourceType(mime)) {
+    if (format.getSupportedCodecs().includes(codec) && await mediaSupportCheck(mime)) {
       return { type, codec, container, transcode: false, mime };
     }
   }
@@ -49,16 +53,16 @@ async function describeTrack(track: InputAudioTrack | InputVideoTrack): Promise<
   const type = track.isVideoTrack() ? "video" : "audio";
   const codec = await track.getCodec();
   const parameter = await track.getCodecParameterString();
-  const direct = codec && parameter && containerFor(type, codec, parameter);
+  const direct = codec && parameter && await containerFor(type, codec, parameter);
   if (direct) return direct;
   if (track.isAudioTrack()) await enableAudioDecoder(codec);
-  if (!await track.canDecode()) throw new Error("浏览器无法解码该媒体编码");
+  if (!await track.canDecode()) throw new MediaCodecError("浏览器无法解码该媒体编码");
   if (track.isAudioTrack()) {
     const options = {
       numberOfChannels: await track.getNumberOfChannels(), sampleRate: await track.getSampleRate(), bitrate: 160_000,
     };
     for (const [target, parameter] of [["aac", "mp4a.40.2"], ["opus", "opus"]] as const) {
-      const spec = containerFor("audio", target, parameter);
+      const spec = await containerFor("audio", target, parameter);
       if (target === "aac" && spec && !await canEncodeAudio(target, options)) {
         aacEncoder ??= import("@mediabunny/aac-encoder").then(module => module.registerAacEncoder())
           .catch(error => { aacEncoder = undefined; throw error; });
@@ -68,13 +72,13 @@ async function describeTrack(track: InputAudioTrack | InputVideoTrack): Promise<
     }
   } else {
     for (const [target, parameter] of [["avc", "avc1.42001f"], ["vp8", "vp8"]] as const) {
-      const spec = containerFor("video", target, parameter);
+      const spec = await containerFor("video", target, parameter);
       if (spec && await canEncodeVideo(target, {
         width: await track.getCodedWidth(), height: await track.getCodedHeight(), bitrate: 4_000_000,
       })) return { ...spec, transcode: true };
     }
   }
-  throw new Error("浏览器没有可用的媒体转换编码器");
+  throw new MediaCodecError("浏览器没有可用的媒体转换编码器");
 }
 
 async function primaryTracks(input: Input): Promise<Array<InputVideoTrack | InputAudioTrack>> {
@@ -82,115 +86,111 @@ async function primaryTracks(input: Input): Promise<Array<InputVideoTrack | Inpu
   return [video, audio].filter((track): track is InputVideoTrack | InputAudioTrack => !!track);
 }
 
-export async function inspectMedia(source: MediaRangeSource, signal: AbortSignal): Promise<MediaInfo> {
-  const input = source.input(signal);
-  try {
-    const tracks = await primaryTracks(input);
+/** Input、容器索引与认证缓存属于会话；输出封装器只在 seek 时重建。 */
+export class MediaDemuxSession {
+  private input: Input;
+  constructor(private source: MediaRangeSource, private lifetime: AbortSignal) {
+    this.input = source.input(lifetime);
+    lifetime.addEventListener("abort", () => this.input.dispose(), { once: true });
+  }
+  dispose() { this.input.dispose(); }
+  async inspect(): Promise<MediaInfo> {
+    const tracks = await primaryTracks(this.input);
     if (!tracks.length) throw new Error("文件中没有可播放的音视频轨道");
     const specs = await Promise.all(tracks.map(describeTrack));
     const origin = Math.min(...await Promise.all(tracks.map(track => track.getFirstTimestamp())));
-    const duration = await input.getDurationFromMetadata(tracks);
-    signal.throwIfAborted();
+    const duration = await this.input.getDurationFromMetadata(tracks);
+    this.lifetime.throwIfAborted();
     return { tracks: specs, duration: duration !== null && duration > origin ? duration - origin : null, origin };
-  } finally { input.dispose(); }
-}
+  }
+  async duration(origin: number): Promise<number | null> {
+    const input = this.source.input(AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]), 2 * 1024 * 1024);
+    try { const duration = await input.computeDuration(undefined, { metadataOnly: true }); return Number.isFinite(duration) && duration > origin ? duration - origin : null; }
+    catch { return null; } finally { input.dispose(); }
+  }
 
-/** 在首帧之后探测精确时长，限定读取量；无索引格式不扫描完整文件。 */
-export async function probeMediaDuration(source: MediaRangeSource, origin: number, signal: AbortSignal): Promise<number | null> {
-  const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(), 8000);
-  const input = source.input(AbortSignal.any([signal, timeout.signal]), 2 * 1024 * 1024);
-  try {
-    const duration = await input.computeDuration(undefined, { metadataOnly: true });
-    return Number.isFinite(duration) && duration > origin ? duration - origin : null;
-  } catch { return null; }
-  finally { clearTimeout(timer); input.dispose(); }
-}
-
-/** 原生容器 -> 单轨 MSE 片段。保留编码及时间戳；只有必要时才在本地转换。 */
-export async function remuxMediaSlice(
-  source: MediaRangeSource, spec: MediaTrackSpec, start: number, end: number, origin: number, signal: AbortSignal, completeGop = true,
-): Promise<MediaSlice | null> {
-  const input = source.input(signal);
-  let output: Output<Mp4OutputFormat | WebMOutputFormat, BufferTarget> | null = null;
-  try {
-    const track = spec.type === "video" ? await input.getPrimaryVideoTrack() : await input.getPrimaryAudioTrack();
+  /** 顺序遍历编码包，不按固定时间窗口查终点或反复输出初始化段。 */
+  async stream(spec: MediaTrackSpec, start: number, origin: number, signal: AbortSignal,
+    onChunk: (data: Uint8Array<ArrayBuffer>, mime: string, keyframes: number[]) => Promise<void>,
+    permit: (time: number) => Promise<void>): Promise<number> {
+    signal.throwIfAborted();
+    const track = spec.type === "video" ? await this.input.getPrimaryVideoTrack() : await this.input.getPrimaryAudioTrack();
     if (!track) throw new Error("媒体轨道发生变化");
-    output = new Output({
-      target: new BufferTarget(),
-      format: spec.container === "mp4"
-        ? new Mp4OutputFormat({ fastStart: "fragmented", minimumFragmentDuration: 1 })
-        : new WebMOutputFormat({ appendOnly: true, minimumClusterDuration: 1 }),
+    let boxes: Uint8Array[] = [], chunks: Uint8Array<ArrayBuffer>[] = [];
+    const join = (parts: Uint8Array[]) => {
+      const data = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0)); let offset = 0;
+      for (const part of parts) { data.set(part, offset); offset += part.length; } return data;
+    };
+    const output = new Output({ target: new NullTarget(), format: spec.container === "mp4"
+      ? new Mp4OutputFormat({ fastStart: "fragmented", minimumFragmentDuration: 0.5,
+        onFtyp: data => { boxes = [data]; }, onMoov: data => { chunks.push(join([...boxes, data])); boxes = []; },
+        onMoof: data => { boxes = [data]; }, onMdat: data => { chunks.push(join([...boxes, data])); boxes = []; },
+      })
+      : new WebMOutputFormat({ appendOnly: true, minimumClusterDuration: 0.5,
+        onEbmlHeader: data => { boxes = [data]; }, onSegmentHeader: data => { chunks.push(join([...boxes, data])); boxes = []; },
+        onCluster: data => { chunks.push(join([data])); },
+      }),
     });
-    const sink = new EncodedPacketSink(track);
-    const final = await sink.getPacket(end + origin - 1e-6, { metadataOnly: true });
-    // 时间窗口可能位于延迟起始轨道之前。没有终点时不可把 undefined 传给 packets，
-    // 否则迭代器会从首包读到文件末尾。
-    if (!final) return null;
-    const first = await sink.getKeyPacket(start + origin) || await sink.getFirstKeyPacket();
-    if (!first) return null;
-    if (first.sequenceNumber > final.sequenceNumber) return null;
-    const actualStart = first.timestamp - origin;
-    let actualEnd = actualStart;
-    const after = track.isVideoTrack() && !spec.transcode && completeGop
-      ? await sink.getNextKeyPacket(final, { metadataOnly: true })
-      : await sink.getNextPacket(final, { metadataOnly: true });
-    if (spec.transcode) {
-      if (track.isAudioTrack()) {
-        const writer = new AudioSampleSource({ codec: spec.codec as AudioCodec, bitrate: 160_000 });
-        output.addAudioTrack(writer);
-        await output.start();
-        for await (const sample of new AudioSampleSink(track).samples(start + origin, end + origin)) {
-          try {
-            signal.throwIfAborted();
-            sample.setTimestamp(sample.timestamp - origin);
-            actualEnd = Math.max(actualEnd, sample.timestamp + sample.duration);
-            await writer.add(sample);
-          } finally { sample.close(); }
+    let actualEnd = start, pendingBytes = 0;
+    const keyframes: number[] = [];
+    const flush = async (throttle = true) => {
+      if (!chunks.length) return;
+      const ready = chunks; chunks = [];
+      const mime = (await output.getMimeType()).replace(/^video\//, spec.type + "/");
+      for (const bytes of ready) { signal.throwIfAborted(); await onChunk(bytes, mime, keyframes.splice(0)); }
+      pendingBytes = 0;
+      // 完整片段交给 MSE 后才等待，长 GOP 不会在片段尚未封口时死锁。
+      if (throttle) await permit(actualEnd);
+      signal.throwIfAborted();
+    };
+    try {
+      if (spec.transcode) {
+        if (track.isAudioTrack()) {
+          const writer = new AudioSampleSource({ codec: spec.codec as AudioCodec, bitrate: 160_000 });
+          output.addAudioTrack(writer); await output.start();
+          for await (const sample of new AudioSampleSink(track).samples(start + origin)) {
+            try { signal.throwIfAborted(); sample.setTimestamp(sample.timestamp - origin);
+              actualEnd = Math.max(actualEnd, sample.timestamp + sample.duration); await writer.add(sample); await flush();
+            } finally { sample.close(); }
+          }
+        } else {
+          const writer = new VideoSampleSource({ codec: spec.codec as VideoCodec, bitrate: 4_000_000, keyFrameInterval: 1,
+            onEncodedPacket: packet => { if (packet.type === "key") keyframes.push(packet.timestamp); },
+          });
+          output.addVideoTrack(writer, { transformationMatrix: await track.getTransformationMatrix() }); await output.start();
+          for await (const sample of new VideoSampleSink(track).samples(start + origin)) {
+            try { signal.throwIfAborted(); sample.setTimestamp(sample.timestamp - origin);
+              actualEnd = Math.max(actualEnd, sample.timestamp + sample.duration); await writer.add(sample); await flush();
+            } finally { sample.close(); }
+          }
         }
       } else {
-        const writer = new VideoSampleSource({ codec: spec.codec as VideoCodec, bitrate: 4_000_000, keyFrameInterval: 1 });
-        output.addVideoTrack(writer);
+        const sink = new EncodedPacketSink(track);
+        const first = start > 0 ? await sink.getKeyPacket(start + origin) || await sink.getFirstKeyPacket() : await sink.getFirstKeyPacket();
+        signal.throwIfAborted();
+        if (!first) return start;
+        const videoWriter = track.isVideoTrack() ? new EncodedVideoPacketSource(spec.codec as VideoCodec) : null;
+        const audioWriter = track.isAudioTrack() ? new EncodedAudioPacketSource(spec.codec as AudioCodec) : null;
+        if (videoWriter && track.isVideoTrack()) output.addVideoTrack(videoWriter, { transformationMatrix: await track.getTransformationMatrix() });
+        if (audioWriter) output.addAudioTrack(audioWriter);
+        const config = await track.getDecoderConfig();
+        if (!config) throw new Error("媒体缺少解码配置");
         await output.start();
-        for await (const sample of new VideoSampleSink(track).samples(start + origin, end + origin)) {
-          try {
-            signal.throwIfAborted();
-            sample.setTimestamp(sample.timestamp - origin);
-            actualEnd = Math.max(actualEnd, sample.timestamp + sample.duration);
-            await writer.add(sample);
-          } finally { sample.close(); }
+        for await (const packet of sink.packets(first)) {
+          signal.throwIfAborted();
+          pendingBytes += packet.byteLength;
+          if (pendingBytes > 64 * 1024 * 1024) throw new Error("单个媒体片段超过内存限制");
+          const normalized = packet.clone({ timestamp: packet.timestamp - origin });
+          actualEnd = Math.max(actualEnd, normalized.timestamp + normalized.duration);
+          if (videoWriter) {
+            if (normalized.type === "key") keyframes.push(normalized.timestamp);
+            await videoWriter.add(normalized, { decoderConfig: config as VideoDecoderConfig });
+          }
+          if (audioWriter) await audioWriter.add(normalized, { decoderConfig: config as AudioDecoderConfig });
+          await flush();
         }
       }
-    } else {
-      const videoWriter = track.isVideoTrack() ? new EncodedVideoPacketSource(spec.codec as VideoCodec) : null;
-      const audioWriter = track.isAudioTrack() ? new EncodedAudioPacketSource(spec.codec as AudioCodec) : null;
-      if (videoWriter && track.isVideoTrack()) output.addVideoTrack(videoWriter, { transformationMatrix: await track.getTransformationMatrix() });
-      if (audioWriter) output.addAudioTrack(audioWriter);
-      const config = await track.getDecoderConfig();
-      if (!config) throw new Error("媒体缺少解码配置");
-      await output.start();
-      // 以解码顺序边界切片，保留 B 帧所依赖的前向参考帧。
-      let bytes = 0;
-      for await (const packet of sink.packets(first, after || undefined)) {
-        signal.throwIfAborted();
-        bytes += packet.byteLength;
-        if (bytes > 64 * 1024 * 1024) throw new Error("单个媒体窗口超过内存限制");
-        const normalized = packet.clone({ timestamp: packet.timestamp - origin });
-        actualEnd = Math.max(actualEnd, normalized.timestamp + normalized.duration);
-        if (videoWriter) await videoWriter.add(normalized, { decoderConfig: config as VideoDecoderConfig });
-        if (audioWriter) await audioWriter.add(normalized, { decoderConfig: config as AudioDecoderConfig });
-      }
-    }
-    signal.throwIfAborted();
-    if (actualEnd <= actualStart) return null;
-    await output.finalize();
-    signal.throwIfAborted();
-    if (!output.target.buffer) throw new Error("媒体切片输出为空");
-    // 输出库的 MP4 基础 MIME 默认是 video/mp4；纯音频缓冲明确声明 audio/mp4。
-    const mime = (await output.getMimeType()).replace(/^video\//, spec.type + "/");
-    return { data: new Uint8Array(output.target.buffer), mime, start: actualStart, end: actualEnd, eof: !after };
-  } finally {
-    input.dispose();
-    if (output && output.state !== "finalized" && output.state !== "canceled") await output.cancel();
+      signal.throwIfAborted(); await output.finalize(); await flush(false); return actualEnd;
+    } finally { if (output.state !== "finalized" && output.state !== "canceled") await output.cancel(); }
   }
 }

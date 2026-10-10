@@ -52,10 +52,16 @@ test("关闭预览后不会申请新计划；申请期间取消会结算票据�
   await assert.rejects(preparePreview({ plan: async () => { during.abort(); return { ticketId: "preview-ticket" }; } }, { signal: during.signal }), { name: "AbortError" });
   assert.equal((await import(settlement)).settled.at(-1).ticketId, "preview-ticket");
 });
-test("音视频没有流式通道时不退回整份下载解密", async () => {
-  await assert.rejects(preparePreview({ plan: async () => ({ticketId:"media-ticket",contentForm:"ciphertext",mode:"direct",encryption:{}}) },
-    {streamingOnly:true}), /流式预览不可用/);
-  assert.equal((await import(settlement)).settled.at(-1).ticketId,"media-ticket");
+const mediaKeys=encode('export const encryptionSupported=()=>true;export const createClientKeyPair=async()=>({});export const resolveContentKey=async()=>new Uint8Array(32);');
+const {prepareMediaPreview}=await import(await load('../src/delivery/mediaPreview.ts',{'../crypto/clientkey':mediaKeys,'./download':settlement}));
+test('媒体始终申请密文计划，关闭及异常结算一次，迟到计划不启动网络',async()=>{
+  const signal=new AbortController();let plans=0;
+  const handle=await prepareMediaPreview({plan:async()=>{plans++;return {ticketId:'media-only',mode:'direct',contentForm:'ciphertext',plainSize:12,encryption:{cipherSize:92}}}},signal.signal);
+  assert.equal(plans,1);assert.equal(handle.descriptor.plainSize,12);await handle.release();await handle.release();
+  assert.equal((await import(settlement)).settled.filter(p=>p.ticketId==='media-only').length,1);
+  await assert.rejects(prepareMediaPreview({plan:async()=>{signal.abort();return {ticketId:'late-media'}}},signal.signal),{name:'AbortError'});
+  assert.equal((await import(settlement)).settled.at(-1).ticketId,'late-media');
+  await assert.rejects(prepareMediaPreview({plan:async()=>({ticketId:'plaintext-media',mode:'proxy_decrypt',contentForm:'plaintext'})},new AbortController().signal),/密文/);
 });
 const notifications = encode('export const errors=[]; export const useToasts=()=>({error:(...args)=>errors.push(args)});');
 const asyncLib = encode('export const logs=[]; export const isAbortError=e=>e.name==="AbortError"; export const describeError=e=>e.message; export const logError=(context,error)=>logs.push({context,error});');
