@@ -40,7 +40,7 @@ const QUOTA_META: Array<{ key: string; label: string; bytes: boolean; hint: stri
   // 额度在 UTC 00:00 归零。写成"按自然日重置"会让东八区管理员以为归零点是
   // 本地 00:00，实际却是早上 8 点。
   { key: "traffic.daily.download", label: "每日下载流量", bytes: true, hint: "按 UTC 自然日重置（UTC 00:00 归零，非本地零点）" },
-  { key: "count.pending_uploads", label: "并发上传上限", bytes: false, hint: "同时存在的上传会话数上限" },
+  { key: "count.pending_uploads", label: "上传最大任务数", bytes: false, hint: "每个文件算一个任务；同一文件的分片并发不另计" },
   // 邮件配额与文件配额相互独立：收件域名在本组的「收件」一栏里设置，
   // 这两项决定每个用户能在这些域名下建多少地址、占多少邮件存储。
   { key: "count.mail_addresses", label: "每人邮箱地址数", bytes: false, hint: "单个用户可自助创建的邮箱地址数上限；0 = 禁止创建" },

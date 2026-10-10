@@ -349,7 +349,7 @@ func (s *Service) ChangeOwnPassword(ctx context.Context, p auth.Principal, oldPa
 	return nil
 }
 
-// UploadProfile 是前端上传编排需要的服务端运行参数：分片大小与两级并发上限。
+// UploadProfile 是前端上传编排参数：系统分片大小、前端分片并发和用户组任务上限。
 type UploadProfile struct {
 	ChunkSize      int64 `json:"chunkSize"`
 	MaxConcurrency int   `json:"maxConcurrency"`
@@ -414,18 +414,26 @@ func (s *Service) Profile(ctx context.Context, p auth.Principal) (ProfileResult,
 		StorageLimit: quotas[store.QuotaStorageTotal],
 		IsGuest:      false,
 		ActorKey:     p.ActorKey(),
-		Upload:       uploadProfileOf(rt),
+		Upload:       uploadProfileOf(rt, quotas, perm.Has(group.Permissions, perm.BypassQuota)),
 	}
 	applyUnlimited(&res, group)
 	return res, nil
 }
 
 // uploadProfileOf 抽出前端上传编排需要的运行参数。
-func uploadProfileOf(rt settings.Runtime) UploadProfile {
+func uploadProfileOf(rt settings.Runtime, quotas map[string]int64, quotaBypass bool) UploadProfile {
+	// 前端本地队列没有组配额时，使用全局前端接收上限作为合理的客户端并发兜底；
+	// 后台收尾任务上限只约束服务端 worker 与排队队列。
+	maxTasks := rt.Upload.FrontendMaxTasks
+	if !quotaBypass {
+		if groupLimit, ok := quotas[store.QuotaPendingUploads]; ok {
+			maxTasks = int(groupLimit)
+		}
+	}
 	return UploadProfile{
 		ChunkSize:      rt.Upload.ChunkSize,
-		MaxConcurrency: rt.Upload.MaxConcurrency,
-		MaxTasks:       rt.Upload.MaxTasks,
+		MaxConcurrency: rt.Upload.FrontendConcurrency,
+		MaxTasks:       maxTasks,
 	}
 }
 
@@ -449,7 +457,7 @@ func (s *Service) guestProfile(ctx context.Context, p auth.Principal) (ProfileRe
 		StorageLimit: quotas[store.QuotaStorageTotal],
 		IsGuest:      true,
 		ActorKey:     p.ActorKey(),
-		Upload:       uploadProfileOf(rt),
+		Upload:       uploadProfileOf(rt, quotas, perm.Has(group.Permissions, perm.BypassQuota)),
 	}
 	applyUnlimited(&res, group)
 	return res, nil

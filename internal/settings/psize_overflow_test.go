@@ -3,9 +3,7 @@ package settings
 import "testing"
 
 // TestParseSizeRejectsOverflow 回归：ParseSize 过去只约束乘数本身，
-// n*unit 可以静默回绕成负数。upload.max_file_size 没有配置上下界兜底，
-// 负数会被原样存下并当合法上限用，导致之后每一次上传都以
-// "单文件上限配置无效"失败，而配置界面显示保存成功。
+// n*unit 可以静默回绕成负数，造成配置界面保存成功但运行时限制失真。
 func TestParseSizeRejectsOverflow(t *testing.T) {
 	for _, s := range []string{"8388608T", "9007199254740992K", "8796093022208G"} {
 		if n, err := ParseSize(s); err == nil {

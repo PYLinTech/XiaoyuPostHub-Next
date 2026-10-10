@@ -20,7 +20,7 @@ const (
 	QuotaFileMax = "file.max"
 	// QuotaTrafficDailyDown 是每日下载流量上限（明文字节）。
 	QuotaTrafficDailyDown = "traffic.daily.download"
-	// QuotaPendingUploads 是同时进行中的上传会话上限。
+	// QuotaPendingUploads 是该组每个用户可同时进行的上传任务上限。
 	QuotaPendingUploads = "count.pending_uploads"
 
 	// ---- 邮件配额（与文件配额相互独立）----
@@ -79,7 +79,7 @@ func builtinQuotas() []GroupQuota {
 		{perm.GroupNormal, QuotaStorageTotal, 10 << 30},
 		{perm.GroupNormal, QuotaFileMax, 4 << 30},
 		{perm.GroupNormal, QuotaTrafficDailyDown, 100 << 30},
-		{perm.GroupNormal, QuotaPendingUploads, 8},
+		{perm.GroupNormal, QuotaPendingUploads, 8}, // 每位用户最多同时进行 8 个上传任务。
 		// 邮件存储与文件分开计量：默认 1GiB 邮件空间。
 		// count.mail_addresses 刻意不写行——默认上限 1 由全局设置兜底，
 		// 写死行会让"全局默认值"调整对存量组失效。

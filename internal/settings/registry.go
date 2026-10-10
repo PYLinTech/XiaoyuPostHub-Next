@@ -81,14 +81,16 @@ const (
 
 	// ---- 上传 ----
 
-	// KeyUploadMaxFileSize 单文件上限。
-	KeyUploadMaxFileSize Key = "upload.max_file_size"
 	// KeyUploadChunkSize 单个上传分片的大小。
 	KeyUploadChunkSize Key = "upload.chunk_size"
-	// KeyUploadMaxConcurrency 单个文件内并发上传的分片数。
-	KeyUploadMaxConcurrency Key = "upload.max_concurrency"
-	// KeyUploadMaxTasks 同时进行的上传任务（文件）数。
-	KeyUploadMaxTasks Key = "upload.max_tasks"
+	// KeyUploadFrontendConcurrency 单个文件前端上传分片的并发数。
+	KeyUploadFrontendConcurrency Key = "upload.frontend_concurrency"
+	// KeyUploadFrontendMaxTasks 全站同时接收用户上传文件任务的数量。
+	KeyUploadFrontendMaxTasks Key = "upload.frontend_max_tasks"
+	// KeyUploadSystemMaxTasks 后台同时收尾的上传任务数。
+	KeyUploadSystemMaxTasks Key = "upload.system_max_tasks"
+	// KeyUploadSystemConcurrency 单个文件上传到存储后端的分片并发数。
+	KeyUploadSystemConcurrency Key = "upload.system_concurrency"
 	// KeyUploadMaxStagingBytes 全站上传暂存空间上限。
 	KeyUploadMaxStagingBytes Key = "upload.max_staging_bytes"
 	// KeyUploadMaxVolumeBytes 上传密文单卷大小上限。
@@ -152,31 +154,28 @@ const (
 	SPFHard = "hard"
 )
 
-// 业务调优参数固定在代码中。它们会影响协议边界、上游限流或数据安全，
-// 不作为管理员配置暴露，避免每个部署都维护一套容易失配的参数。
+// 未单独开放的协议与安全参数固定在代码中，避免部署间出现难以排查的差异。
 const (
 	defaultAccountFailDelay = time.Second
 	defaultIPFailDelay      = time.Second
 	defaultMaxFailDelay     = 15 * time.Minute
 	// defaultPickupTTLHours 取件码默认有效期 8 小时；管理员可改为 0（永久）。
-	defaultPickupTTLHours = 8
-	defaultPan123APIBase  = "https://open-api.123pan.com"
-	defaultPan123LinkTTL  = 15 * time.Minute
-	// 并发 1：123 固定 16MB 分片且上传网关约 60s 超时，单片必须在 60s 内
-	// 传完（约 0.28Mbps 上行）。并发会按线程数等比抬高这个门槛，弱上行
-	// 环境下必然触发网关超时（空响应体 HTTP 500）。
-	defaultPan123UploadThreads       = 1
-	defaultPan123QPS                 = 3
-	defaultPan123PollInterval        = time.Second
-	defaultPan123PollAttempts        = 60
-	defaultCryptoBlockLog2           = byte(20)
-	defaultDeliveryIPPrefixV4        = 24
-	defaultDeliveryIPPrefixV6        = 64
-	defaultUploadChunkSize     int64 = 8 << 20
-	// 上传会话的存活期与并发上限没有对应的设置项：它们不是"可被覆盖的默认值"
-	// 而是编译期常量，因此不带 default 前缀，避免被误读成运行时可调。
+	defaultPickupTTLHours                  = 8
+	defaultPan123APIBase                   = "https://open-api.123pan.com"
+	defaultPan123LinkTTL                   = 15 * time.Minute
+	defaultPan123QPS                       = 3
+	defaultPan123PollInterval              = time.Second
+	defaultPan123PollAttempts              = 60
+	defaultCryptoBlockLog2                 = byte(20)
+	defaultDeliveryIPPrefixV4              = 24
+	defaultDeliveryIPPrefixV6              = 64
+	defaultUploadChunkSize           int64 = 8 << 20
+	defaultUploadFrontendConcurrency       = 3
+	defaultUploadIngressMaxTasks           = 8
+	defaultUploadSystemMaxTasks            = 8
+	defaultUploadSystemConcurrency         = 16
+	// 上传会话存活期仍为固定平台参数。
 	uploadSessionTTL              = 24 * time.Hour
-	uploadMaxPending              = 8
 	defaultOpsMaintenanceInterval = 15 * time.Minute
 	defaultOpsTrafficRetention    = 90 * 24 * time.Hour
 	defaultOpsAuditRetention      = 365 * 24 * time.Hour
@@ -345,24 +344,41 @@ var registry = []Descriptor{
 
 	// ---- 上传 ----
 	{
-		Key: KeyUploadChunkSize, Section: "upload", Title: "传输分片大小",
-		Help: "单个上传分片的大小。改小能适应更严格的代理限制，改大能减少请求数。",
-		Kind: KindSize, Default: "8M", Scope: ScopeHot,
+		Key: KeyUploadChunkSize, Section: "upload", Title: "上传分片大小",
+		Help: "浏览器每次发送到本站的明文分片大小；与本站向 123 云盘上传时使用的分片大小无关。必须是 1 MiB 加密块大小的整数倍。",
+		Kind: KindSize, Default: "8M", Min: 1, Scope: ScopeHot,
 		Warn: "传输分片大小应当小于反向代理的请求体大小。",
+		ValidateFn: func(raw string) error {
+			n, err := ParseSize(raw)
+			if err != nil {
+				return err
+			}
+			blockSize := int64(1) << defaultCryptoBlockLog2
+			if n%blockSize != 0 {
+				return fmt.Errorf("必须是 %d MiB 加密块大小的整数倍", blockSize>>20)
+			}
+			return nil
+		},
 	},
 	{
-		Key: KeyUploadMaxConcurrency, Section: "upload", Title: "前端最大并发数",
-		Help: "单个文件同时上传的分片数。过高会触发上游限流，弱网下的重传代价也更大。",
-		Kind: KindInt, Default: "3", Min: 1, Scope: ScopeHot,
+		Key: KeyUploadFrontendConcurrency, Section: "upload", Title: "前端上传并发数",
+		Help: "单个文件从浏览器向本站上传分片时的并发数。",
+		Kind: KindInt, Default: "3", Min: 1, Max: 128, Scope: ScopeHot,
 	},
 	{
-		Key: KeyUploadMaxTasks, Section: "upload", Title: "前端最大任务数",
-		Help: "同时进行的上传任务（文件）数。",
-		Kind: KindInt, Default: "2", Min: 1, Scope: ScopeHot,
+		Key: KeyUploadFrontendMaxTasks, Section: "upload", Title: "全局前端上传最大任务总数",
+		Help: "全站同时从前端接收的文件任务数上限；同一文件的并发分片共享一个名额，等待时按用户组资源调度优先级安排。与后台上传到 123 云盘的任务上限分别生效。",
+		Kind: KindInt, Default: "8", Min: 1, Max: 256, Scope: ScopeHot,
 	},
 	{
-		Key: KeyUploadMaxFileSize, Section: "upload", Title: "单文件上限",
-		Help: "0 表示不限制。", Kind: KindSize, Default: "100G", Scope: ScopeHot,
+		Key: KeyUploadSystemMaxTasks, Section: "upload", Title: "系统上传最大任务数",
+		Help: "分别限制后台同时进行加密收尾和存储写入的任务数，以及全站等待处理的排队任务数；两项各自使用此值，不合并计算。",
+		Kind: KindInt, Default: "8", Min: 1, Max: 256, Scope: ScopeHot,
+	},
+	{
+		Key: KeyUploadSystemConcurrency, Section: "upload", Title: "系统上传并发数",
+		Help: "单个文件从本站并发上传到 123 云盘的分片数。",
+		Kind: KindInt, Default: "16", Min: 1, Max: 128, Scope: ScopeHot,
 	},
 
 	// ---- 归档 ----
@@ -570,17 +586,16 @@ type StorageRuntime struct {
 
 // Pan123Runtime 是 123 云盘相关配置。
 type Pan123Runtime struct {
-	ClientID      string
-	ClientSecret  string
-	APIBase       string
-	RootDirID     string
-	PrivateKey    string
-	LinkTTL       time.Duration
-	AuthCallback  bool
-	UploadThreads int
-	QPS           int
-	PollInterval  time.Duration
-	PollAttempts  int
+	ClientID     string
+	ClientSecret string
+	APIBase      string
+	RootDirID    string
+	PrivateKey   string
+	LinkTTL      time.Duration
+	AuthCallback bool
+	QPS          int
+	PollInterval time.Duration
+	PollAttempts int
 }
 
 // Configured 表示凭据是否齐备。
@@ -630,14 +645,14 @@ type DeliveryRuntime struct {
 
 // UploadRuntime 是上传相关配置。
 type UploadRuntime struct {
-	ChunkSize       int64
-	MaxStagingBytes int64
-	MaxVolumeBytes  int64
-	MaxConcurrency  int
-	MaxTasks        int
-	MaxFileSize     int64
-	SessionTTL      time.Duration
-	MaxPending      int
+	ChunkSize           int64
+	MaxStagingBytes     int64
+	MaxVolumeBytes      int64
+	FrontendConcurrency int
+	FrontendMaxTasks    int
+	SystemMaxTasks      int
+	SystemConcurrency   int
+	SessionTTL          time.Duration
 }
 
 // OpsRuntime 是运维相关配置。
@@ -752,7 +767,6 @@ func buildRuntime(overlays map[Key]string) Runtime {
 		}
 		return n
 	}
-	maxFileSize := sizeOrInvalid(KeyUploadMaxFileSize)
 	maxStagingBytes := sizeOrInvalid(KeyUploadMaxStagingBytes)
 	maxVolumeBytes := sizeOrInvalid(KeyUploadMaxVolumeBytes)
 	mailExternalItem := sizeOrInvalid(KeyMailExternalResourceMaxItem)
@@ -761,15 +775,21 @@ func buildRuntime(overlays map[Key]string) Runtime {
 	if n, err := ParseSize(get(KeyUploadChunkSize)); err == nil && n > 0 {
 		chunkSize = n
 	}
-	// 并发上限的默认值兜底：正常路径下取值都来自写入侧校验过的配置，
-	// 这里的保护只针对"默认值被改坏"的极端情况，避免前端拿到 0 个 worker。
-	maxConcurrency := int(num(KeyUploadMaxConcurrency))
-	if maxConcurrency <= 0 {
-		maxConcurrency = 3
+	frontendConcurrency := int(num(KeyUploadFrontendConcurrency))
+	if frontendConcurrency <= 0 {
+		frontendConcurrency = defaultUploadFrontendConcurrency
 	}
-	maxTasks := int(num(KeyUploadMaxTasks))
-	if maxTasks <= 0 {
-		maxTasks = 2
+	frontendMaxTasks := int(num(KeyUploadFrontendMaxTasks))
+	if frontendMaxTasks <= 0 {
+		frontendMaxTasks = defaultUploadIngressMaxTasks
+	}
+	systemMaxTasks := int(num(KeyUploadSystemMaxTasks))
+	if systemMaxTasks <= 0 {
+		systemMaxTasks = defaultUploadSystemMaxTasks
+	}
+	systemConcurrency := int(num(KeyUploadSystemConcurrency))
+	if systemConcurrency <= 0 {
+		systemConcurrency = defaultUploadSystemConcurrency
 	}
 	blockLog2 := defaultCryptoBlockLog2
 
@@ -820,17 +840,16 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			DedupScope: get(KeyDedupScope),
 		},
 		Pan123: Pan123Runtime{
-			ClientID:      get(KeyPan123ClientID),
-			ClientSecret:  get(KeyPan123ClientSecret),
-			APIBase:       defaultPan123APIBase,
-			RootDirID:     get(KeyPan123RootDirID),
-			PrivateKey:    get(KeyPan123PrivateKey),
-			LinkTTL:       defaultPan123LinkTTL,
-			AuthCallback:  boolean(KeyPan123AuthCallback),
-			UploadThreads: defaultPan123UploadThreads,
-			QPS:           defaultPan123QPS,
-			PollInterval:  defaultPan123PollInterval,
-			PollAttempts:  defaultPan123PollAttempts,
+			ClientID:     get(KeyPan123ClientID),
+			ClientSecret: get(KeyPan123ClientSecret),
+			APIBase:      defaultPan123APIBase,
+			RootDirID:    get(KeyPan123RootDirID),
+			PrivateKey:   get(KeyPan123PrivateKey),
+			LinkTTL:      defaultPan123LinkTTL,
+			AuthCallback: boolean(KeyPan123AuthCallback),
+			QPS:          defaultPan123QPS,
+			PollInterval: defaultPan123PollInterval,
+			PollAttempts: defaultPan123PollAttempts,
 		},
 		Crypto: crypto,
 		Delivery: DeliveryRuntime{
@@ -842,14 +861,14 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			IPPrefixV6:    defaultDeliveryIPPrefixV6,
 		},
 		Upload: UploadRuntime{
-			ChunkSize:       chunkSize,
-			MaxStagingBytes: maxStagingBytes,
-			MaxVolumeBytes:  maxVolumeBytes,
-			MaxConcurrency:  maxConcurrency,
-			MaxTasks:        maxTasks,
-			MaxFileSize:     maxFileSize,
-			SessionTTL:      uploadSessionTTL,
-			MaxPending:      uploadMaxPending,
+			ChunkSize:           chunkSize,
+			MaxStagingBytes:     maxStagingBytes,
+			MaxVolumeBytes:      maxVolumeBytes,
+			FrontendConcurrency: frontendConcurrency,
+			FrontendMaxTasks:    frontendMaxTasks,
+			SystemMaxTasks:      systemMaxTasks,
+			SystemConcurrency:   systemConcurrency,
+			SessionTTL:          uploadSessionTTL,
 		},
 		Archive: ArchiveRuntime{
 			UserRetention:  archiveRetention(get(KeyArchiveUserRetention), 720*time.Hour),

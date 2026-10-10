@@ -2,8 +2,30 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
+
+func TestUploadQueueLimitIsSeparateFromProcessingLimit(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, `INSERT INTO user_groups (name, display_name, created_at) VALUES ('normal', '普通用户', 0)`)
+	mustExec(t, db, `INSERT INTO users (id, account, password_hash, group_name, created_at, updated_at)
+		VALUES (1, 'u1', 'x', 'normal', 0, 0)`)
+
+	if _, err := CreateUploadJob(ctx, db, UploadJob{SessionID: "processing", UserID: 1}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := db.ClaimNextUploadJob(ctx); err != nil || !found {
+		t.Fatalf("领取处理中任务失败: found=%v err=%v", found, err)
+	}
+	if _, err := CreateUploadJob(ctx, db, UploadJob{SessionID: "queued-1", UserID: 1}, 1); err != nil {
+		t.Fatalf("处理中的任务不应占用等待队列容量: %v", err)
+	}
+	if _, err := CreateUploadJob(ctx, db, UploadJob{SessionID: "queued-2", UserID: 1}, 1); !errors.Is(err, ErrBusy) {
+		t.Fatalf("等待队列达到独立上限时应拒绝新任务: %v", err)
+	}
+}
 
 func TestClaimNextUploadJobRotatesAcrossUsers(t *testing.T) {
 	db := openTestDB(t)
@@ -61,7 +83,7 @@ func TestRequeuedStreamingWindowGoesBehindOtherUsers(t *testing.T) {
 	if err := SetUploadJobReceiving(ctx, db.W(), "a1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := QueueReceivingUploadJob(ctx, db.W(), "a1"); err != nil {
+	if err := QueueReceivingUploadJob(ctx, db.W(), "a1", 256); err != nil {
 		t.Fatal(err)
 	}
 	next, found, err := db.ClaimNextUploadJob(ctx)
@@ -113,7 +135,7 @@ func TestClaimNextUploadJobKeepsOnlyOneStreamingWorkerBusy(t *testing.T) {
 			if err := CreateReceivingUploadJob(ctx, db.W(), UploadJob{SessionID: id, UserID: task.UserID, TotalBytes: 1}); err != nil {
 				t.Fatalf("创建流式上传任务 %s 失败: %v", id, err)
 			}
-			if err := QueueReceivingUploadJob(ctx, db.W(), id); err != nil {
+			if err := QueueReceivingUploadJob(ctx, db.W(), id, 256); err != nil {
 				t.Fatalf("排队流式上传任务 %s 失败: %v", id, err)
 			}
 		} else if _, err := CreateUploadJob(ctx, db, UploadJob{SessionID: id, UserID: task.UserID, TotalBytes: 1}, 256); err != nil {

@@ -103,7 +103,8 @@ func (s *Service) StorageStatus(ctx context.Context) StorageStatus {
 // 它被注册为配置变更回调：管理员填完 ClientID/Secret 保存的那一刻，后端就
 // 应当可用而不需要重启进程——否则"配置入数据库"等于没解决问题。
 func (s *Service) ApplyStorageSettings(ctx context.Context) error {
-	pan := s.Settings.Runtime(ctx).Pan123
+	rt := s.Settings.Runtime(ctx)
+	pan := rt.Pan123
 	m := s.manager()
 	if m == nil {
 		// 外部注入的后端不参与热替换。
@@ -121,7 +122,7 @@ func (s *Service) ApplyStorageSettings(ctx context.Context) error {
 		RootDirID:     pan.RootDirID,
 		PrivateKey:    pan.PrivateKey,
 		DirectLinkTTL: pan.LinkTTL,
-		UploadThreads: pan.UploadThreads,
+		UploadThreads: rt.Upload.SystemConcurrency,
 		QPS:           pan.QPS,
 		PollInterval:  pan.PollInterval,
 		PollAttempts:  pan.PollAttempts,

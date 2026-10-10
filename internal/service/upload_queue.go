@@ -14,11 +14,6 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
 
-// uploadFinalizerCount 限制全站同时进行的合并、加密和对象存储写入数。
-// ClaimNextUploadJob 同时保证同一用户最多占用一个 worker。
-const uploadFinalizerCount = 2
-const uploadQueueLimit = 256
-
 type UploadJobStatus struct {
 	SessionID     string      `json:"sessionId"`
 	FileName      string      `json:"fileName,omitempty"`
@@ -28,6 +23,14 @@ type UploadJobStatus struct {
 	ProgressBytes int64       `json:"progressBytes"`
 	TotalBytes    int64       `json:"totalBytes"`
 	Node          *store.Node `json:"node,omitempty"`
+}
+
+func (s *Service) uploadQueueLimit(ctx context.Context) int64 {
+	limit := int64(s.Settings.Runtime(ctx).Upload.SystemMaxTasks)
+	if limit <= 0 {
+		return 8
+	}
+	return limit
 }
 
 // ActiveUploadJobsForUser 返回用户尚未结束的上传任务，供新会话恢复传输面板。
@@ -68,9 +71,10 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 			if !task.Complete() {
 				return UploadJobStatus{}, fmt.Errorf("%w: 分片尚未接收完整", ErrBadRequest)
 			}
-			if err := s.queueStreamingUploadIfReady(ctx, task); err != nil {
+			if err := s.queueStreamingUploadIfReady(ctx, task); err != nil && !errors.Is(err, store.ErrBusy) {
 				return UploadJobStatus{}, err
 			}
+			s.ingressGate.Release(sessionID)
 			job, err = store.GetUploadJob(ctx, s.DB.R(), sessionID)
 			if err != nil {
 				return UploadJobStatus{}, err
@@ -95,7 +99,7 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 		UserID:     p.UserID(),
 		ClientIP:   p.ClientIP.String(),
 		TotalBytes: task.SizePlain,
-	}, uploadQueueLimit)
+	}, s.uploadQueueLimit(ctx))
 	if err != nil {
 		if errors.Is(err, store.ErrBusy) {
 			return UploadJobStatus{}, fmt.Errorf("%w: 服务器处理队列已满，请稍后重试", ErrBusy)
@@ -105,6 +109,7 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 	if job.UserID != p.UserID() {
 		return UploadJobStatus{}, ErrNotFound
 	}
+	s.ingressGate.Release(sessionID)
 	return s.uploadJobStatus(job)
 }
 
@@ -119,6 +124,20 @@ func (s *Service) UploadJobStatusForUser(ctx context.Context, p auth.Principal, 
 	}
 	if job.UserID != p.UserID() {
 		return UploadJobStatus{}, false, ErrNotFound
+	}
+	if job.State == "receiving" {
+		if task, taskErr := store.GetUploadTask(ctx, s.DB.R(), sessionID); taskErr == nil && task.Streaming &&
+			task.Complete() && uploadExpectedChecksum(task) != "" {
+			if queueErr := s.queueStreamingUploadIfReady(ctx, task); queueErr != nil && !errors.Is(queueErr, store.ErrBusy) {
+				return UploadJobStatus{}, false, queueErr
+			}
+			job, err = store.GetUploadJob(ctx, s.DB.R(), sessionID)
+			if err != nil {
+				return UploadJobStatus{}, false, err
+			}
+		} else if taskErr != nil && !errors.Is(taskErr, store.ErrNotFound) {
+			return UploadJobStatus{}, false, taskErr
+		}
 	}
 	if task, taskErr := store.GetUploadTask(ctx, s.DB.R(), sessionID); taskErr == nil &&
 		(((!task.Complete() || uploadExpectedChecksum(task) == "") && job.State != "error") || job.State == "receiving") {
@@ -163,18 +182,79 @@ func (s *Service) uploadJobStatus(job store.UploadJob) (UploadJobStatus, error) 
 	return status, nil
 }
 
-// RunUploadFinalizers 在后台以有限并发推进队列。任务状态在 SQLite 中，重启后
-// processing 会恢复为 queued；按用户轮转可避免一个人的大批文件占住所有 worker。
+// RunUploadFinalizers 按系统配置动态调整后台收尾 worker 数。任务状态在 SQLite 中，
+// 重启后 processing 会恢复为 queued；按用户轮转可避免一个人的大批文件占住 worker。
 func (s *Service) RunUploadFinalizers(ctx context.Context) {
 	if err := store.ResetInterruptedUploadJobs(ctx, s.DB.W()); err != nil {
 		log.Printf("upload queue: 恢复中断任务失败: %v", err)
 	}
-	for i := 0; i < uploadFinalizerCount; i++ {
-		s.finalizerWG.Add(1)
-		go func(worker int) {
-			defer s.finalizerWG.Done()
-			s.uploadFinalizerWorker(ctx, worker)
-		}(i + 1)
+	s.finalizerWG.Add(1)
+	go s.manageUploadFinalizers(ctx)
+}
+
+type uploadFinalizerWorkerHandle struct {
+	stop     chan struct{}
+	done     chan struct{}
+	stopping bool
+}
+
+func (s *Service) manageUploadFinalizers(ctx context.Context) {
+	defer s.finalizerWG.Done()
+	workers := make(map[int]*uploadFinalizerWorkerHandle)
+	nextID := 0
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		for id, worker := range workers {
+			select {
+			case <-worker.done:
+				delete(workers, id)
+			default:
+			}
+		}
+
+		desired := int(s.uploadQueueLimit(ctx))
+		for len(workers) < desired {
+			nextID++
+			worker := &uploadFinalizerWorkerHandle{stop: make(chan struct{}), done: make(chan struct{})}
+			workers[nextID] = worker
+			s.finalizerWG.Add(1)
+			go func(id int, handle *uploadFinalizerWorkerHandle) {
+				defer s.finalizerWG.Done()
+				defer close(handle.done)
+				s.uploadFinalizerWorker(ctx, id, handle.stop)
+			}(nextID, worker)
+		}
+		if len(workers) > desired {
+			excess := len(workers) - desired
+			for _, worker := range workers {
+				if worker.stopping {
+					excess--
+				}
+			}
+			for id := nextID; id > 0 && excess > 0; id-- {
+				worker, ok := workers[id]
+				if !ok || worker.stopping {
+					continue
+				}
+				worker.stopping = true
+				close(worker.stop)
+				excess--
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			for _, worker := range workers {
+				if !worker.stopping {
+					close(worker.stop)
+					worker.stopping = true
+				}
+			}
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -193,10 +273,14 @@ func (s *Service) WaitUploadFinalizers(ctx context.Context) error {
 	}
 }
 
-func (s *Service) uploadFinalizerWorker(ctx context.Context, worker int) {
+func (s *Service) uploadFinalizerWorker(ctx context.Context, worker int, stop <-chan struct{}) {
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return
+		case <-stop:
+			return
+		default:
 		}
 		job, found, err := s.DB.ClaimNextUploadJob(ctx)
 		if err != nil {
@@ -204,18 +288,31 @@ func (s *Service) uploadFinalizerWorker(ctx context.Context, worker int) {
 				return
 			}
 			log.Printf("upload queue: worker %d 领取任务失败: %v", worker, err)
-			if !waitUploadQueue(ctx, time.Second) {
+			if !waitUploadQueueOrStop(ctx, stop, time.Second) {
 				return
 			}
 			continue
 		}
 		if !found {
-			if !waitUploadQueue(ctx, 500*time.Millisecond) {
+			if !waitUploadQueueOrStop(ctx, stop, 500*time.Millisecond) {
 				return
 			}
 			continue
 		}
 		s.processUploadJob(ctx, job)
+	}
+}
+
+func waitUploadQueueOrStop(ctx context.Context, stop <-chan struct{}, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-stop:
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -261,16 +358,5 @@ func (s *Service) processUploadJob(ctx context.Context, job store.UploadJob) {
 			log.Printf("upload queue: 记录任务 %s 失败状态失败: %v", job.SessionID, finishErr)
 		}
 		log.Printf("upload queue: 任务 %s 处理失败: %v", job.SessionID, err)
-	}
-}
-
-func waitUploadQueue(ctx context.Context, delay time.Duration) bool {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
 	}
 }

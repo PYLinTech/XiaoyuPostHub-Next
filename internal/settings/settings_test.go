@@ -3,7 +3,6 @@ package settings
 import (
 	"context"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -180,7 +179,8 @@ func TestValidationRejectsBadValues(t *testing.T) {
 		{KeyRegisterMode, "public", "枚举外的取值"},
 		{KeyDeliveryTicketMaxUses, "0", "必须大于零"},
 		{KeyDeliveryTicketMaxUses, "abc", "不是整数"},
-		{KeyUploadMaxFileSize, "-1", "负数"},
+		{KeyUploadSystemMaxTasks, "0", "系统任务数必须大于零"},
+		{KeyUploadChunkSize, "9437185", "上传分片大小必须与加密块对齐"},
 		{KeyDeliveryTicketTTL, "永远", "不是时长"},
 		{KeyCryptokeys, "not-base64!!!", "不是 base64"},
 		{KeyCryptokeys, "YWJj", "解码后不是 32 字节"},
@@ -194,12 +194,15 @@ func TestValidationRejectsBadValues(t *testing.T) {
 		}
 	}
 
-	// 合法取值必须被接受，且被规范化。
-	if err := st.Set(ctx, KeyUploadMaxFileSize, "8M", 1); err != nil {
-		t.Fatalf("合法取值被拒: %v", err)
+	// 新的上传并发配置必须接受范围内的值。
+	if err := st.Set(ctx, KeyUploadSystemConcurrency, "16", 1); err != nil {
+		t.Fatalf("合法上传并发数被拒: %v", err)
 	}
-	if got := st.Get(ctx, KeyUploadMaxFileSize); got != strconv.FormatInt(8<<20, 10) {
-		t.Fatalf("大小应被规范化成字节数，实得 %q", got)
+	if err := st.Set(ctx, KeyUploadChunkSize, "10M", 1); err != nil {
+		t.Fatalf("合法且对齐的上传分片大小被拒: %v", err)
+	}
+	if got := st.Get(ctx, KeyUploadSystemConcurrency); got != "16" {
+		t.Fatalf("上传并发数应被规范化成整数，实得 %q", got)
 	}
 	if err := st.Set(ctx, KeyRegisterMode, "open", 1); err != nil {
 		t.Fatalf("合法枚举被拒: %v", err)
@@ -246,9 +249,10 @@ func TestRuntimeParsesCoreValues(t *testing.T) {
 	if len(rt.Crypto.Pepper) != 32 || string(rt.Crypto.Pepper) == kek {
 		t.Fatalf("短凭据密钥应从主密钥派生，实得 %d 字节", len(rt.Crypto.Pepper))
 	}
-	if rt.Upload.ChunkSize != 8<<20 || rt.Upload.MaxConcurrency != 3 || rt.Upload.MaxTasks != 2 {
-		t.Fatalf("上传参数解析错误: chunk=%d concurrency=%d tasks=%d",
-			rt.Upload.ChunkSize, rt.Upload.MaxConcurrency, rt.Upload.MaxTasks)
+	if rt.Upload.ChunkSize != 8<<20 || rt.Upload.FrontendConcurrency != 3 ||
+		rt.Upload.FrontendMaxTasks != 8 || rt.Upload.SystemMaxTasks != 8 || rt.Upload.SystemConcurrency != 16 {
+		t.Fatalf("上传参数解析错误: chunk=%d frontendConcurrency=%d frontendTasks=%d systemTasks=%d systemConcurrency=%d",
+			rt.Upload.ChunkSize, rt.Upload.FrontendConcurrency, rt.Upload.FrontendMaxTasks, rt.Upload.SystemMaxTasks, rt.Upload.SystemConcurrency)
 	}
 	if rt.Delivery.TicketTTL != 2*time.Minute {
 		t.Fatalf("票据有效期解析错误: %s", rt.Delivery.TicketTTL)

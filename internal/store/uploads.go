@@ -34,8 +34,9 @@ func CreateUploadTask(ctx context.Context, q Querier, t UploadTask) error {
 	return createUploadTask(ctx, q, t, 0)
 }
 
-// CreateUploadTaskLimited 在创建会话的同一条写语句中检查用户的并发上限。
-// 先 Count 再 INSERT 会在并发请求之间留下竞态，导致临时盘会话数超过上限。
+// CreateUploadTaskLimited 在创建会话的同一条写语句中检查用户的并发上限，
+// 统计未过期会话及仍在收片、排队或处理的任务。先 Count 再 INSERT 会在并发
+// 请求之间留下竞态，导致文件任务数超过上限。
 func CreateUploadTaskLimited(ctx context.Context, q Querier, t UploadTask, limit int64) error {
 	if limit <= 0 {
 		return fmt.Errorf("%w: 上传会话上限必须大于 0", ErrQuotaExceeded)
@@ -62,8 +63,11 @@ func createUploadTask(ctx context.Context, q Querier, t UploadTask, limit int64)
 			INSERT INTO upload_tasks (id, user_id, checksum, expected_checksum, size_plain, streaming, volume_size, chunk_size, chunk_total,
 				received_mask, target_parent_path, target_name, conflict_action, expires_at, created_at, updated_at)
 			SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-			WHERE (SELECT COUNT(*) FROM upload_tasks WHERE user_id = ?) < ?`
-		args = append(args, t.UserID, limit)
+			WHERE (SELECT COUNT(*) FROM upload_tasks t WHERE t.user_id = ? AND
+				(t.expires_at > ? OR EXISTS (
+					SELECT 1 FROM upload_jobs j WHERE j.session_id = t.id AND j.state IN ('receiving', 'queued', 'processing')
+				))) < ?`
+		args = append(args, t.UserID, now, limit)
 	}
 	res, err := q.ExecContext(ctx, query, args...)
 	if err != nil {

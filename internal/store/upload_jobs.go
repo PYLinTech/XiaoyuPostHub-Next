@@ -8,6 +8,7 @@ import (
 )
 
 // CreateUploadJob 入队；重复提交收尾请求返回已有任务，不制造重复收尾。
+// limit 只限制 queued 等待队列，不计 processing；后台并行处理数由 worker 数另行限制。
 func CreateUploadJob(ctx context.Context, db *DB, job UploadJob, limit int64) (UploadJob, error) {
 	now := Now()
 	if job.CreatedAt == 0 {
@@ -21,7 +22,7 @@ func CreateUploadJob(ctx context.Context, db *DB, job UploadJob, limit int64) (U
 			return err
 		}
 		var pending int64
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_jobs WHERE state IN ('queued', 'processing')`).Scan(&pending); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_jobs WHERE state = 'queued'`).Scan(&pending); err != nil {
 			return fmt.Errorf("统计待处理上传任务失败: %w", err)
 		}
 		if limit > 0 && pending >= limit {
@@ -53,7 +54,27 @@ func CreateReceivingUploadJob(ctx context.Context, q Querier, job UploadJob) err
 }
 
 // QueueReceivingUploadJob 只把可处理的收片任务放入公平 worker 队列。
-func QueueReceivingUploadJob(ctx context.Context, q Querier, sessionID string) error {
+// limit 只限制等待队列；满时保留 receiving 状态，由之后的请求重试入队。
+func QueueReceivingUploadJob(ctx context.Context, q Querier, sessionID string, limit int64) error {
+	var state string
+	if err := q.QueryRowContext(ctx, `SELECT state FROM upload_jobs WHERE session_id = ?`, sessionID).Scan(&state); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if state != "receiving" {
+		return nil
+	}
+	if limit > 0 {
+		var pending int64
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM upload_jobs WHERE state = 'queued'`).Scan(&pending); err != nil {
+			return err
+		}
+		if pending >= limit {
+			return ErrBusy
+		}
+	}
 	_, err := q.ExecContext(ctx, `UPDATE upload_jobs SET state = 'queued', updated_at = ?
 		WHERE session_id = ? AND state = 'receiving'`, Now(), sessionID)
 	return err

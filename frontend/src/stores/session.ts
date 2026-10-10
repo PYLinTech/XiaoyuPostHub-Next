@@ -34,7 +34,7 @@ interface SessionState {
   // 原来这里各存了一份镜像：镜像只在两处赋值，全站没有任何第二个读取方
   // （派生量读的是 state.setup.*），于是同一份事实有两个真相源，且其中
   // 一个永远不会更新——下次谁照着"有独立字段"的错觉去读它，就会拿到旧值。
-  /** 前端上传编排参数（分片大小与两级并发），来自后端设置。 */
+  /** 前端上传编排参数；任务数按用户组配额，分片参数由系统设置提供。 */
   upload: UploadProfile;
 }
 
@@ -49,8 +49,10 @@ const state = reactive<SessionState>({
   actorKey: "",
   setup: null,
   siteName: "XiaoyuPostHub-Next",
-  upload: { chunkSize: 8 << 20, maxConcurrency: 3, maxTasks: 2 },
+  upload: { chunkSize: 8 << 20, maxConcurrency: 3, maxTasks: 8 },
 });
+
+const DEFAULT_UPLOAD_PROFILE: UploadProfile = { chunkSize: 8 << 20, maxConcurrency: 3, maxTasks: 8 };
 
 /** 探活与登录状态变化后，需要重跑的副作用（例如加载公告）。 */
 const listeners = new Set<() => void>();
@@ -88,6 +90,7 @@ export function clearSession(): void {
   state.storageUsed = 0;
   state.storageLimit = 0;
   state.actorKey = "";
+  state.upload = { ...DEFAULT_UPLOAD_PROFILE };
   notify();
 }
 

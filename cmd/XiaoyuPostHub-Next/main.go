@@ -168,12 +168,13 @@ var storageBackendKeys = []settings.Key{
 	settings.KeyPan123ClientSecret,
 	settings.KeyPan123RootDirID,
 	settings.KeyPan123PrivateKey,
+	settings.KeyUploadSystemConcurrency,
 }
 
 // registerConfigHooks 把"配置变更 → 组件热生效"接起来。
 //
-// 只有存储后端需要显式重建：其余配置项都在每次读取时从快照取，改完立刻对
-// 新请求生效，不需要通知。
+// 存储凭据与上游分片并发会改变后端实例，因此显式重建；其余配置项都在每次读取时
+// 从快照取，改完立刻对新请求生效，不需要通知。
 func registerConfigHooks(st *settings.Store, svc *service.Service) {
 	st.OnChange(func(ctx context.Context, changed []settings.Key) {
 		rebuild := false

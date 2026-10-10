@@ -13,8 +13,10 @@ const progressUrl = moduleUrl(ts.transpileModule(await readFile(new URL("../src/
 const stateUrl = moduleUrl(`import { reactive, ref } from ${JSON.stringify(vueUrl)};
 export const transferPanel=reactive({visible:false,collapsed:false,selected:'upload'});
 export const uploadItems=ref([]),downloadItems=reactive([]);
+export const serverUploadItems=reactive([]);
 export const useUploads=()=>({items:uploadItems,activeCount:ref(0),cancelUploadItem(){},retryUpload(){},removeUpload(){}});
 export const useDownloads=()=>({items:downloadItems,remove(){}});
+export const useServerUploadTasks=()=>({items:serverUploadItems,cancel(){},remove(){}});
 export const canCancelDownload=()=>false;
 export const formatBytes=n=>String(n);
 export { isByteTransfer, aggregateTransferProgress } from ${JSON.stringify(progressUrl)};

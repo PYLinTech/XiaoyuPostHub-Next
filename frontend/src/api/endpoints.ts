@@ -134,7 +134,7 @@ export const uploadApi = {
     parentPath: string;
     name: string;
     conflictAction?: string;
-  }) => request<InitUploadResult>("/api/upload/init", { method: "POST", body: input }),
+  }, signal?: AbortSignal) => request<InitUploadResult>("/api/upload/init", { method: "POST", body: input, signal }),
 
   resolve: (sessionId: string, checksum: string, signal?: AbortSignal) =>
     request<{ dedup: boolean; node?: Node | null }>(

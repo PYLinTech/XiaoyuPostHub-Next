@@ -13,8 +13,7 @@ import { showTransfer } from "./transferPanel";
 // 往往会切到别的页面去看别的东西，此时进度条不能跟着页面一起消失，
 // 也不能因为页面卸载而中断。
 //
-// 两级并发都由后端设置驱动：文件级"前端最大任务数"（pump 的水位线），
-// 文件内"前端最大并发数"（分片 worker 数，见 delivery/upload.ts）。
+// 文件级任务上限由用户组配额驱动；单文件分片并发由系统上传设置驱动。
 
 export type UploadStatus = "queued" | "running" | "done" | "error" | "canceled";
 
@@ -38,7 +37,7 @@ const state = reactive({ items: [] as UploadItem[] });
 function uploadLimits(): { maxTasks: number; maxConcurrency: number } {
   const upload = useSession().state.upload;
   return {
-    maxTasks: Math.max(1, upload?.maxTasks ?? 2),
+    maxTasks: Math.max(1, upload?.maxTasks ?? 8),
     maxConcurrency: Math.max(1, upload?.maxConcurrency ?? 3),
   };
 }

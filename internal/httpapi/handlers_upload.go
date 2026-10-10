@@ -85,7 +85,11 @@ func (s *Server) handleUploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 分片大小在上传会话创建时固定。这里再做一次 HTTP 层上限保护，避免
 	// 服务层尚未开始写盘前就让客户端发送任意大的请求体；服务层仍会按会话
 	// 实际尺寸做最终校验。
-	chunkLimit := s.Settings.Runtime(r.Context()).Upload.ChunkSize
+	chunkLimit, err := s.Svc.UploadChunkLimit(r.Context(), p, pathParam(r, "session"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
 	if chunkLimit <= 0 {
 		writeErr(w, http.StatusServiceUnavailable, "服务暂时不可用", "上传分片大小配置无效")
 		return

@@ -40,7 +40,7 @@ func (s *Service) queueStreamingUploadIfReady(ctx context.Context, task store.Up
 		return nil
 	}
 	return s.DB.InTx(ctx, func(tx store.Querier) error {
-		return store.QueueReceivingUploadJob(ctx, tx, task.ID)
+		return store.QueueReceivingUploadJob(ctx, tx, task.ID, s.uploadQueueLimit(ctx))
 	})
 }
 
@@ -138,8 +138,13 @@ func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Princ
 				return err
 			}
 			if streamWindowReady(latest, state.NextPlainOffset, latest.VolumeSize, s.BlockSize(ctx)) {
-				_, err := tx.ExecContext(ctx, `UPDATE upload_jobs SET state = 'queued', updated_at = ? WHERE session_id = ? AND state = 'processing'`, store.Now(), task.ID)
-				return err
+				if err := store.SetUploadJobReceiving(ctx, tx, task.ID); err != nil {
+					return err
+				}
+				if err := store.QueueReceivingUploadJob(ctx, tx, task.ID, s.uploadQueueLimit(ctx)); err != nil && !errors.Is(err, store.ErrBusy) {
+					return err
+				}
+				return nil
 			}
 			return store.SetUploadJobReceiving(ctx, tx, task.ID)
 		})
@@ -312,8 +317,13 @@ func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Princ
 			return err
 		}
 		if streamWindowReady(latestTask, state.NextPlainOffset+plainSize, latestTask.VolumeSize, s.BlockSize(ctx)) {
-			_, err := tx.ExecContext(ctx, `UPDATE upload_jobs SET state = 'queued', updated_at = ? WHERE session_id = ? AND state = 'processing'`, store.Now(), task.ID)
-			return err
+			if err := store.SetUploadJobReceiving(ctx, tx, task.ID); err != nil {
+				return err
+			}
+			if err := store.QueueReceivingUploadJob(ctx, tx, task.ID, s.uploadQueueLimit(ctx)); err != nil && !errors.Is(err, store.ErrBusy) {
+				return err
+			}
+			return nil
 		}
 		return store.SetUploadJobReceiving(ctx, tx, task.ID)
 	})

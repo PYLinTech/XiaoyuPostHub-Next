@@ -23,8 +23,9 @@ import (
 // migrations/ 同步演进。
 //
 // 1 是基线：首批建库直起的结构；v2 邮箱解绑申请；v3 上传平台（收尾队列、流式暂存、
-// 密文分卷与用户组资源调度优先级）；v4 并行上传校验摘要；v5 分享名称展示。
-const currentSchemaVersion = 5
+// 密文分卷与用户组资源调度优先级）；v4 并行上传校验摘要；v5 分享名称展示；
+// v6 上传配置改由系统运行参数与用户组配额管理。
+const currentSchemaVersion = 6
 
 const schemaVersionOpTimeout = 120 * time.Second
 

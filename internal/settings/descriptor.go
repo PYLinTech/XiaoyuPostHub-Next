@@ -265,9 +265,7 @@ func ParseSize(raw string) (int64, error) {
 		return 0, fmt.Errorf("不得为负")
 	}
 	// 乘法必须查溢出。ParseInt 只约束了乘数本身，n*unit 仍可能回绕成负数
-	// （8388608T = 2^23 * 2^40 = 2^63）。而 upload.max_file_size 没有配置
-	// 上下界兜底，负数会被原样存下并被当成合法上限使用，最终让每一次上传
-	// 都以"单文件上限配置无效"失败——配置界面却显示保存成功。
+	// （8388608T = 2^23 * 2^40 = 2^63），让容量与尺寸限制在运行时失真。
 	if n > math.MaxInt64/unit {
 		return 0, fmt.Errorf("数值过大，超出可表示范围")
 	}

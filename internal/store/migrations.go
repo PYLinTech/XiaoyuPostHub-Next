@@ -48,12 +48,13 @@ type migration struct {
 // 写错了就在末尾追加新版本补救，不要回头编辑旧条目。
 //
 // v1 → v2 创建邮箱地址解绑申请表；v2 → v3 添加完整上传平台与资源调度优先级；
-// v3 → v4 为并行上传校验持久化最终摘要。
+// v3 → v4 为并行上传校验持久化最终摘要；v5 → v6 清除已迁移的旧上传配置项。
 var migrations = []migration{
 	{Version: 2, Name: "mail_unbind_requests", File: "0001_mail_unbind.sql"},
 	{Version: 3, Name: "upload_platform", File: "0002_upload_platform.sql"},
 	{Version: 4, Name: "parallel_upload_checksum", File: "0003_parallel_upload_checksum.sql"},
 	{Version: 5, Name: "share_sharer_name", File: "0004_share_sharer_name.sql"},
+	{Version: 6, Name: "upload_config_rework", File: "0005_upload_config_rework.sql"},
 }
 
 // loadMigrations 按注册表读取每个迁移的 SQL 并做完整性校验。

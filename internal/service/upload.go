@@ -79,7 +79,6 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 	if req.SizePlain < 0 {
 		return InitUploadResult{}, fmt.Errorf("%w: 文件大小非法", ErrBadRequest)
 	}
-	rt := s.Settings.Runtime(ctx)
 	if !s.EncryptionReady(ctx) {
 		return InitUploadResult{}, fmt.Errorf("%w: 服务端未配置加密密钥", ErrUnavailable)
 	}
@@ -90,31 +89,26 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		return InitUploadResult{}, fmt.Errorf("%w: 需要在管理界面配置存储凭据后才能上传", ErrStorageNotReady)
 	}
 
-	// 组配额在入口一次性读出：单文件上限、并发会话数与存储总量都在其中。
+	// 组配额在入口一次性读出：单文件上限、用户任务数与存储总量都在其中。
 	// BypassQuota 的身份跳过组配额判定（但仍受全局上限与记账约束）。
 	quotas, quotaBypass, err := s.groupQuotaMap(ctx, p)
 	if err != nil {
 		return InitUploadResult{}, err
 	}
 
-	maxFile := rt.Upload.MaxFileSize
-	if maxFile < 0 {
-		return InitUploadResult{}, fmt.Errorf("%w: 单文件上限配置无效", ErrUnavailable)
-	}
-	// 组配额可以把单文件上限收得更紧。配额语义：无行沿用全局值，行值为 0
-	// 表示该组完全禁止上传（与"0 是禁止、无行是无限"的配额文档一致）。
+	// 单文件上限由用户组配额唯一控制：无行表示不限制，行值为 0 表示禁止上传。
 	fileMaxForbidden := false
 	if !quotaBypass {
 		if fm, ok := quotas[store.QuotaFileMax]; ok {
 			if fm == 0 {
 				fileMaxForbidden = true
-			} else if maxFile <= 0 || fm < maxFile {
-				maxFile = fm
+			} else if req.SizePlain > fm {
+				return InitUploadResult{}, fmt.Errorf("%w: 单文件上限 %d 字节", ErrTooLarge, fm)
 			}
 		}
 	}
-	if fileMaxForbidden || (maxFile > 0 && req.SizePlain > maxFile) {
-		return InitUploadResult{}, fmt.Errorf("%w: 单文件上限 %d 字节", ErrTooLarge, maxFile)
+	if fileMaxForbidden {
+		return InitUploadResult{}, fmt.Errorf("%w: 当前用户组禁止上传文件", ErrTooLarge)
 	}
 
 	parent, err := vpath.Normalize(req.ParentPath)
@@ -165,19 +159,18 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		}
 	}
 
-	// ② 进行中的上传会话数上限与配额预扣会在同一写事务中完成。上传会把
-	// 分片落到临时盘，不设上限等于把磁盘交给客户端支配；秒传命中不建会话，
-	// 不会被这个上限拦住。组配额行存在时覆盖默认并发数（0 = 禁止新建会话）。
+	// ② 用户组配置了上传最大任务数时，在会话创建事务中原子检查，避免并发
+	// 请求突破按用户计算的文件任务上限。秒传命中不建会话，不占用户任务名额。
 	uploadRT := s.Settings.Runtime(ctx).Upload
 	if uploadRT.MaxStagingBytes <= 0 {
 		return InitUploadResult{}, fmt.Errorf("%w: 上传暂存上限配置无效", ErrUnavailable)
 	}
-	pendingLimit := uploadRT.MaxPending
+	var pendingLimit int
 	pendingLimited := false
 	if !quotaBypass {
 		if pl, ok := quotas[store.QuotaPendingUploads]; ok {
-			// 组配额行存在时覆盖默认并发数。行值为 0 表示该组完全禁止
-			// 新建会话，与文件上限/存储配额的"0 是禁止、无行是无限"语义一致。
+			// 上传任务数只由用户组配额限制。行值为 0 表示禁止新建会话；
+			// 没有配额行表示不限制，不借用后台任务设置作为用户侧默认值。
 			pendingLimit, pendingLimited = int(pl), true
 		}
 	}
@@ -243,6 +236,16 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		ExpiresAt:        time.Now().UTC().Add(uploadRT.SessionTTL),
 		CreatedAt:        s.Now(),
 	}
+	s.ingressGate.SetLimit(uploadRT.FrontendMaxTasks)
+	if err := s.ingressGate.Acquire(ctx, task.ID, p.Group.ResourceSchedulingPriority, task.ExpiresAt); err != nil {
+		return InitUploadResult{}, err
+	}
+	keepIngressAdmission := false
+	defer func() {
+		if !keepIngressAdmission {
+			s.ingressGate.Release(task.ID)
+		}
+	}()
 	storageKey := store.UserCounterKey(p.UserID(), "")
 	// 存储总量配额：无行 = 不受限；行值 0 = 完全禁止，交给 ReserveCounter
 	// 的上限判定拒绝（其 limit<=0 分支与配额语义一致）。
@@ -265,7 +268,11 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		if err != nil {
 			return err
 		}
-		err = store.CreateUploadTaskLimited(ctx, tx, task, int64(pendingLimit))
+		if pendingLimited {
+			err = store.CreateUploadTaskLimited(ctx, tx, task, int64(pendingLimit))
+		} else {
+			err = store.CreateUploadTask(ctx, tx, task)
+		}
 		if errors.Is(err, store.ErrQuotaExceeded) {
 			return fmt.Errorf("%w: 同时进行的上传会话已达用户组上限", ErrQuotaExceeded)
 		}
@@ -317,6 +324,7 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		}
 		return InitUploadResult{}, err
 	}
+	keepIngressAdmission = true
 
 	return InitUploadResult{
 		SessionID:  task.ID,
@@ -405,7 +413,8 @@ func (s *Service) ResolveUploadChecksum(ctx context.Context, p auth.Principal, s
 		if err != nil {
 			return nil, err
 		}
-		if err := s.queueStreamingUploadIfReady(ctx, latest); err != nil && !errors.Is(err, store.ErrNotFound) {
+		if err := s.queueStreamingUploadIfReady(ctx, latest); err != nil &&
+			!errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrBusy) {
 			return nil, err
 		}
 	}
@@ -678,6 +687,18 @@ func (s *Service) newContentRecord(ctx context.Context, checksum string, sizePla
 	}, nil
 }
 
+// UploadChunkLimit 返回会话创建时固定的分片大小，供 HTTP 层设置请求体上限。
+func (s *Service) UploadChunkLimit(ctx context.Context, p auth.Principal, sessionID string) (int64, error) {
+	if err := auth.RequirePermission(p, perm.Upload); err != nil {
+		return 0, err
+	}
+	task, err := s.ownUploadTask(ctx, p, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	return task.ChunkSize, nil
+}
+
 // UploadChunk 接收一个分片。
 //
 // 分片先落临时文件而不是常驻内存：并发分片数乘以分片大小就是内存占用，
@@ -712,6 +733,16 @@ func (s *Service) UploadChunk(ctx context.Context, p auth.Principal, sessionID s
 		return store.UploadTask{}, fmt.Errorf("%w: 空分片无效", ErrBadRequest)
 	}
 	uploadRT := s.Settings.Runtime(ctx).Upload
+	s.ingressGate.SetLimit(uploadRT.FrontendMaxTasks)
+	if !s.ingressGate.Touch(task.ID) {
+		group, err := store.GetGroup(ctx, s.DB.R(), p.GroupName())
+		if err != nil {
+			return store.UploadTask{}, fmt.Errorf("%w: 读取用户组资源调度优先级失败", ErrUnavailable)
+		}
+		if err := s.ingressGate.Acquire(ctx, task.ID, group.ResourceSchedulingPriority, task.ExpiresAt); err != nil {
+			return store.UploadTask{}, err
+		}
+	}
 	admissionLimit, err := uploadStagingAdmission(ctx, s.DB.R(), uploadRT.MaxStagingBytes, task.VolumeSize)
 	if err != nil {
 		return store.UploadTask{}, err
@@ -725,6 +756,9 @@ func (s *Service) UploadChunk(ctx context.Context, p auth.Principal, sessionID s
 	}
 	if !reserved {
 		updated, markErr := store.MarkChunkReceived(ctx, s.DB.W(), task.ID, index)
+		if markErr == nil && updated.Complete() {
+			s.ingressGate.Release(task.ID)
+		}
 		return updated, markErr
 	}
 	stopHeartbeat := s.keepUploadStagingReservationAlive(ctx, task.ID, index)
@@ -743,11 +777,14 @@ func (s *Service) UploadChunk(ctx context.Context, p auth.Principal, sessionID s
 		_ = store.ReleaseUploadStagingChunk(ctx, s.DB.W(), task.ID, index)
 		return store.UploadTask{}, err
 	}
+	if updated.Complete() {
+		s.ingressGate.Release(task.ID)
+	}
 	if err := store.MarkUploadStagingChunkReady(ctx, s.DB.W(), task.ID, index); err != nil {
 		return store.UploadTask{}, err
 	}
 	if task.Streaming {
-		if err := s.queueStreamingUploadIfReady(ctx, updated); err != nil {
+		if err := s.queueStreamingUploadIfReady(ctx, updated); err != nil && !errors.Is(err, store.ErrBusy) {
 			return store.UploadTask{}, err
 		}
 	}
@@ -768,6 +805,7 @@ func (s *Service) keepUploadStagingReservationAlive(ctx context.Context, session
 			case <-stop:
 				return
 			case <-ticker.C:
+				s.ingressGate.Touch(sessionID)
 				if err := store.TouchUploadStagingChunk(ctx, s.DB.W(), sessionID, index); err != nil {
 					log.Printf("service: 上传 %s 分片 %d 暂存预占保活失败: %v", sessionID, index, err)
 				}
@@ -1260,6 +1298,7 @@ func (s *Service) CancelUpload(ctx context.Context, p auth.Principal, sessionID 
 // 四处残留必须一起清掉：任何一处遗留都会造成"内容永远处于上传中"或"磁盘被
 // 悄悄占满"这类难以归因的问题。
 func (s *Service) abortUpload(ctx context.Context, task store.UploadTask) error {
+	defer s.ingressGate.Release(task.ID)
 	var streamedRef string
 	var streamedSize int64
 	var streamedDeleteErr error

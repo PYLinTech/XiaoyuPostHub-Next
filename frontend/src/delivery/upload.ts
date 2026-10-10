@@ -111,7 +111,7 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
       parentPath: options.parentPath,
       name: file.name,
       conflictAction: options.conflictAction ?? "rename",
-    });
+    }, options.signal);
     let session: InitUploadResult;
     // 已有断点会话时先算摘要确认本地文件身份，再安全续传；新上传则立即建会话，
     // 哈希和分片网络传输并行进行。
@@ -139,12 +139,16 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
     if (!sessionId) {
       throw new Error("上传会话缺少标识");
     }
+    const discardSession = async () => {
+      // Worker 保留创建会话时的令牌，可在切换身份后替旧用户清理会话。
+      await uploadApi.cancel(sessionId).catch(() => {});
+      forgetSession(checksum, options.parentPath, file, sessionId);
+    };
 
     options.onSessionId?.(sessionId);
     rememberSession(checksum, options.parentPath, file, sessionId);
     if (signal.aborted) {
-      await uploadApi.cancel(sessionId).catch(() => {});
-      forgetSession(checksum, options.parentPath, file, sessionId);
+      await discardSession();
       throw new DOMException("已取消", "AbortError");
     }
     if (session.finalizing) {
@@ -237,8 +241,7 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
       const permanentRejection = error instanceof ApiError &&
         error.status >= 400 && error.status < 500 && error.status !== 429;
       if (options.signal?.aborted || !transferFailed || permanentRejection) {
-        if (!options.signal?.aborted) await uploadApi.cancel(sessionId).catch(() => {});
-        forgetSession(checksum, options.parentPath, file, sessionId);
+        await discardSession();
       }
       throw error;
     };
@@ -276,9 +279,10 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
         }
       }
     } catch (error) {
-      // 摘要绑定失败时停掉剩余分片，避免 UI 已报错但仍持续占用带宽。
-      // 会话和已收分片保留，用户重试时可从断点继续。
+      // 摘要绑定失败时停掉剩余分片，避免 UI 已报错但仍持续占用带宽；
+      // 普通网络错误保留续传会话，身份切换导致的中止则清理旧会话。
       chunksController.abort();
+      if (options.signal?.aborted) await discardSession();
       throw error;
     }
 

@@ -58,7 +58,17 @@ async function refreshServerUploads(expectedGeneration: number): Promise<void> {
     await Promise.all(active.map(async task => {
       try {
         const status = await uploadApi.status(task.sessionId);
-        if (expectedGeneration === generation && status.state) applyStatus(task, status);
+        if (expectedGeneration === generation && status.state) {
+          applyStatus(task, {
+            sessionId: status.sessionId,
+            state: status.state,
+            message: status.message ?? "",
+            error: status.error,
+            progressBytes: status.progressBytes ?? 0,
+            totalBytes: status.totalBytes ?? 0,
+            node: status.node,
+          });
+        }
       } catch {
         // 临时网络错误不清除任务；下一轮继续查询。
       }

@@ -120,6 +120,7 @@ type Service struct {
 	// 不该把调用方（尤其是管理端手动触发）阻塞在锁上。
 	maintenanceMu sync.Mutex
 	finalizerWG   sync.WaitGroup
+	ingressGate   *uploadTaskGate
 }
 
 // New 构造业务服务。
@@ -137,7 +138,7 @@ func New(deps Deps) (*Service, error) {
 	if deps.TempDir == "" {
 		return nil, fmt.Errorf("service: 缺少临时目录")
 	}
-	return &Service{Deps: deps}, nil
+	return &Service{Deps: deps, ingressGate: newUploadTaskGate(newPriorityGate())}, nil
 }
 
 // EncryptionReady 表示是否可以加密新对象。
