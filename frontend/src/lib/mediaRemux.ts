@@ -6,6 +6,34 @@ import {
 import type { AudioCodec, Input, VideoCodec } from "mediabunny";
 import { MediaRangeSource } from "./mediaRangeSource";
 import { supportsMediaSourceType } from "./mediaSourceSupport";
+import { durationFromTail } from "./isoDuration";
+
+/** 尾部探测窗口。实测最后一个 moof 距文件末尾 11.9 MiB，取 16 MiB 留出余量。 */
+const TAIL_WINDOW = 16 * 1024 * 1024;
+
+/** 在字节里读 4 字符的 box 类型。 */
+function readTypeAt(bytes: Uint8Array, offset: number): string {
+  return String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+}
+
+/** 读 box 的 size 字段（支持 64 位扩展）。 */
+function readBoxSize(bytes: Uint8Array, offset: number): number {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const size = view.getUint32(offset);
+  if (size === 1) return Number(view.getBigUint64(offset + 8));
+  return size === 0 ? bytes.byteLength - offset : size;
+}
+
+/** 在头部窗口里找到 moov 的起点；找不到返回 -1。 */
+function findBox(bytes: Uint8Array, type: string): number {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let offset = 0; offset + 8 <= bytes.byteLength; offset++) {
+    if (readTypeAt(bytes, offset + 4) !== type) continue;
+    const size = view.getUint32(offset);
+    if (size >= 8 && offset + size <= bytes.byteLength) return offset;
+  }
+  return -1;
+}
 
 export type MediaTrackSpec = {
   type: "audio" | "video";
@@ -104,9 +132,42 @@ export class MediaDemuxSession {
     return { tracks: specs, duration: duration !== null && duration > origin ? duration - origin : null, origin };
   }
   async duration(origin: number): Promise<number | null> {
-    const input = this.source.input(AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]), 2 * 1024 * 1024);
-    try { const duration = await input.computeDuration(undefined, { metadataOnly: true }); return Number.isFinite(duration) && duration > origin ? duration - origin : null; }
-    catch { return null; } finally { input.dispose(); }
+    // 分片 MP4 把 duration 留在 mvhd 写 0（媒体可无限追加），从头读永远拿不到。
+    // 所以先读头部元数据；拿不到再从文件尾部找最后一个 moof 反推——那里的
+    // tfdt 带着最后一片的起始时间。两处都失败就返回 null，让播放器留空，
+    // 也不要给一个猜出来的值：错的时长会让进度条提前到底然后停住。
+    const head = await this.probe(() => {
+      const input = this.source.input(AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]), 2 * 1024 * 1024);
+      try { return input.computeDuration(undefined, { metadataOnly: true }); } finally { queueMicrotask(() => input.dispose()); }
+    });
+    if (head !== null && head > origin) return head - origin;
+
+    const tail = await this.probe(() => this.tailDuration());
+    if (tail !== null && tail > origin) return tail - origin;
+    return null;
+  }
+
+  /** 读文件尾部窗口，从最后一个 moof 反推容器时长。 */
+  private async tailDuration(): Promise<number | null> {
+    const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]);
+    // 16 MiB：实测最后一个 moof 距文件末尾 11.9 MiB，再大只是白花流量。
+    const window = TAIL_WINDOW;
+    const head = await this.source.read(0, Math.min(this.source.size, 1024 * 1024), signal);
+    const moovStart = findBox(head, "moov");
+    // moov 可能超过 1 MiB（长索引表），按需再取一次。
+    const moov = moovStart < 0 ? null : moovStart + readBoxSize(head, moovStart) <= head.byteLength
+      ? head.subarray(moovStart)
+      : await this.source.read(moovStart, Math.min(this.source.size, moovStart + 4 * 1024 * 1024), signal).then(bytes => bytes.subarray(0, readBoxSize(bytes, 0)));
+    if (!moov || readTypeAt(moov, 4) !== "moov") return null;
+    const tail = await this.source.tail(window, signal);
+    const duration = durationFromTail(moov, tail.data);
+    return duration;
+  }
+
+  /** 探测失败（超时、读预算耗尽、上游不支持）一律当作"拿不到"，不让它打断播放。 */
+  private async probe(operation: () => Promise<number | null>): Promise<number | null> {
+    try { const value = await operation(); return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null; }
+    catch { return null; }
   }
 
   /** 顺序遍历编码包，不按固定时间窗口查终点或反复输出初始化段。 */

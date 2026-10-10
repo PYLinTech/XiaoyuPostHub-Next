@@ -120,7 +120,21 @@ export class MediaRangeSource {
     const result = new Uint8Array(end - start); let offset = 0;
     try { for (;;) { const { value, done } = await reader.read(); if (done) break; result.set(value, offset); offset += value.length; } }
     finally { await reader.cancel(); }
-    return result;
+    return result;  }
+
+  /**
+   * 读取文件末尾 `length` 字节的明文。
+   *
+   * 分片 MP4（fMP4）按设计把 duration 留在 mvhd 里写 0（媒体可以无限追加），
+   * 真实时长只存在于每个 moof 的 tfdt。从头读永远拿不到总时长，所以时长探测
+   * 必须从尾部反向进行。这也是唯一需要"倒着读"的场景，因此单独开一个入口，
+   * 不去改动既有正向读取的语义。
+   */
+  async tail(length: number, signal: AbortSignal): Promise<{ data: Uint8Array; offset: number }> {
+    const start = Math.max(0, this.size - length);
+    const data = await this.read(start, this.size, signal);
+    // 返回窗口在文件中的绝对起点：调用方解析 box 时需要知道真实偏移。
+    return { data, offset: start };
   }
 
   /** 一次预取覆盖的块数。批次内与跨批次预取必须用同一份，否则两处窗口会不一致。 */
