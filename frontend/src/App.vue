@@ -6,6 +6,8 @@ import AppSideNav from "@/components/AppSideNav.vue";
 import AppTickerBar from "@/components/AppTickerBar.vue";
 import AppToast from "@/components/AppToast.vue";
 import AppTopBar from "@/components/AppTopBar.vue";
+import { closeFilePreview } from "@/stores/preview";
+import AppFilePreview from "@/components/AppFilePreview.vue";
 import AppTransferDock from "@/components/AppTransferDock.vue";
 import { useOverlayScroll } from "@/lib/overlayScroll";
 import { onSessionChange, useSession } from "@/stores/session";
@@ -72,6 +74,7 @@ watch(
 // 登录状态变化时重新拉公告：访客与登录用户可见的范围不同，
 // 不重拉会让刚登录的人看不到发给"指定用户"的消息。
 onSessionChange(() => {
+  closeFilePreview();
   void loadAnnouncements();
 });
 void loadAnnouncements();
@@ -132,6 +135,7 @@ void loadAnnouncements();
     </div>
   </div>
 
+  <AppFilePreview />
   <AppTransferDock />
   <AppToast />
 </template>

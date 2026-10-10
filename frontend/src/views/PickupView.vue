@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppButton from "@/components/ui/AppButton.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
-import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
+import { openFilePreview } from "@/stores/preview";
 import logoUrl from "@/assets/logo.svg";
 import { guestApi } from "@/api/endpoints";
 import { ApiError } from "@/api/client";
@@ -34,7 +34,6 @@ const resolving = ref(false);
 const error = ref("");
 const share = ref<GuestShare | null>(null);
 const target = ref<GuestTarget | null>(null);
-const previewOpen = ref(false);
 
 const { busy: downloading, run: runDownload } = useDeliveryAction();
 
@@ -85,10 +84,14 @@ const canPreview = computed(() => {
 
 const canDownload = computed(() => share.value !== null);
 
-const previewSource = computed(() => {
+function openPreview(): void {
   const current = share.value;
-  return current ? shareDeliverySource(current.id, "", "", "preview") : null;
-});
+  if (!current) return;
+  openFilePreview({ fileName: fileName.value || current.rootName,
+    source: shareDeliverySource(current.id, "", "", "preview"),
+    downloadSource: pickupDeliverySource(code.value),
+    previewAllowed: canPreview.value, downloadAllowed: canDownload.value });
+}
 
 function normalizeCode(raw: string): string {
   return raw.replace(/\s+/g, "").toUpperCase();
@@ -308,7 +311,7 @@ onMounted(() => {
               :is-folder="share.kind === 'folder'"
               :size="20"
             />
-            <button v-if="isFileShare" type="button" class="pickup-file-name truncate" @click="previewOpen = true">{{ fileName || share.rootName }}</button><strong v-else class="truncate">{{ fileName || share.rootName }}</strong>
+            <button v-if="isFileShare" type="button" class="pickup-file-name truncate" @click="openPreview()">{{ fileName || share.rootName }}</button><strong v-else class="truncate">{{ fileName || share.rootName }}</strong>
           </div>
           <span class="badge badge--success">已提取</span>
         </div>
@@ -326,7 +329,7 @@ onMounted(() => {
 
         <template v-if="isFileShare">
           <div class="row">
-            <AppButton v-if="canPreview" variant="primary" icon="eye" @click="previewOpen = true">
+            <AppButton v-if="canPreview" variant="primary" icon="eye" @click="openPreview()">
               预览
             </AppButton>
             <AppButton
@@ -369,15 +372,6 @@ onMounted(() => {
       </div>
     </div>
 
-    <FilePreviewDialog
-      :open="previewOpen"
-      :source="previewSource"
-      :file-name="fileName"
-      :preview-allowed="canPreview"
-      :download-source="pickupDeliverySource(code)"
-      :download-allowed="canDownload"
-      @close="previewOpen = false"
-    />
   </div>
 </template>
 

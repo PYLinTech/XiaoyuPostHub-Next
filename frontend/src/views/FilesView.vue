@@ -10,7 +10,7 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import FormField from "@/components/ui/FormField.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
 import FolderPicker from "@/components/FolderPicker.vue";
-import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
+import { openFilePreview } from "@/stores/preview";
 import { adminApi, fsApi } from "@/api/endpoints";
 import { FILE_ARCHIVE, FILE_DISABLED, Perm, type ListNode } from "@/api/types";
 import { useDeliveryAction } from "@/delivery/actions";
@@ -254,9 +254,8 @@ function openNode(item: ListNode): void {
     void router.push(`/files${item.path}`);
     return;
   }
-  previewPath.value = item.path;
-  previewName.value = item.name;
-  previewOpen.value = true;
+  openFilePreview({ fileName: item.name, source: fileDeliverySource(item.path, "preview"),
+    downloadSource: fileDeliverySource(item.path, "download") });
 }
 
 // ---------------------------------------------------------------- 下载
@@ -537,13 +536,6 @@ async function doBlacklist(): Promise<void> {
 
 // ---------------------------------------------------------------- 预览与分享
 
-const previewOpen = ref(false);
-const previewPath = ref("");
-const previewName = ref("");
-
-const previewSource = computed(() =>
-  previewPath.value ? fileDeliverySource(previewPath.value, "preview") : null,
-);
 
 async function shareItem(item: ListNode): Promise<void> {
   closeMenu();
@@ -893,13 +885,6 @@ async function shareItem(item: ListNode): Promise<void> {
       @confirm="doBlacklist"
     />
 
-    <FilePreviewDialog
-      :open="previewOpen"
-      :source="previewSource"
-      :file-name="previewName"
-      :download-source="previewPath ? fileDeliverySource(previewPath, 'download') : null"
-      @close="previewOpen = false"
-    />
   </div>
 </template>
 

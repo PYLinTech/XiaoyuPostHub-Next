@@ -4,7 +4,7 @@ import { defineConfig, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { pdfAssetsPlugin } from "./build/pdfAssets.mjs";
 import { build as esbuild } from "esbuild";
-import { adaptPreviewBundle } from "./build/previewCompatibility.mjs";
+import { adaptPreviewBundle, previewMarkdownModule } from "./build/previewCompatibility.mjs";
 
 // Service Worker 单独打进一个自包含文件。
 //
@@ -59,11 +59,17 @@ function serviceWorkerPlugin(): Plugin {
   };
 }
 
-function localPreviewWorkerPlugin(): Plugin {
+function localPreviewWorkerPlugin(worker = false): Plugin {
   return {
     name: "xph-local-preview-worker",
     enforce: "pre",
-    transform: adaptPreviewBundle,
+    transform: worker ? undefined : adaptPreviewBundle,
+    resolveId(id) { if (id === "virtual:xph-preview-markdown") return "\0xph-preview-markdown"; },
+    async load(id) {
+      if (id !== "\0xph-preview-markdown") return;
+      return previewMarkdownModule(await readFile(fileURLToPath(new URL(
+        "./node_modules/@eternalheart/vue-file-preview/lib/chunks/index-B6pWnG9T.mjs", import.meta.url)), "utf8"));
+    },
   };
 }
 
@@ -72,11 +78,12 @@ function localPreviewWorkerPlugin(): Plugin {
 // 跨源会让密钥下发通道失去意义，也会让 Service Worker 无法注册。
 export default defineConfig({
   plugins: [vue(), serviceWorkerPlugin(), localPreviewWorkerPlugin(), pdfAssetsPlugin()],
-  worker: { format: "es" },
+  worker: { format: "es", plugins: () => [localPreviewWorkerPlugin(true)] },
   optimizeDeps: { exclude: ["@eternalheart/vue-file-preview", "pptx-preview"] },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "@preview-core": fileURLToPath(new URL("./node_modules/@eternalheart/vue-file-preview/lib/chunks/index-CyaXSkiB.mjs", import.meta.url)),
     },
   },
   server: {

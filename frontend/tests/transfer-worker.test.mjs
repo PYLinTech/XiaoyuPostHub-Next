@@ -21,7 +21,7 @@ await writeFile(bootstrap, `import { parentPort, workerData } from 'node:worker_
   globalThis.fetch = async (_url, options) => {
     if (workerData?.cipher) {
       const [,start,end] = /bytes=(\\d+)-(\\d+)/.exec(options.headers.Range);
-      return new Response(workerData.cipher.slice(Number(start), Number(end)+1), { status: 206 });
+      return new Response((workerData.volumes?.[_url] || workerData.cipher).slice(Number(start), Number(end)+1), { status: 206 });
     }
     return new Response(new ReadableStream({
     start(controller) {
@@ -186,7 +186,15 @@ test("安全上下文线程保留 RSA 私钥并完成 AES 解密、校验和交�
     const iv = new Uint8Array(12); new DataView(iv.buffer).setBigUint64(4, BigInt(i), false);
     cipher.set(new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: header.aad }, key, plain.slice(i*512,(i+1)*512))), 64+i*528);
   }
-  const worker = new Worker(bootstrap, { workerData: { cipher } });
+  for (const multipart of [false, true]) {
+  const cuts = [0, 64+528, 64+3*528, cipher.length];
+  const volumes = {}, manifest = [];
+  for (let i=0;i<cuts.length-1;i++) {
+    const url = `https://test.invalid/part${i}`;
+    volumes[url] = cipher.slice(cuts[i],cuts[i+1]);
+    manifest.push({url,offset:cuts[i],size:cuts[i+1]-cuts[i]});
+  }
+  const worker = new Worker(bootstrap, { workerData: { cipher, volumes: multipart ? volumes : undefined } });
   try {
     const outcome = await new Promise((resolve, reject) => {
       worker.on("error", reject);
@@ -199,7 +207,7 @@ test("安全上下文线程保留 RSA 私钥并完成 AES 解密、校验和交�
             const keyEnvelope = Buffer.from(await crypto.subtle.encrypt("RSA-OAEP", publicKey, dek)).toString("base64");
             worker.postMessage({ type: "reply", id: message.id, value: {
               fileName: "encrypted.bin", plainSize: plain.length, mimeType: "application/octet-stream",
-              mode: "direct", contentForm: "ciphertext", url: streamUrl,
+              mode: "direct", contentForm: "ciphertext", url: multipart ? "" : streamUrl, parts: multipart ? manifest.reverse() : undefined,
               checksum: createHash("sha256").update(plain).digest("hex"),
               encryption: { chunkLog2: 9, plainSize: plain.length, cipherSize: cipher.length, noncePrefix: 0, keyEnvelope },
             } });
@@ -211,4 +219,5 @@ test("安全上下文线程保留 RSA 私钥并完成 AES 解密、校验和交�
     });
     assert.deepEqual(new Uint8Array(await outcome.blob.arrayBuffer()), plain);
   } finally { await worker.terminate(); }
+  }
 });

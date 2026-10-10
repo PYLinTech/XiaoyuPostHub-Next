@@ -1,8 +1,11 @@
+import { runDelivery } from "./transferClient";
+import { getToken } from "@/api/client";
+import { createPreviewParser } from "@/lib/previewParser";
 import { streamUrlWithToken } from "@/api/endpoints";
 import type { DeliveryPlan } from "@/api/types";
 import { createClientKeyPair, encryptionSupported, resolveContentKey, type ClientKeyPair } from "@/crypto/clientkey";
-import { bytesToBase64, decryptAll, importContentKey, parseXphHeader, HEADER_SIZE } from "@/crypto/xph";
-import { assertHeaderMatchesMeta, cipherSourceUrl, fetchCipherPlanRange, settleQuietly, type DeliverySource } from "./download";
+import { bytesToBase64 } from "@/crypto/xph";
+import { cipherSourceUrl, settleQuietly, type DeliverySource } from "./download";
 
 // 预览的取数通道。
 //
@@ -50,25 +53,49 @@ function ensureXphWorker(): Promise<ServiceWorkerRegistration | null> {
       if (!probe.ok) {
         return null;
       }
-      await navigator.serviceWorker.register(SW_SCRIPT, {
+      const registration = await navigator.serviceWorker.register(SW_SCRIPT, {
         scope: "/",
         // 产物是 ES 模块；用 classic 注册会让里面的 import 直接被拒。
         type: "module",
       });
-      return await navigator.serviceWorker.ready;
+      // ready 不保证首次打开的当前页面已被接管；否则虚拟地址会落到普通路由。
+      return await new Promise<ServiceWorkerRegistration | null>(resolve => {
+        const finish = (result: ServiceWorkerRegistration | null) => {
+          clearTimeout(timer);
+          navigator.serviceWorker.removeEventListener("controllerchange", check);
+          resolve(result);
+        };
+        const check = () => {
+          if (registration.active && navigator.serviceWorker.controller?.scriptURL === new URL(SW_SCRIPT, location.href).href) {
+            finish(registration);
+          }
+        };
+        const timer = setTimeout(() => finish(null), 10_000);
+        navigator.serviceWorker.addEventListener("controllerchange", check);
+        check();
+      });
     } catch {
       return null;
     }
   })();
-  return workerReady;
+  return workerReady.then(result => { if (!result) workerReady = null; return result; });
 }
 
 /** 准备一次预览。 */
 export async function preparePreview(
   source: DeliverySource,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; streamingOnly?: boolean; forceFull?: boolean } = {},
 ): Promise<PreviewHandle> {
   options.signal?.throwIfAborted();
+  if (options.forceFull) {
+    let plan: DeliveryPlan | null = null;
+    const result = await runDelivery({ async plan(pair) { plan = await source.plan(pair); return plan; } },
+      { signal: options.signal, streamToDiskAbove: Infinity });
+    options.signal?.throwIfAborted();
+    if (!result.blob || !plan) throw new Error("未能获取完整的预览文件");
+    const url = URL.createObjectURL(result.blob);
+    return { url, mode: "blob", plan, async release() { URL.revokeObjectURL(url); } };
+  }
   const pair = encryptionSupported() ? await createClientKeyPair() : null;
   options.signal?.throwIfAborted();
   const plan = await source.plan(pair);
@@ -88,7 +115,7 @@ export async function preparePreview(
 async function buildHandle(
   plan: DeliveryPlan,
   pair: ClientKeyPair | null,
-  options: { signal?: AbortSignal },
+  options: { signal?: AbortSignal; streamingOnly?: boolean; forceFull?: boolean },
 ): Promise<PreviewHandle> {
   // 中转解密：服务端已把明文准备好，直接把（带令牌的）中转地址交给媒体元素。
   if (plan.mode === "proxy_decrypt") {
@@ -117,30 +144,24 @@ async function buildHandle(
   if (registration?.active) {
     const id = await registerStreamSession(registration, plan, dek, cipherUrl, options.signal);
     if (id) {
-      return makeSwHandle(plan, id);
+      return makeSwHandle(plan, id, registration);
     }
   }
 
-  // 没有 SW 时的兜底：整份解密成 Blob。对视频意味着"先等整份下完"，
-  // 因此界面上会明确提示走的是兜底通道。
-  const key = await importContentKey(dek);
-  const headerBytes = await fetchCipherPlanRange(plan, 0, HEADER_SIZE - 1, options.signal);
-  const header = parseXphHeader(headerBytes);
-  // 对象与记录的一致性校验：下载路径一直有，预览原先没有。缺了它，
-  // 一旦拿到的密文与计划里的记录对不上，唯一的症状就是 GCM 认证失败——
-  // 而那句话不会告诉你哪一步错了，正是这里最该给出诊断的地方。
-  assertHeaderMatchesMeta(header, plan.encryption);
-  const parts: Uint8Array[] = [];
-  await decryptAll(
-    key,
-    header,
-    (start, endExclusive, signal) => fetchCipherPlanRange(plan, start, endExclusive - 1, signal),
-    (plain) => {
-      parts.push(plain);
-    },
-    { concurrency: 6, signal: options.signal },
-  );
-  const blob = new Blob(parts as BlobPart[], { type: plan.mimeType || "application/octet-stream" });
+  options.signal?.throwIfAborted();
+  if (options.streamingOnly) throw new Error("当前浏览器暂不支持流式预览，请下载后播放");
+
+  // 没有 SW 时，在独立线程中解密为 Blob。
+  const parser = createPreviewParser();
+  const onAbort = () => parser.cancel();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  let blob: Blob;
+  try {
+    blob = await parser.parse("decrypt", { plan, dek, token: getToken() });
+  } finally {
+    options.signal?.removeEventListener("abort", onAbort);
+  }
+  options.signal?.throwIfAborted();
   const url = URL.createObjectURL(blob);
 
   return {
@@ -154,14 +175,13 @@ async function buildHandle(
   };
 }
 
-function makeSwHandle(plan: DeliveryPlan, id: string): PreviewHandle {
+function makeSwHandle(plan: DeliveryPlan, id: string, registration: ServiceWorkerRegistration): PreviewHandle {
   return {
     url: `${STREAM_PREFIX}${id}`,
     mode: "sw",
     plan,
     async release() {
-      const registration = await navigator.serviceWorker.ready.catch(() => null);
-      registration?.active?.postMessage({ type: "xph:revoke", id });
+      registration.active?.postMessage({ type: "xph:revoke", id });
       // 密文通道的用量按预扣全额结算，SW 实际交付了多少字节不参与记账。
       await settleQuietly(plan);
     },
@@ -179,40 +199,33 @@ async function registerStreamSession(
   if (!active || (!cipherUrl && !plan.parts?.length)) {
     return null;
   }
+  signal?.throwIfAborted();
+  const id = crypto.randomUUID();
   const channel = new MessageChannel();
-  try {
-    return await new Promise<string | null>((resolve, reject) => {
-      const timer = setTimeout(() => resolve(null), 10_000);
-      // 具名且一次性：成功、超时、失败三条出口都要摘掉它，否则调用方复用同一个
-      // AbortSignal 时，每次预览都会叠加一个闭包（连带 MessageChannel 与 resolve）。
-      const onAbort = (): void => {
-        clearTimeout(timer);
-        resolve(null);
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      channel.port1.onmessage = (event: MessageEvent) => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        const data = event.data as { ok: boolean; id?: string; error?: string };
-        if (data.ok && data.id) {
-          resolve(data.id);
-        } else {
-          reject(new Error(data.error ?? "Service Worker 拒绝了流会话"));
-        }
-      };
-      active.postMessage(
-        {
-          type: "xph:register",
-          cipherUrl,
-          cipherParts: plan.parts,
-          dek: bytesToBase64(dek),
-          mimeType: plan.mimeType,
-          fileName: plan.fileName,
-        },
-        [channel.port2],
-      );
-    });
-  } catch {
-    return null;
-  }
+  return new Promise<string | null>((resolve) => {
+    let finished = false;
+    const finish = (result: string | null) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      channel.port1.close();
+      channel.port2.close();
+      if (!result) active.postMessage({ type: "xph:revoke", id });
+      resolve(result);
+    };
+    const onAbort = () => finish(null);
+    const timer = setTimeout(() => finish(null), 10_000);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    channel.port1.onmessage = (event: MessageEvent) => {
+      const data = event.data as { ok: boolean; id?: string };
+      finish(data.ok && data.id === id ? id : null);
+    };
+    try {
+      active.postMessage({
+        type: "xph:register", id, cipherUrl, cipherParts: plan.parts,
+        dek: bytesToBase64(dek), mimeType: plan.mimeType, fileName: plan.fileName,
+      }, [channel.port2]);
+    } catch { finish(null); }
+  });
 }

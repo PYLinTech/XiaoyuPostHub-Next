@@ -25,13 +25,14 @@ const props = withDefaults(
     panelClass?: string;
     /** 关键操作（例如删除确认）不允许点击遮罩关闭，避免误触丢失输入。 */
     dismissible?: boolean;
+    closeOnBackdrop?: boolean;
     /** 小窗：始终浮在页面正中的紧凑面板，
         正文区定高（见 .modal__panel--compact .modal__body）——尺寸与内容
         无关，切换空态/加载态/列表时窗口不会跟着伸缩。
         随手看一眼的内容（公告、消息）用这个，别把整个下半屏占掉。 */
     compact?: boolean;
   }>(),
-  { wide: false, dismissible: true, compact: false },
+  { wide: false, dismissible: true, closeOnBackdrop: true, compact: false },
 );
 
 const emit = defineEmits<{ close: [] }>();
@@ -211,7 +212,7 @@ const {
         aria-modal="true"
         :aria-labelledby="title ? titleId : undefined"
       >
-        <div class="modal__backdrop" @click="dismissible && emit('close')" />
+        <div class="modal__backdrop" @click="dismissible && closeOnBackdrop && emit('close')" />
         <div
           ref="panelEl"
           class="modal__panel"

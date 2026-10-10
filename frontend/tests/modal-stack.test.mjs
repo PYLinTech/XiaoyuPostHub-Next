@@ -21,7 +21,7 @@ const component = (await import(url(code))).default;
 test('嵌套弹窗标题唯一，关闭与卸载仅释放自身滚动锁，Esc 只关闭顶层', async () => {
   const state = reactive({ outer: true, inner: false, idle: true });
   const app = createApp({ render: () => [
-    h(component, { open: state.outer, title: '外层', onClose: () => state.outer = false }),
+    h(component, { open: state.outer, title: '外层', closeOnBackdrop: false, onClose: () => state.outer = false }),
     h(component, { open: state.inner, title: '内层', panelClass: 'test-preview', onClose: () => state.inner = false }),
     state.idle ? h(component, { open: false, title: '未打开' }) : null,
   ] });
@@ -32,6 +32,11 @@ test('嵌套弹窗标题唯一，关闭与卸载仅释放自身滚动锁，Esc �
     state.idle = false;
     await nextTick();
     assert.equal(document.body.classList.contains('modal-open'), true);
+    // 预览遮罩不关闭，但仍允许 Esc 和明确的关闭按钮。
+    const outerBackdrop = document.querySelector('.modal__backdrop');
+    outerBackdrop.click();
+    await nextTick();
+    assert.equal(state.outer, true);
     state.inner = true;
     await nextTick(); await nextTick();
     const titles = [...document.querySelectorAll('.modal__title')].map(el => el.id);

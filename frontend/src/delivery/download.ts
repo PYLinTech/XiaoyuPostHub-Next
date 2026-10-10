@@ -1,3 +1,4 @@
+import { readCipherParts } from "./cipherParts";
 import { fetchCipherRange, fsApi, streamUrlWithToken } from "@/api/endpoints";
 import type { DeliveryPlan } from "@/api/types";
 import {
@@ -244,30 +245,7 @@ async function fetchCipherPartsRange(
   endInclusive: number,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
-  const endExclusive = endInclusive + 1;
-  const hits = parts.filter((part) => part.offset < endExclusive && part.offset + part.size > start);
-  if (!hits.length || hits[0].offset > start || hits[hits.length - 1].offset + hits[hits.length - 1].size < endExclusive) {
-    throw new Error("分卷清单无法覆盖所请求的密文区间");
-  }
-  if (hits.length === 1) {
-    const part = hits[0];
-    return fetchCipherRange(part.url, start - part.offset, endInclusive - part.offset, signal);
-  }
-  const blocks = await Promise.all(hits.map((part) => {
-    const from = Math.max(start, part.offset);
-    const to = Math.min(endExclusive, part.offset + part.size);
-    return fetchCipherRange(part.url, from - part.offset, to - part.offset - 1, signal);
-  }));
-  const out = new Uint8Array(endExclusive - start);
-  let offset = 0;
-  for (const block of blocks) {
-    out.set(block, offset);
-    offset += block.byteLength;
-  }
-  if (offset !== out.byteLength) {
-    throw new Error("分卷响应长度与逻辑密文区间不一致");
-  }
-  return out;
+  return readCipherParts(parts, start, endInclusive, fetchCipherRange, signal);
 }
 
 async function receivePlaintext(

@@ -1,3 +1,4 @@
+import { readCipherParts } from "@/delivery/cipherParts";
 /// <reference lib="webworker" />
 //
 // 解密用的 Service Worker。
@@ -18,7 +19,6 @@ import {
   blockCipherLen,
   blockCipherOffset,
   decryptCipherRange,
-  chunkRange,
   importContentKey,
   parseXphHeader,
   HEADER_SIZE,
@@ -38,17 +38,21 @@ interface StreamSession {
   mimeType: string;
   fileName: string;
   createdAt: number;
+  controller: AbortController;
 }
 
 const sessions = new Map<string, StreamSession>();
+const pendingSessions = new Map<string, AbortController>();
 
 /** 会话上限。播放器可能为同一个文件反复建会话，不设上限等于内存泄漏。 */
 const MAX_SESSIONS = 8;
 /** 单次取密的块数。取太小会让请求数暴涨并快速耗尽票据次数。 */
 const BATCH_BLOCKS = 8;
+const BATCH_BYTES = 4 * 1024 * 1024;
 
 interface RegisterMessage {
   type: "xph:register";
+  id?: string;
   cipherUrl: string;
   cipherParts?: Array<{ url: string; offset: number; size: number }>;
   dek: string;
@@ -79,42 +83,51 @@ self.addEventListener("message", (event: ExtendableMessageEvent) => {
     return;
   }
   if (data.type === "xph:register") {
-    registerSession(data)
+    event.waitUntil(registerSession(data)
       .then((id) => port?.postMessage({ ok: true, id }))
-      .catch((err: unknown) => port?.postMessage({ ok: false, error: String(err) }));
+      .catch((err: unknown) => port?.postMessage({ ok: false, error: String(err) })));
     return;
   }
   if (data.type === "xph:revoke") {
+    pendingSessions.get(data.id)?.abort();
+    sessions.get(data.id)?.controller.abort();
     sessions.delete(data.id);
     port?.postMessage({ ok: true });
   }
 });
 
 async function registerSession(message: RegisterMessage): Promise<string> {
-  const headerBytes = await fetchSessionCipherBytes(message, 0, HEADER_SIZE - 1);
-  const header = parseXphHeader(headerBytes);
-  const key = await importContentKey(base64ToBytes(message.dek));
+  const id = message.id || randomId();
+  const controller = new AbortController();
+  pendingSessions.set(id, controller);
+  try {
+    const headerBytes = await fetchSessionCipherBytes(message, 0, HEADER_SIZE - 1, controller.signal);
+    const header = parseXphHeader(headerBytes);
+    const key = await importContentKey(base64ToBytes(message.dek));
 
-  if (sessions.size >= MAX_SESSIONS) {
-    // 淘汰最早建立的会话：同一页面同时播放多个文件的概率极低，
-    // 而"永远不淘汰"会让长时间使用的页面把密钥越攒越多。
-    const oldest = [...sessions.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
-    if (oldest) {
-      sessions.delete(oldest[0]);
+    controller.signal.throwIfAborted();
+    if (sessions.size >= MAX_SESSIONS) {
+      // 淘汰最早建立的会话：同一页面同时播放多个文件的概率极低，
+      // 而"永远不淘汰"会让长时间使用的页面把密钥越攒越多。
+      const oldest = [...sessions.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
+      if (oldest) {
+        oldest[1].controller.abort();
+        sessions.delete(oldest[0]);
+      }
     }
-  }
 
-  const id = randomId();
-  sessions.set(id, {
-    cipherUrl: message.cipherUrl,
-    cipherParts: message.cipherParts,
-    key,
-    header,
-    mimeType: message.mimeType || "application/octet-stream",
-    fileName: message.fileName,
-    createdAt: Date.now(),
-  });
-  return id;
+    sessions.set(id, {
+      cipherUrl: message.cipherUrl,
+      cipherParts: message.cipherParts,
+      key,
+      header,
+      mimeType: message.mimeType || "application/octet-stream",
+      fileName: message.fileName,
+      createdAt: Date.now(),
+      controller,
+    });
+    return id;
+  } finally { pendingSessions.delete(id); }
 }
 
 self.addEventListener("fetch", (event: FetchEvent) => {
@@ -152,12 +165,12 @@ async function handleStream(request: Request, session: StreamSession): Promise<R
         headers: { "Content-Range": `bytes */${total}` },
       });
     }
-    return respondRange(session, parsed.start, parsed.length, request.signal);
+    return respondStream(session, parsed.start, parsed.length, true, request.signal);
   }
 
   // 无 Range 时必须给出完整内容（流式），而不是静默截断成一个块：
   // 截断会让播放器把残缺数据当成完整文件，用户看到的是一个能播但损坏的媒体。
-  return respondFull(session, request.signal);
+  return respondStream(session, 0, total, false, request.signal);
 }
 
 function baseHeaders(session: StreamSession, total: number): HeadersInit {
@@ -178,97 +191,46 @@ function baseHeaders(session: StreamSession, total: number): HeadersInit {
   };
 }
 
-async function respondRange(
-  session: StreamSession,
-  start: number,
-  length: number,
-  signal?: AbortSignal,
-): Promise<Response> {
-  const end = start + length; // 不含
-  const { first, last, start: cipherStart, end: cipherEnd } = chunkRange(session.header, start, length);
-  if (last < first) {
-    return new Response(null, { status: 204 });
-  }
-
-  const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1, signal);
-  const plain = await decryptCipherRange(
-    session.key,
-    session.header,
-    cipher,
-    { first, last, start: cipherStart, end: cipherEnd },
-    start,
-    length,
-  );
-
-  const headers: Record<string, string> = {
-    "Content-Type": session.mimeType,
-    "Content-Range": `bytes ${start}-${end - 1}/${session.header.plainSize}`,
-    "Content-Length": String(plain.byteLength),
-    "Accept-Ranges": "bytes",
-    "Cache-Control": "no-store",
-    // 同 baseHeaders：这条路径同样是 new Response()，安全头要自带。
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
-  };
-  return new Response(plain as unknown as BodyInit, { status: 206, headers });
-}
-
-async function respondFull(session: StreamSession, requestSignal?: AbortSignal): Promise<Response> {
-  const total = session.header.plainSize;
-  const header = session.header;
-  const key = session.key;
-  const blockCount = header.blockCount;
+/** 即使播放器请求 bytes=0-，也只按背压读取有限批次，不等待整段下载。 */
+function respondStream(
+  session: StreamSession, start: number, length: number, partial: boolean, requestSignal?: AbortSignal,
+): Response {
+  const { header, key } = session;
+  const end = start + length;
+  const batchBlocks = Math.max(1, Math.min(BATCH_BLOCKS, Math.floor(BATCH_BYTES / header.blockSize)));
   const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  if (requestSignal?.aborted) abort();
-  else requestSignal?.addEventListener("abort", abort, { once: true });
-  let first = 0;
-  const cleanup = (): void => requestSignal?.removeEventListener("abort", abort);
-
+  const signal = requestSignal ? AbortSignal.any([requestSignal, session.controller.signal, controller.signal])
+    : AbortSignal.any([session.controller.signal, controller.signal]);
+  let position = start;
+  let cancelled = false;
   const stream = new ReadableStream<Uint8Array>({
-    async pull(streamController) {
+    async pull(output) {
       try {
-        if (controller.signal.aborted) {
-          throw new DOMException("读取已取消", "AbortError");
-        }
-        if (first >= blockCount) {
-          cleanup();
-          streamController.close();
-          return;
-        }
-        const batchFirst = first;
-        const last = Math.min(batchFirst + BATCH_BLOCKS, blockCount) - 1;
-        const cipherStart = blockCipherOffset(header, batchFirst);
+        signal.throwIfAborted();
+        if (position >= end) { output.close(); return; }
+        const first = Math.floor(position / header.blockSize);
+        const last = Math.min(first + batchBlocks - 1, Math.ceil(end / header.blockSize) - 1);
+        const cipherStart = blockCipherOffset(header, first);
         const cipherEnd = blockCipherOffset(header, last) + blockCipherLen(header, last);
-        const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1, controller.signal);
-        const from = batchFirst * header.blockSize;
-        const plain = await decryptCipherRange(
-          key,
-          header,
-          cipher,
-          { first: batchFirst, last, start: cipherStart, end: cipherEnd },
-          from,
-          Math.min(total, (last + 1) * header.blockSize) - from,
-        );
-        first = last + 1;
-        streamController.enqueue(plain);
-        if (first >= blockCount) {
-          cleanup();
-          streamController.close();
-        }
-      } catch (err) {
-        cleanup();
-        streamController.error(err);
+        const cipher = await fetchSessionCipherBytes(session, cipherStart, cipherEnd - 1, signal);
+        const next = Math.min(end, (last + 1) * header.blockSize);
+        const plain = await decryptCipherRange(key, header, cipher,
+          { first, last, start: cipherStart, end: cipherEnd }, position, next - position);
+        signal.throwIfAborted();
+        position = next;
+        if (cancelled) return;
+        output.enqueue(plain);
+        if (position >= end) output.close();
+      } catch (error) {
+        if (!cancelled) output.error(error);
       }
     },
-    cancel() {
-      controller.abort();
-      cleanup();
-    },
-  });
-
-  return new Response(stream, { status: 200, headers: baseHeaders(session, total) });
+    cancel() { cancelled = true; controller.abort(); },
+  }, { highWaterMark: 0 });
+  const headers = new Headers(baseHeaders(session, header.plainSize));
+  headers.set("Content-Length", String(length));
+  if (partial) headers.set("Content-Range", `bytes ${start}-${end - 1}/${header.plainSize}`);
+  return new Response(stream, { status: partial ? 206 : 200, headers });
 }
 
 interface ParsedRange {
@@ -284,24 +246,20 @@ interface ParsedRange {
  * 而 MP4 未做 faststart 时播放器恰恰会去取尾部 moov。
  */
 function parseRange(header: string, total: number): ParsedRange {
+  if (total <= 0) throw new Error("空文件没有可读取区间");
   const value = header.trim();
   if (!value.startsWith("bytes=")) {
     throw new Error("不支持的区间单位");
   }
   const spec = value.slice("bytes=".length);
-  if (spec.includes(",")) {
-    throw new Error("不支持多区间请求");
-  }
+  if (!/^\d*-\d*$/.test(spec)) throw new Error("区间格式不正确");
   const dash = spec.indexOf("-");
-  if (dash < 0) {
-    throw new Error("区间格式不正确");
-  }
   const startRaw = spec.slice(0, dash).trim();
   const endRaw = spec.slice(dash + 1).trim();
 
   if (startRaw === "") {
     const suffix = Number.parseInt(endRaw, 10);
-    if (!Number.isFinite(suffix) || suffix <= 0) {
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) {
       throw new Error("后缀式区间不正确");
     }
     const start = Math.max(0, total - suffix);
@@ -309,14 +267,14 @@ function parseRange(header: string, total: number): ParsedRange {
   }
 
   const start = Number.parseInt(startRaw, 10);
-  if (!Number.isFinite(start) || start < 0 || start >= total) {
+  if (!Number.isSafeInteger(start) || start < 0 || start >= total) {
     throw new Error("区间起点越界");
   }
   if (endRaw === "") {
     return { start, length: total - start };
   }
   const end = Number.parseInt(endRaw, 10);
-  if (!Number.isFinite(end) || end < start) {
+  if (!Number.isSafeInteger(end) || end < start) {
     throw new Error("区间终点不正确");
   }
   return { start, length: Math.min(end, total - 1) - start + 1 };
@@ -334,7 +292,9 @@ async function fetchCipherBytes(url: string, start: number, endInclusive: number
     cache: "no-store",
     signal,
   });
-  if (!response.ok && response.status !== 206) {
+  if (response.status !== 206 && !(response.status === 200 && start === 0
+    && response.headers.get("Content-Length") === String(endInclusive + 1))) {
+    await response.body?.cancel();
     throw new Error(`取密文失败：HTTP ${response.status}`);
   }
   const buffer = await response.arrayBuffer();
@@ -351,45 +311,8 @@ async function fetchSessionCipherBytes(
   endInclusive: number,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
-  const endExclusive = endInclusive + 1;
-  if (!source.cipherParts?.length) {
-    return fetchCipherBytes(source.cipherUrl, start, endInclusive, signal);
-  }
-  const hits = source.cipherParts.filter((part) => part.offset < endExclusive && part.offset + part.size > start);
-  if (!hits.length || hits[0].offset > start || hits[hits.length - 1].offset + hits[hits.length - 1].size < endExclusive) {
-    throw new Error("分卷清单无法覆盖所请求的密文区间");
-  }
-  if (hits.length === 1) {
-    const part = hits[0];
-    return fetchCipherBytes(part.url, start - part.offset, endInclusive - part.offset, signal);
-  }
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  if (signal?.aborted) abort();
-  else signal?.addEventListener("abort", abort, { once: true });
-  let blocks: Uint8Array[];
-  try {
-    blocks = await Promise.all(hits.map((part) => {
-      const from = Math.max(start, part.offset);
-      const to = Math.min(endExclusive, part.offset + part.size);
-      return fetchCipherBytes(part.url, from - part.offset, to - part.offset - 1, controller.signal);
-    }));
-  } catch (err) {
-    controller.abort();
-    throw err;
-  } finally {
-    signal?.removeEventListener("abort", abort);
-  }
-  const out = new Uint8Array(endExclusive - start);
-  let offset = 0;
-  for (const block of blocks) {
-    out.set(block, offset);
-    offset += block.byteLength;
-  }
-  if (offset !== out.byteLength) {
-    throw new Error("分卷响应长度与逻辑密文区间不一致");
-  }
-  return out;
+  if (!source.cipherParts?.length) return fetchCipherBytes(source.cipherUrl, start, endInclusive, signal);
+  return readCipherParts(source.cipherParts, start, endInclusive, fetchCipherBytes, signal);
 }
 
 function randomId(): string {

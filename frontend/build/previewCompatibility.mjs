@@ -37,6 +37,18 @@ function escapeOutline(value) {
 }
 ${renderer}`;
   }
+  if (path.endsWith('/index-CDPBjkt1.mjs')) {
+    const errorHandler = 'e.on("error", () => {';
+    if (!code.includes(errorHandler)) throw new Error('视频预览错误回调已变化');
+    // video.js 自身的取流错误不一定转成原生 media error，补一个容器内状态事件。
+    code = code.replace('preload: "auto"', 'preload: "metadata"')
+      .replace(errorHandler, errorHandler + ' e.el().dispatchEvent(new CustomEvent("xph-preview-error", {bubbles: true, detail: {url: o.url}}));');
+  }
+  if (path.endsWith('/index-C-dh-RAc.mjs')) code = code
+    .replace('src: L.url,', 'src: L.url, preload: "metadata",')
+    .replaceAll('"loadedmetadata", s)', '"loadedmetadata", c)')
+    .replace('t.readyState >= 1 && s()', 't.readyState >= 1 && (p.value = !1, s())');
+  code = offloadPreviewParsing(code, path);
   code = sanitizeRendererHTML(code);
   return code
     .replace(/https:\/\/unpkg\.com\/pdfjs-dist@\$\{[^}]+\}\/legacy\/build\/pdf\.worker\.min\.mjs/g, '/pdfjs/pdf.worker.min.mjs')
@@ -68,4 +80,50 @@ function sanitizeRendererHTML(code) {
     code = code.slice(0, start) + 'DOMPurify.sanitize(' + code.slice(start, end) + ')' + code.slice(end);
   }
   return 'import DOMPurify from "dompurify";\n' + code;
+}
+
+// 保留 npm 发布包的渲染器，只将耗时解析调用改为 Worker 请求。
+function offloadPreviewParsing(code, path) {
+  if (path.endsWith('/index-uRooADVC.mjs')) {
+    const parse = /const n = await e.arrayBuffer\(\), \[t, o\] = await Promise.all\(\[[\s\S]*?\]\);/;
+    if (!parse.test(code)) throw new Error('DOCX 解析发布产物已变化');
+    code = code.replace('import R from "mammoth";', 'import {createPreviewParser} from "@/lib/previewParser";')
+      .replace('setup(E, { expose: G }) {', 'setup(E, { expose: G }) { const parsePreview = createPreviewParser().parse;')
+      .replace(parse, 'const n = await e.arrayBuffer(), [t, o] = await parsePreview("docx", n, [n]);');
+  }
+  if (path.endsWith('/index-ijSZ9bx4.mjs')) {
+    const parse = /const t = X\(await e.arrayBuffer\(\)\);[\s\S]*?n = o, h = V\(o\)/;
+    if (!parse.test(code)) throw new Error('Excel 解析发布产物已变化');
+    code = code.replace('import L from "exceljs";', 'import {createPreviewParser} from "@/lib/previewParser";')
+      .replace('setup(k, { expose: E }) {', 'setup(k, { expose: E }) { const parsePreview = createPreviewParser().parse;')
+      .replace(/    async function T\(e\) \{[\s\S]*?\n    \}\n    const x/, '    const x')
+      .replace(parse, 'const bytes = await e.arrayBuffer(), o = await parsePreview("xlsx", bytes, [bytes]); n = o, h = V(o)');
+  }
+  if (path.endsWith('/index-B6pWnG9T.mjs')) {
+    const start = code.indexOf('    const a = new Y(');
+    const end = code.indexOf('    const T = async', start);
+    if (start < 0 || end < 0) throw new Error('Markdown 解析发布产物已变化');
+    code = code.slice(0, start) + code.slice(end);
+    code = code.replace('import Y from "markdown-it";\n', '').replace('import F from "@traptitech/markdown-it-katex";\n', '')
+      .replace('v.value = a.render(e)', 'v.value = await parsePreview("markdown", e)');
+  }
+  // 代码与 Markdown 的语法高亮不占用显示线程。
+  const highlight = /import \{ codeToHtml as (\w+) \} from "shiki";/;
+  const match = code.match(highlight);
+  if (match) {
+    code = code.replace(highlight, 'import {createPreviewParser} from "@/lib/previewParser";');
+    const setup = path.includes('useShikiHighlight-') ? 'function T(t, n) {' : 'setup(V, { expose: G }) {';
+    if (!code.includes(setup)) throw new Error('语法高亮发布产物已变化');
+    code = code.replace(setup, `${setup} const parser = createPreviewParser(), ${match[1]} = parser.highlight;${path.endsWith('/index-B6pWnG9T.mjs') ? ' const parsePreview = parser.parse;' : ''}`);
+  }
+  return code;
+}
+
+// 从锁定的发布产物提取原有 Markdown 配置，仅在构建时生成线程模块。
+export function previewMarkdownModule(code) {
+  const start = code.indexOf('    const a = new Y(');
+  const end = code.indexOf('    const T = async', start);
+  if (start < 0 || end < 0) throw new Error('Markdown 解析发布产物已变化');
+  return 'import Y from "markdown-it"; import F from "@traptitech/markdown-it-katex";\n'
+    + 'export function renderMarkdown(content) {\n' + code.slice(start, end) + '\nreturn a.render(content); }';
 }

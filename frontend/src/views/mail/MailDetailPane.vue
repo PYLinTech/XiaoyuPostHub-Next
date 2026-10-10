@@ -7,7 +7,7 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import { mailApi } from "@/api/endpoints";
 import type { MailDetail, MailPart } from "@/api/types";
 import { mailPartDeliverySource } from "@/delivery/sources";
-import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
+import { openFilePreview } from "@/stores/preview";
 import { useDeliveryAction } from "@/delivery/actions";
 import { useToasts } from "@/stores/toast";
 import { formatBytes, formatTime } from "@/lib/format";
@@ -363,13 +363,14 @@ function dismissExternalResourcePrompt(): void {
   failedExternalResources.value = [];
 }
 
-const attachmentPreview = ref<MailPart | null>(null);
-const attachmentSource = computed(() => attachmentPreview.value ? mailPartDeliverySource(attachmentPreview.value.id) : null);
+function previewAttachment(part: MailPart): void {
+  const source = mailPartDeliverySource(part.id);
+  openFilePreview({ fileName: part.fileName || "未命名附件", source, downloadSource: source });
+}
 const attachmentDownload = useDeliveryAction();
 async function downloadAttachment(part: MailPart): Promise<void> {
   await attachmentDownload.run(mailPartDeliverySource(part.id), { fileName: part.fileName || "未命名附件" });
 }
-watch(() => props.detail.message.id, () => { attachmentPreview.value = null; });
 
 async function star(): Promise<void> {
   try {
@@ -587,15 +588,13 @@ const spfLabel: Record<string, string> = {
       <ul>
         <li v-for="p in attachments" :key="p.id">
           <i class="ri-file-line md__att-icon" />
-          <button type="button" class="md__att-name md__att-preview" :title="p.fileName" @click="attachmentPreview = p">{{ p.fileName || "未命名附件" }}</button>
+          <button type="button" class="md__att-name md__att-preview" :title="p.fileName" @click="previewAttachment(p)">{{ p.fileName || "未命名附件" }}</button>
           <span class="md__att-size">{{ formatBytes(p.sizePlain) }}</span>
           <AppButton size="sm" icon="download" @click="downloadAttachment(p)">下载</AppButton>
         </li>
       </ul>
     </section>
 
-    <FilePreviewDialog :open="!!attachmentPreview" :file-name="attachmentPreview?.fileName || '未命名附件'"
-      :source="attachmentSource" :download-source="attachmentSource" @close="attachmentPreview = null" />
     <ConfirmDialog
       :open="purgeOpen"
       title="彻底删除邮件"

@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import AppButton from "@/components/ui/AppButton.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
-import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
+import { openFilePreview } from "@/stores/preview";
 import { ApiError } from "@/api/client";
 import { guestApi } from "@/api/endpoints";
 import type { ListNode, GuestShare } from "@/api/types";
@@ -152,21 +152,13 @@ function enterFolder(node: ListNode): void {
 
 // ---------------------------------------------------------------- 预览与下载
 
-const previewOpen = ref(false);
-const previewRelPath = ref("");
-const previewName = ref("");
-
-const previewSource = computed(() => {
-  const current = share.value;
-  return current
-    ? shareDeliverySource(current.id, previewRelPath.value, password.value, "preview")
-    : null;
-});
-
 function openPreview(rel: string, name: string): void {
-  previewRelPath.value = rel;
-  previewName.value = name;
-  previewOpen.value = true;
+  const current = share.value;
+  if (!current) return;
+  openFilePreview({ fileName: name,
+    source: shareDeliverySource(current.id, rel, password.value, "preview"),
+    downloadSource: shareDeliverySource(current.id, rel, password.value, "download"),
+    previewAllowed: current.allowPreview, downloadAllowed: current.allowDownload });
 }
 
 async function download(rel: string): Promise<void> {
@@ -192,7 +184,6 @@ watch(
     dirGate.next();
     dirLoading.value = false;
     relPath.value = "";
-    previewOpen.value = false;
     share.value = null;
     entries.value = [];
     dirError.value = "";
@@ -314,15 +305,6 @@ watch(
       </section>
     </template>
 
-    <FilePreviewDialog
-      :open="previewOpen"
-      :source="previewSource"
-      :file-name="previewName"
-      :preview-allowed="share?.allowPreview === true"
-      :download-source="share ? shareDeliverySource(share.id, previewRelPath, password, 'download') : null"
-      :download-allowed="share?.allowDownload === true"
-      @close="previewOpen = false"
-    />
   </div>
 </template>
 

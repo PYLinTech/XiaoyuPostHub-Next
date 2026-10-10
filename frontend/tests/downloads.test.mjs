@@ -72,6 +72,7 @@ test("开始保存和完成后的任务不再允许取消", () => {
 const moduleUrl = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 const apiUrl = moduleUrl(`export const settled = []; export const fsApi = { settle: async id => settled.push(id) }; export const streamUrlWithToken = url => url; export const fetchCipherRange = () => { throw new Error("取消后仍然取数"); };`);
 const deliveryUrl = await loadSource("../src/delivery/download.ts", {
+  "./cipherParts": await loadSource("../src/delivery/cipherParts.ts", {}),
   "@/api/endpoints": apiUrl,
   "@/crypto/clientkey": moduleUrl("export const encryptionSupported = () => false; export const createClientKeyPair = () => null; export const resolveContentKey = () => null;"),
   "@/crypto/xph": moduleUrl("export const decryptAll = () => {}; export const importContentKey = () => {}; export const parseXphHeader = () => {}; export const HEADER_SIZE = 64;"),

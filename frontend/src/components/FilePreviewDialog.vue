@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ApiError } from "@/api/client";
 import { computed, onBeforeUnmount, shallowRef, ref, watch } from "vue";
 import AppModal from "@/components/ui/AppModal.vue";
 import AppButton from "@/components/ui/AppButton.vue";
@@ -8,6 +9,7 @@ import { useDeliveryAction } from "@/delivery/actions";
 import { preparePreview, type PreviewHandle } from "@/delivery/preview";
 import type { DeliverySource } from "@/delivery/download";
 import { createRequestGate, describeError, logError } from "@/lib/async";
+import { stopPreviewParser } from "@/lib/previewParser";
 import { loadPreviewLibrary } from "@/lib/previewLibrary";
 
 const props = withDefaults(defineProps<{
@@ -27,8 +29,13 @@ const handle = shallowRef<PreviewHandle | null>(null);
 const loading = ref(false);
 const error = ref("");
 const supported = ref(false);
+const compatibility = ref(false);
+let media = false;
+let fallbackAttempted = false;
+const compatibilityMessage = "流式预览失败，正在自动尝试兼容方法（需完整获取文件后再预览）";
 const gate = createRequestGate();
 let controller: AbortController | null = null;
+let activeToken = 0;
 const files = computed(() => handle.value ? [{
   name: props.fileName,
   type: handle.value.plan.mimeType || "application/octet-stream",
@@ -40,6 +47,7 @@ function release(preview: PreviewHandle | null): void {
 }
 function reset(): void {
   gate.next();
+  stopPreviewParser();
   controller?.abort();
   controller = null;
   const previous = handle.value;
@@ -48,11 +56,15 @@ function reset(): void {
   loading.value = false;
   error.value = "";
   supported.value = false;
+  compatibility.value = false;
+  media = false;
+  fallbackAttempted = false;
 }
 async function load(): Promise<void> {
   reset();
   if (!props.open || !props.previewAllowed || !props.source) return;
   const token = gate.next();
+  activeToken = token;
   const abort = new AbortController();
   controller = abort;
   const source = props.source;
@@ -64,18 +76,61 @@ async function load(): Promise<void> {
     library.value = lib;
     const kind = lib.getFileType({ name, type: "", url: "" });
     supported.value = kind !== "unsupported";
+    media = kind === "audio" || kind === "video";
     // 不支持的文件只展示下载入口，不申请票据或读取内容。
     if (!supported.value) return;
-    const prepared = await preparePreview(source, { signal: abort.signal });
+    const prepared = await preparePreview(source, { signal: abort.signal, streamingOnly: media });
     if (!gate.isCurrent(token)) { release(prepared); return; }
     handle.value = prepared;
   } catch (err) {
     if (!gate.isCurrent(token)) return;
-    logError("preview", err);
-    error.value = describeError(err);
+    if (media && err instanceof Error && err.name !== "AbortError" && !(err instanceof ApiError && err.status > 0)) {
+      await fallback(token);
+    } else {
+      logError("preview", err);
+      error.value = describeError(err);
+    }
   } finally {
     if (gate.isCurrent(token)) loading.value = false;
   }
+}
+async function fallback(token: number): Promise<void> {
+  if (!gate.isCurrent(token) || fallbackAttempted || !props.source || !props.open) return;
+  fallbackAttempted = true;
+  compatibility.value = true;
+  loading.value = true;
+  controller?.abort();
+  stopPreviewParser();
+  const previous = handle.value;
+  handle.value = null;
+  // 释放流式票据后再申请兼容票据，避免同时占用两份预扣额度。
+  if (previous) await previous.release().catch(err => logError("preview-release", err));
+  if (!gate.isCurrent(token)) return;
+  const abort = new AbortController();
+  controller = abort;
+  try {
+    const prepared = await preparePreview(props.source, { signal: abort.signal, forceFull: true });
+    if (!gate.isCurrent(token)) { release(prepared); return; }
+    handle.value = prepared;
+  } catch (err) {
+    if (!gate.isCurrent(token)) return;
+    logError("preview-compatibility", err);
+    error.value = `兼容预览失败：${describeError(err)}`;
+  } finally {
+    if (gate.isCurrent(token)) loading.value = false;
+  }
+}
+function streamError(url: string): void {
+  if (!media || fallbackAttempted || !handle.value || handle.value.mode === "blob") return;
+  if (url !== new URL(handle.value.url, location.href).href) return;
+  void fallback(activeToken);
+}
+function mediaError(event: Event): void {
+  if (event.target instanceof HTMLMediaElement) streamError(event.target.currentSrc || event.target.src);
+}
+function rendererError(event: Event): void {
+  const url = (event as CustomEvent<{ url?: string }>).detail?.url;
+  if (url) streamError(new URL(url, location.href).href);
 }
 function close(): void { reset(); emit("close"); }
 async function downloadFile(): Promise<void> {
@@ -96,12 +151,12 @@ onBeforeUnmount(reset);
 </script>
 
 <template>
-  <AppModal :open="open" :title="fileName" wide panel-class="file-preview-dialog" @close="close">
+  <AppModal :open="open" :title="fileName" :close-on-backdrop="false" wide panel-class="file-preview-dialog" @close="close">
     <template #actions>
       <AppButton v-if="canDownload" size="sm" variant="primary" icon="download-2-line" :loading="download.busy.value" @click="downloadFile">下载</AppButton>
     </template>
-    <div class="file-preview-content vfp-root" :data-theme="site.state.theme">
-      <div v-if="loading" class="file-preview-state" role="status"><span class="spinner" /><span>正在准备预览</span></div>
+    <div class="file-preview-content vfp-root" :data-theme="site.state.theme" @error.capture="mediaError" @xph-preview-error="rendererError">
+      <div v-if="loading" class="file-preview-state" role="status"><span class="spinner" /><span>{{ compatibility ? compatibilityMessage : "正在准备预览" }}</span></div>
       <div v-else-if="error || !previewAllowed || !supported" class="file-preview-state">
         <AppIcon name="information-fill" :size="40" />
         <p>{{ error || (!previewAllowed ? '因分享者设置，该文件不可预览' : '该格式暂不支持预览') }}</p>

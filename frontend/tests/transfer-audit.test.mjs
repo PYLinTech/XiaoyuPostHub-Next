@@ -36,6 +36,9 @@ test("线程、JSON、Blob 和上传 401 走同一个去重出口，重新登录
 });
 const settlement = encode('export const settled=[]; export const settleQuietly=async plan=>{settled.push(plan);}; export const assertHeaderMatchesMeta=()=>{}; export const cipherSourceUrl=()=>""; export const fetchCipherPlanRange=()=>{throw new Error("取消后仍然取数");};');
 const { preparePreview } = await import(await load("../src/delivery/preview.ts", {
+  "./transferClient": encode('export const runDelivery=()=>{throw new Error("不应完整取文件");};'),
+  "@/api/client": encode('export const getToken=()=>"";'),
+  "@/lib/previewParser": encode('export const createPreviewParser=()=>({parse(){throw new Error("取消后仍然解析");}});'),
   "@/api/endpoints": encode('export const streamUrlWithToken=x=>x;'),
   "@/crypto/clientkey": encode('export const encryptionSupported=()=>false; export const createClientKeyPair=()=>null; export const resolveContentKey=()=>null;'),
   "@/crypto/xph": encode('export const bytesToBase64=()=>""; export const decryptAll=()=>{}; export const importContentKey=()=>{}; export const parseXphHeader=()=>{}; export const HEADER_SIZE=64;'),
@@ -47,6 +50,11 @@ test("关闭预览后不会申请新计划；申请期间取消会结算票据�
   const during = new AbortController();
   await assert.rejects(preparePreview({ plan: async () => { during.abort(); return { ticketId: "preview-ticket" }; } }, { signal: during.signal }), { name: "AbortError" });
   assert.equal((await import(settlement)).settled.at(-1).ticketId, "preview-ticket");
+});
+test("音视频没有流式通道时不退回整份下载解密", async () => {
+  await assert.rejects(preparePreview({ plan: async () => ({ticketId:"media-ticket",contentForm:"ciphertext",mode:"direct",encryption:{}}) },
+    {streamingOnly:true}), /暂不支持流式预览/);
+  assert.equal((await import(settlement)).settled.at(-1).ticketId,"media-ticket");
 });
 const notifications = encode('export const errors=[]; export const useToasts=()=>({error:(...args)=>errors.push(args)});');
 const asyncLib = encode('export const logs=[]; export const isAbortError=e=>e.name==="AbortError"; export const describeError=e=>e.message; export const logError=(context,error)=>logs.push({context,error});');
