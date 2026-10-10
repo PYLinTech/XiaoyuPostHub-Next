@@ -75,7 +75,12 @@ export class MediaRangeSource {
     }) });
   }
 
-  private stream(start: number, end: number, signal: AbortSignal, prefetch = true) {
+  /**
+   * `lookahead` 表示消费方会持续往后读（解复用播放），可以安全地把下一批也排在途；
+   * 一次性有明确终点的读取（`read()`、元数据探测）不排——那些块本来就不会被消费，
+   * 提前取回只是白花一次请求。
+   */
+  private stream(start: number, end: number, signal: AbortSignal, prefetch = true, lookahead = true) {
     let position = start, cancelled = false;
     return new ReadableStream<Uint8Array>({
       pull: async output => {
@@ -84,8 +89,18 @@ export class MediaRangeSource {
           if (position >= end) { output.close(); return; }
           const index = Math.floor(position / this.header.blockSize);
           const current = this.block(index, prefetch);
-          // 当前批次末尾消费前启动下一批，隐藏网络往返；探测任务不预取。
-          if (prefetch && index + 1 < this.header.blockCount) void this.block(index + 1).catch(() => {});
+          // 预取窗口必须跨过批次边界。block(index) 只组建 [index, index+count) 一批；
+          // 若这里只预取 index+1，它在批次内部必然已在 pending 或 cache 而空转，
+          // 下一批要等消费推进到边界才发起——那正是缓存刚好耗尽的时刻，
+          // 于是每跨一个边界就暴露一次完整网络往返（首帧卡顿即源于此）。
+          // 这里主动把紧邻的下一批也排上，让请求在缓存用完之前就在途。
+          if (prefetch && lookahead) {
+            const ahead = this.batchCount(true);
+            const batchEnd = Math.min(this.header.blockCount, index + ahead);
+            for (let i = batchEnd; i < Math.min(this.header.blockCount, batchEnd + ahead); i++) {
+              void this.block(i).catch(() => {});
+            }
+          }
           const bytes = await current;
           signal.throwIfAborted();
           if (cancelled) return;
@@ -100,11 +115,17 @@ export class MediaRangeSource {
 
   async read(start: number, end: number, signal: AbortSignal): Promise<Uint8Array> {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end > this.size || end <= start) throw new Error("媒体读取区间无效");
-    const reader = this.stream(start, end, signal).getReader();
+    // 有限区间：终点明确，不排跨批预取——区间之后的块不会被这次读取消费。
+    const reader = this.stream(start, end, signal, true, false).getReader();
     const result = new Uint8Array(end - start); let offset = 0;
     try { for (;;) { const { value, done } = await reader.read(); if (done) break; result.set(value, offset); offset += value.length; } }
     finally { await reader.cancel(); }
     return result;
+  }
+
+  /** 一次预取覆盖的块数。批次内与跨批次预取必须用同一份，否则两处窗口会不一致。 */
+  private batchCount(prefetch: boolean): number {
+    return prefetch ? Math.max(1, Math.min(8, Math.floor(BATCH_BYTES / this.header.blockSize))) : 1;
   }
 
   private block(index: number, prefetch = true): Promise<Uint8Array> {
@@ -113,7 +134,7 @@ export class MediaRangeSource {
     if (cached) { this.cache.delete(index); this.cache.set(index, cached); return Promise.resolve(cached); }
     if (!this.pending.has(index)) {
       const indices: number[] = [];
-      const count = prefetch ? Math.max(1, Math.min(8, Math.floor(BATCH_BYTES / this.header.blockSize))) : 1;
+      const count = this.batchCount(prefetch);
       for (let i = index; i < Math.min(this.header.blockCount, index + count); i++) {
         if (this.pending.has(i) || this.cache.has(i)) break;
         let resolve!: Block["resolve"], reject!: Block["reject"];

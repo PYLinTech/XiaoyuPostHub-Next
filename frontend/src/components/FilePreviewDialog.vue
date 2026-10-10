@@ -113,7 +113,6 @@ onBeforeUnmount(reset);
       <div v-else-if="error || !previewAllowed || !supported" class="file-preview-state">
         <AppIcon name="information-fill" :size="40" />
         <p>{{ error || (!previewAllowed ? '因分享者设置，该文件不可预览' : '该格式暂不支持预览') }}</p>
-        <AppButton v-if="canDownload" variant="primary" icon="download-2-line" :loading="download.busy.value" @click="downloadFile">下载</AppButton>
       </div>
       <component v-else-if="library && handle" :is="library.FilePreviewContent" :key="handle.url"
         :files="files" :current-index="0" mode="embed" headless
