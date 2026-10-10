@@ -18,17 +18,21 @@ const { transferPanel, showTransfer } = await import(panelUrl);
 const downloadsUrl = await loadSource("../src/stores/downloads.ts", { "./transferPanel": panelUrl });
 const { addDownload, useDownloads, canCancelDownload } = await import(downloadsUrl);
 
-test("新任务打开对应标签，进度更新保留用户选择", () => {
+test("首个任务展开，后续任务保留用户收起状态", () => {
+  transferPanel.visible = false;
   showTransfer("upload");
   transferPanel.collapsed = true;
   const item = addDownload("文件.pdf", () => {});
   assert.equal(transferPanel.selected, "download");
-  assert.equal(transferPanel.collapsed, false);
+  assert.equal(transferPanel.collapsed, true);
   transferPanel.selected = "upload";
   item.progress.bytesDone = 100;
   assert.equal(transferPanel.selected, "upload");
   transferPanel.collapsed = true;
   showTransfer("upload");
+  assert.equal(transferPanel.collapsed, true);
+  transferPanel.visible = false;
+  showTransfer("download");
   assert.equal(transferPanel.collapsed, false);
   item.status = "done";
   useDownloads().clearFinished();
@@ -91,4 +95,20 @@ test("准备期间取消会结算已申请票据并停止取数", async () => {
     return { ticketId: "canceled-ticket", mode: "proxy", contentForm: "ciphertext" };
   } }, { signal: controller.signal }), { name: "AbortError" });
   assert.deepEqual(settled, ["canceled-ticket"]);
+});
+
+const aggregateUrl = await loadSource("../src/lib/transferProgress.ts");
+const { aggregateTransferProgress, isByteTransfer } = await import(aggregateUrl);
+test("传输总进度按字节加权，空任务无进度且完成字节只显示99%", () => {
+  assert.equal(aggregateTransferProgress([]), null);
+  assert.equal(aggregateTransferProgress([{done: 0,total: 0}]), null);
+  assert.equal(aggregateTransferProgress([{done: 90,total: 100},{done: 0,total: 900}]), .09);
+  assert.equal(aggregateTransferProgress([{done: 100,total: 100}]), .99);
+  assert.equal(aggregateTransferProgress([{done: -10,total: 100}]), 0);
+});
+
+test("仅正在传输的阶段参与总进度，准备、后处理和异常被剔除", () => {
+  for (const phase of ["uploading", "fetching", "decrypting"]) assert.equal(isByteTransfer("running", phase), true);
+  for (const phase of ["hashing", "preparing", "finishing", "verifying", "delivering", "done"]) assert.equal(isByteTransfer("running", phase), false);
+  for (const status of ["queued", "error", "canceled", "done"]) assert.equal(isByteTransfer(status, "uploading"), false);
 });
