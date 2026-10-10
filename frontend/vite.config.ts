@@ -2,7 +2,9 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import vue from "@vitejs/plugin-vue";
+import { pdfAssetsPlugin } from "./build/pdfAssets.mjs";
 import { build as esbuild } from "esbuild";
+import { adaptPreviewBundle } from "./build/previewCompatibility.mjs";
 
 // Service Worker 单独打进一个自包含文件。
 //
@@ -57,11 +59,21 @@ function serviceWorkerPlugin(): Plugin {
   };
 }
 
+function localPreviewWorkerPlugin(): Plugin {
+  return {
+    name: "xph-local-preview-worker",
+    enforce: "pre",
+    transform: adaptPreviewBundle,
+  };
+}
+
 // 开发期把 /api 代理到后端，生产构建的产物由后端直接托管（dist 目录）。
 // 之所以不做成"前端另起一个服务"，是因为交付链路里票据与密钥都依赖同源：
 // 跨源会让密钥下发通道失去意义，也会让 Service Worker 无法注册。
 export default defineConfig({
-  plugins: [vue(), serviceWorkerPlugin()],
+  plugins: [vue(), serviceWorkerPlugin(), localPreviewWorkerPlugin(), pdfAssetsPlugin()],
+  worker: { format: "es" },
+  optimizeDeps: { exclude: ["@eternalheart/vue-file-preview", "pptx-preview"] },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

@@ -234,7 +234,7 @@ func TestResolveSharePathRejectsTraversal(t *testing.T) {
 
 // TestResolveSharePathFolderAllowSubpath 验证文件夹分享的子目录开关。
 //
-// 关闭时只允许访问根路径本身：这个开关是"只把某一层目录对外"的唯一实现，
+// 关闭时允许根目录文件，但拒绝子目录：这个开关只开放某一层目录，
 // 一旦被绕过，分享者以为收起来的下层内容会全部暴露。
 func TestResolveSharePathFolderAllowSubpath(t *testing.T) {
 	f := newShareFixture(t)
@@ -345,5 +345,40 @@ func TestPeekPickupCodeBypassesSharePassword(t *testing.T) {
 	}
 	if _, _, err := f.svc.PeekPickupCode(ctx, code.Code, f.user); err == nil {
 		t.Fatal("取件码用尽后查看应被拒绝")
+	}
+}
+
+func TestShareRootFilesWithoutSubdirectoryAccess(t *testing.T) {
+	f := newShareFixture(t)
+	ctx := context.Background()
+	f.putFile("/a/b/root.pdf", "root-file")
+	f.putFile("/a/b/c/nested.pdf", "nested-file")
+	f.putFile("/a/b/disabled.pdf", "disabled-file")
+	if _, err := f.db.W().ExecContext(ctx, "UPDATE files SET status = ? WHERE checksum = ?", int(store.FileDisabled), "disabled-file"); err != nil {
+		t.Fatal(err)
+	}
+	restricted := f.share("/a/b", store.ShareFolder, store.AccessPublic, "", false)
+	items, err := f.svc.ListShareDir(ctx, restricted.ID, "", "", f.user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != "root.pdf" || items[0].Path != "/root.pdf" || items[0].Checksum != "" {
+		t.Fatalf("unexpected accessible files: %+v", items)
+	}
+	if _, _, abs, err := f.svc.ResolveSharePath(ctx, restricted.ID, "", "root.pdf", f.user); err != nil || abs != "/a/b/root.pdf" {
+		t.Fatalf("root file must be accessible: %q %v", abs, err)
+	}
+	for _, path := range []string{"c", "c/nested.pdf"} {
+		if _, _, _, err := f.svc.ResolveSharePath(ctx, restricted.ID, "", path, f.user); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("nested path %q must be forbidden: %v", path, err)
+		}
+	}
+	open := f.share("/a/b", store.ShareFolder, store.AccessPublic, "", true)
+	items, err = f.svc.ListShareDir(ctx, open.ID, "", "", f.user)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("expected folder and accessible root file: %+v %v", items, err)
+	}
+	if _, _, _, err := f.svc.ResolveSharePath(ctx, open.ID, "", "c/nested.pdf", f.user); err != nil {
+		t.Fatalf("nested file should be accessible: %v", err)
 	}
 }

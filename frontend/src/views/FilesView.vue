@@ -10,13 +10,12 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import FormField from "@/components/ui/FormField.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
 import FolderPicker from "@/components/FolderPicker.vue";
-import PreviewOverlay from "@/components/PreviewOverlay.vue";
+import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
 import { adminApi, fsApi } from "@/api/endpoints";
 import { FILE_ARCHIVE, FILE_DISABLED, Perm, type ListNode } from "@/api/types";
 import { useDeliveryAction } from "@/delivery/actions";
 import { fileDeliverySource } from "@/delivery/sources";
 import { copyText, describeError, logError, useAsync } from "@/lib/async";
-import { isPreviewable } from "@/lib/filekind";
 import { formatBytes, formatRelative, formatTime, pathSegments } from "@/lib/format";
 import { useSession } from "@/stores/session";
 import { topbarSlot } from "@/stores/shell";
@@ -255,13 +254,9 @@ function openNode(item: ListNode): void {
     void router.push(`/files${item.path}`);
     return;
   }
-  if (isPreviewable(item.name)) {
-    previewPath.value = item.path;
-    previewName.value = item.name;
-    previewOpen.value = true;
-    return;
-  }
-  void downloadOne(item);
+  previewPath.value = item.path;
+  previewName.value = item.name;
+  previewOpen.value = true;
 }
 
 // ---------------------------------------------------------------- 下载
@@ -728,7 +723,7 @@ async function shareItem(item: ListNode): Promise<void> {
 
           <div class="fcell frow__actions">
             <button
-              v-if="!row.isFolder && isPreviewable(row.name)"
+              v-if="!row.isFolder"
               type="button"
               class="iconbtn"
               title="预览"
@@ -898,10 +893,11 @@ async function shareItem(item: ListNode): Promise<void> {
       @confirm="doBlacklist"
     />
 
-    <PreviewOverlay
+    <FilePreviewDialog
       :open="previewOpen"
       :source="previewSource"
       :file-name="previewName"
+      :download-source="previewPath ? fileDeliverySource(previewPath, 'download') : null"
       @close="previewOpen = false"
     />
   </div>

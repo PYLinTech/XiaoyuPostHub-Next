@@ -7,7 +7,8 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import { mailApi } from "@/api/endpoints";
 import type { MailDetail, MailPart } from "@/api/types";
 import { mailPartDeliverySource } from "@/delivery/sources";
-import { saveBlob } from "@/delivery/download";
+import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
+import { useDeliveryAction } from "@/delivery/actions";
 import { useToasts } from "@/stores/toast";
 import { formatBytes, formatTime } from "@/lib/format";
 
@@ -362,17 +363,13 @@ function dismissExternalResourcePrompt(): void {
   failedExternalResources.value = [];
 }
 
+const attachmentPreview = ref<MailPart | null>(null);
+const attachmentSource = computed(() => attachmentPreview.value ? mailPartDeliverySource(attachmentPreview.value.id) : null);
+const attachmentDownload = useDeliveryAction();
 async function downloadAttachment(part: MailPart): Promise<void> {
-  try {
-    const result = await runDelivery(mailPartDeliverySource(part.id));
-    // 大附件可能直接走流式落盘（savedAs 非空）；小附件存内存时再手工触发保存。
-    if (result.blob) {
-      saveBlob(result.blob, part.fileName || result.fileName);
-    }
-  } catch (err) {
-    toastApiError(toasts, err);
-  }
+  await attachmentDownload.run(mailPartDeliverySource(part.id), { fileName: part.fileName || "未命名附件" });
 }
+watch(() => props.detail.message.id, () => { attachmentPreview.value = null; });
 
 async function star(): Promise<void> {
   try {
@@ -590,13 +587,15 @@ const spfLabel: Record<string, string> = {
       <ul>
         <li v-for="p in attachments" :key="p.id">
           <i class="ri-file-line md__att-icon" />
-          <span class="md__att-name" :title="p.fileName">{{ p.fileName || "未命名附件" }}</span>
+          <button type="button" class="md__att-name md__att-preview" :title="p.fileName" @click="attachmentPreview = p">{{ p.fileName || "未命名附件" }}</button>
           <span class="md__att-size">{{ formatBytes(p.sizePlain) }}</span>
           <AppButton size="sm" icon="download" @click="downloadAttachment(p)">下载</AppButton>
         </li>
       </ul>
     </section>
 
+    <FilePreviewDialog :open="!!attachmentPreview" :file-name="attachmentPreview?.fileName || '未命名附件'"
+      :source="attachmentSource" :download-source="attachmentSource" @close="attachmentPreview = null" />
     <ConfirmDialog
       :open="purgeOpen"
       title="彻底删除邮件"
@@ -877,4 +876,7 @@ const spfLabel: Record<string, string> = {
   color: var(--c-text-faint);
   flex: none;
 }
+
+.md__att-preview { font: inherit; text-align: left; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.md__att-preview:hover { color: var(--c-accent); }
 </style>

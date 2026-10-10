@@ -1,3 +1,10 @@
+<script lang="ts">
+// 所有弹窗实例共用堆栈、标题序号和滚动锁计数。
+let modalSeq = 0;
+const openPanels: HTMLElement[] = [];
+let lockCount = 0;
+</script>
+
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import AppIcon from "./AppIcon.vue";
@@ -14,6 +21,8 @@ const props = withDefaults(
     open: boolean;
     title?: string;
     wide?: boolean;
+    /** 特定弹窗的内容布局样式，应用到 Teleport 内的实际面板。 */
+    panelClass?: string;
     /** 关键操作（例如删除确认）不允许点击遮罩关闭，避免误触丢失输入。 */
     dismissible?: boolean;
     /** 小窗：始终浮在页面正中的紧凑面板，
@@ -29,7 +38,6 @@ const emit = defineEmits<{ close: [] }>();
 
 // 标题 id 必须每实例唯一：弹窗是可以嵌套的（ConfirmDialog 内部就是另一个
 // AppModal），共用一个 id 会让两个 dialog 的 aria-labelledby 指到同一个标题。
-let modalSeq = 0;
 const titleId = `modal-title-${++modalSeq}`;
 
 const panelEl = ref<HTMLElement | null>(null);
@@ -45,7 +53,6 @@ const FOCUSABLE =
 // AppModal 里），两个实例会同时收到 document 上的 keydown；外层若也跟着拦 Tab，
 // 它发现焦点不在自己面板里（焦点其实在内层面板）就会把焦点抢回自己——于是确认框里
 // 每按一次 Tab 都被弹回第一个按钮。所以只有最上面那层弹窗管焦点。
-const openPanels: HTMLElement[] = [];
 
 /** 把面板从嵌套栈里摘掉。已经在栈外（还没入栈就被关掉）就什么都不做。 */
 function dropPanel(): void {
@@ -125,9 +132,11 @@ function onKeydown(event: KeyboardEvent): void {
 // 模块级计数：AppModal 是会嵌套的——ConfirmDialog 自己就渲染一个 AppModal，
 // 而引用它的页面几乎全都同时渲染着另一个 AppModal。原来每次关闭都无脑解锁，
 // 于是"关掉确认框"会顺手把还开着的编辑弹窗的背景也解锁，从弹窗边缘露出来开始滚。
-let lockCount = 0;
+let ownsScrollLock = false;
 
 function lockScroll(locked: boolean): void {
+  if (ownsScrollLock === locked) return;
+  ownsScrollLock = locked;
   lockCount = locked ? lockCount + 1 : Math.max(0, lockCount - 1);
   // 用类名而不是内联 style：内联样式优先级最高，会盖掉其它来源的 overflow
   // 并在关闭时无条件抹掉它；类名则能和已有规则叠加。
@@ -151,7 +160,7 @@ watch(
       // 键盘用户仍然不知道自己在弹窗里。
       void nextTick(() => {
         // 拿不到面板说明这次打开已经被关掉了，别把它加进栈。
-        if (!panelEl.value) {
+        if (!props.open || !panelEl.value || openPanels.includes(panelEl.value)) {
           return;
         }
         panelEl.value.focus();
@@ -206,7 +215,7 @@ const {
         <div
           ref="panelEl"
           class="modal__panel"
-          :class="{ 'modal__panel--wide': wide, 'modal__panel--compact': compact }"
+          :class="[{ 'modal__panel--wide': wide, 'modal__panel--compact': compact }, panelClass]"
           tabindex="-1"
         >
           <header class="modal__head">
@@ -217,7 +226,7 @@ const {
               <slot name="actions" />
               <!-- 关闭是红底白叉（全站统一）：没有底部操作栏的弹窗里它是唯一
                  出口，给点颜色更好找。 -->
-            <button class="btn btn--sm btn--danger" type="button" aria-label="关闭" @click="emit('close')">
+              <button class="btn btn--sm btn--danger" type="button" aria-label="关闭" @click="emit('close')">
                 <AppIcon name="close" :size="14" />
               </button>
             </div>

@@ -12,6 +12,9 @@
     "typecheck": "vue-tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@eternalheart/vue-file-preview": "1.6.10",
+    "dompurify": "^3.4.16",
+    "pdfjs-dist": "6.4.299",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
@@ -19,8 +22,16 @@
     "@types/node": "^26.6.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "esbuild": "^0.25.12",
+    "jsdom": "^30.1.2",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",
     "vue-tsc": "^2.2.0"
+  },
+  "overrides": {
+    "pdfjs-dist": "$pdfjs-dist",
+    "katex": "0.19.0",
+    "echarts": "6.1.0",
+    "uuid": "11.1.1",
+    "argparse": "2.0.1"
   }
 }

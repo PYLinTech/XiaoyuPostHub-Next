@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppButton from "@/components/ui/AppButton.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
-import PreviewOverlay from "@/components/PreviewOverlay.vue";
+import FilePreviewDialog from "@/components/FilePreviewDialog.vue";
 import logoUrl from "@/assets/logo.svg";
 import { guestApi } from "@/api/endpoints";
 import { ApiError } from "@/api/client";
@@ -12,7 +12,6 @@ import { pickupDeliverySource, shareDeliverySource } from "@/delivery/sources";
 import { useDeliveryAction } from "@/delivery/actions";
 import { describeError, logError } from "@/lib/async";
 import { baseName, formatTime } from "@/lib/format";
-import { isPreviewable } from "@/lib/filekind";
 import { useSession } from "@/stores/session";
 
 // 取件码入口。
@@ -70,9 +69,6 @@ const expiresLabel = computed(() => {
 const canPreview = computed(() => {
   const current = share.value;
   if (!current || current.kind !== "file" || !current.allowPreview) {
-    return false;
-  }
-  if (!isPreviewable(fileName.value)) {
     return false;
   }
   switch (current.accessMode) {
@@ -312,7 +308,7 @@ onMounted(() => {
               :is-folder="share.kind === 'folder'"
               :size="20"
             />
-            <strong class="truncate">{{ fileName || share.rootName }}</strong>
+            <button v-if="isFileShare" type="button" class="pickup-file-name truncate" @click="previewOpen = true">{{ fileName || share.rootName }}</button><strong v-else class="truncate">{{ fileName || share.rootName }}</strong>
           </div>
           <span class="badge badge--success">已提取</span>
         </div>
@@ -373,10 +369,13 @@ onMounted(() => {
       </div>
     </div>
 
-    <PreviewOverlay
+    <FilePreviewDialog
       :open="previewOpen"
       :source="previewSource"
       :file-name="fileName"
+      :preview-allowed="canPreview"
+      :download-source="pickupDeliverySource(code)"
+      :download-allowed="canDownload"
       @close="previewOpen = false"
     />
   </div>
@@ -489,4 +488,7 @@ onMounted(() => {
   border-color: var(--c-accent);
   box-shadow: 0 0 0 3px var(--c-accent-weak);
 }
+
+.pickup-file-name { font: inherit; font-weight: 620; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.pickup-file-name:hover { color: var(--c-accent); }
 </style>

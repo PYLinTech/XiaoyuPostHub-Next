@@ -364,8 +364,7 @@ func (s *Service) ListShareAccesses(ctx context.Context, p auth.Principal, id st
 //  4. 访问模式——只有前三步都过了，才有必要去付一次提取码 HMAC 的代价；
 //  5. 根节点仍存在——根路径是快照，删除/移动后不会自动跟随。
 //
-// 第 2 步之后的所有失败统一返回 ErrForbidden，不区分"分享不存在"与
-// "提取码错误"：区分开等于给出一个可以逐个探测分享 id 是否有效的接口。
+// 访问校验失败统一返回 ErrForbidden，具体原因用于访客页提示。
 func (s *Service) ResolveShare(ctx context.Context, id, password string, p auth.Principal) (DeliveryTarget, store.Share, error) {
 	return s.resolveShare(ctx, id, password, p, false, true, "open", true)
 }
@@ -494,11 +493,15 @@ func (s *Service) ResolveSharePath(ctx context.Context, id, password, relPath st
 	if err != nil {
 		return DeliveryTarget{}, store.Share{}, "", err
 	}
-	if _, err := store.GetNode(ctx, s.DB.R(), share.OwnerID, abs); err != nil {
+	node, err := store.GetNode(ctx, s.DB.R(), share.OwnerID, abs)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return DeliveryTarget{}, store.Share{}, "", ErrNotFound
 		}
 		return DeliveryTarget{}, store.Share{}, "", err
+	}
+	if !share.AllowSubpath && abs != share.RootPath && node.IsFolder() {
+		return DeliveryTarget{}, store.Share{}, "", fmt.Errorf("%w: 因分享者设置，无法浏览子目录", ErrForbidden)
 	}
 	target.Path = abs
 	return target, share, abs, nil
@@ -531,7 +534,16 @@ func (s *Service) ListShareDir(ctx context.Context, id, password, relPath string
 	if err != nil {
 		return nil, err
 	}
-	items, err := s.shareListItems(ctx, nodes)
+	if !share.AllowSubpath {
+		files := make([]store.Node, 0, len(nodes))
+		for _, child := range nodes {
+			if !child.IsFolder() {
+				files = append(files, child)
+			}
+		}
+		nodes = files
+	}
+	items, err := s.listNodesWithStatus(ctx, nodes)
 	if err != nil {
 		return nil, err
 	}
@@ -539,16 +551,21 @@ func (s *Service) ListShareDir(ctx context.Context, id, password, relPath string
 	// 内容校验码是属主的内容指纹，也不属于访客需要的信息。访客界面的
 	// 目录导航只依赖 name 与相对层级，不消费绝对路径。
 	root := share.RootPath
+	accessible := make([]ListNode, 0, len(items))
 	for i := range items {
+		if items[i].Status == store.FileDisabled {
+			continue
+		}
 		rel := strings.TrimPrefix(items[i].Path, root)
 		if rel == "" {
 			rel = vpath.Root
 		}
 		items[i].Path = rel
 		items[i].Checksum = ""
+		accessible = append(accessible, items[i])
 	}
 	_ = store.InsertShareAccess(ctx, s.DB.W(), share.ID, p.Actor, p.UserID(), p.ClientIP.String(), "list")
-	return items, nil
+	return accessible, nil
 }
 
 // ---------------------------------------------------------------- 内部辅助
@@ -640,15 +657,10 @@ func resolveSubPath(share store.Share, relPath string) (string, error) {
 	if share.Kind != store.ShareFolder && abs != share.RootPath {
 		return "", fmt.Errorf("%w: 文件分享不允许访问子路径", ErrForbidden)
 	}
-	if share.Kind == store.ShareFolder && abs != share.RootPath && !share.AllowSubpath {
-		return "", fmt.Errorf("%w: 该分享不允许浏览子目录", ErrForbidden)
+	if share.Kind == store.ShareFolder && abs != share.RootPath && !share.AllowSubpath && vpath.Parent(abs) != share.RootPath {
+		return "", fmt.Errorf("%w: 因分享者设置，无法浏览子目录", ErrForbidden)
 	}
 	return abs, nil
-}
-
-// shareListItems 把节点映射成面向前端的目录项，并附带内容池状态。
-func (s *Service) shareListItems(ctx context.Context, nodes []store.Node) ([]ListNode, error) {
-	return s.listNodesWithStatus(ctx, nodes)
 }
 
 // throttleIP 返回退避用的 IP 维度键。
