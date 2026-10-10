@@ -6,6 +6,7 @@ import {createRenderer,h,nextTick,reactive} from 'vue';
 import ts from 'typescript';
 import {getFileType} from '@eternalheart/vue-file-preview';
 const url=c=>`data:text/javascript;base64,${Buffer.from(c).toString('base64')}`, vue=import.meta.resolve('vue');
+const formats=url(ts.transpileModule(await readFile(new URL('../src/lib/mediaFormats.ts',import.meta.url),'utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText);
 const mock=url(`import {ref,h} from ${JSON.stringify(vue)};
 export class ApiError extends Error{};
 export const stopPreviewParser=()=>{};
@@ -19,7 +20,7 @@ const state=(await import(mock)).state;
 const modal=url(`import {h} from ${JSON.stringify(vue)};export default {props:['open','title'],setup(p,{slots}){return ()=>p.open?h('section',[h('h2',p.title),slots.actions?.(),slots.default?.()]):null}}`);
 const button=url(`import {h} from ${JSON.stringify(vue)};export default {setup(p,{slots,attrs}){return ()=>h('button',attrs,slots.default?.())}}`),icon=url(`export default {render(){return null}}`);
 let code=compileScript(parse(await readFile(new URL('../src/components/FilePreviewDialog.vue',import.meta.url),'utf8')).descriptor,{id:'preview-test',inlineTemplate:true}).content;
-code=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText.replace(/from ["']([^"']+)["']/g,(_,n)=>`from ${JSON.stringify(n==='vue'?vue:n.endsWith('AppModal.vue')?modal:n.endsWith('AppButton.vue')?button:n.endsWith('AppIcon.vue')?icon:mock)}`);
+code=ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText.replace(/from ["']([^"']+)["']/g,(_,n)=>`from ${JSON.stringify(n==='vue'?vue:n.endsWith('AppModal.vue')?modal:n.endsWith('AppButton.vue')?button:n.endsWith('AppIcon.vue')?icon:n.endsWith('mediaFormats')?formats:mock)}`);
 const component=(await import(url(code))).default;
 const node=text=>({text,children:[],parent:null,attrs:{}});
 function remove(el){if(el.parent)el.parent.children.splice(el.parent.children.indexOf(el),1);el.parent=null}
@@ -42,7 +43,7 @@ test('播放流失败仅回落一次，完整获取期间显示兼容提示，�
     const listener=errorTarget(root).attrs.onErrorCapture;
     listener({target:new HTMLMediaElement('blob:test')});
     await flush();
-    assert.match(text(root),/流式预览失败，正在自动尝试兼容方法（需完整获取文件后再预览）/);
+    assert.match(text(root),/流式预览失败，正在自动尝试兼容方法（需先完整获取文件）/);
     assert.equal(state.prepared.length,2);
     assert.equal(state.prepared[1].options.forceFull,true);
     listener({target:new HTMLMediaElement('blob:test')});

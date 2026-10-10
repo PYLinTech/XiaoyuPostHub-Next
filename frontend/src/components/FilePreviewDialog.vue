@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ApiError } from "@/api/client";
-import { computed, onBeforeUnmount, shallowRef, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, shallowRef, ref, watch } from "vue";
 import AppModal from "@/components/ui/AppModal.vue";
 import AppButton from "@/components/ui/AppButton.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
@@ -11,6 +11,7 @@ import type { DeliverySource } from "@/delivery/download";
 import { createRequestGate, describeError, logError } from "@/lib/async";
 import { stopPreviewParser } from "@/lib/previewParser";
 import { loadPreviewLibrary } from "@/lib/previewLibrary";
+import { mediaMimeType } from "@/lib/mediaFormats";
 
 const props = withDefaults(defineProps<{
   open: boolean;
@@ -26,19 +27,21 @@ const download = useDeliveryAction();
 const canDownload = computed(() => props.downloadAllowed && !!props.downloadSource);
 const library = shallowRef<Awaited<ReturnType<typeof loadPreviewLibrary>> | null>(null);
 const handle = shallowRef<PreviewHandle | null>(null);
+const contentRoot = ref<HTMLElement | null>(null);
 const loading = ref(false);
 const error = ref("");
 const supported = ref(false);
 const compatibility = ref(false);
 let media = false;
 let fallbackAttempted = false;
-const compatibilityMessage = "流式预览失败，正在自动尝试兼容方法（需完整获取文件后再预览）";
+let stopMseObserver: (() => void) | null = null;
+const compatibilityMessage = "流式预览失败，正在自动尝试兼容方法（需先完整获取文件）";
 const gate = createRequestGate();
 let controller: AbortController | null = null;
 let activeToken = 0;
 const files = computed(() => handle.value ? [{
   name: props.fileName,
-  type: handle.value.plan.mimeType || "application/octet-stream",
+  type: mediaMimeType(props.fileName, handle.value.plan.mimeType) || "application/octet-stream",
   url: handle.value.url,
 }] : []);
 
@@ -46,6 +49,8 @@ function release(preview: PreviewHandle | null): void {
   if (preview) void preview.release().catch(err => logError("preview-release", err));
 }
 function reset(): void {
+  stopMseObserver?.();
+  stopMseObserver = null;
   gate.next();
   stopPreviewParser();
   controller?.abort();
@@ -59,6 +64,14 @@ function reset(): void {
   compatibility.value = false;
   media = false;
   fallbackAttempted = false;
+}
+async function observeMedia(token: number, preview: PreviewHandle): Promise<void> {
+  stopMseObserver?.();
+  stopMseObserver = null;
+  if (!media || preview.mode === "blob" || !library.value || !contentRoot.value) return;
+  await nextTick();
+  if (!gate.isCurrent(token) || !props.open || !contentRoot.value) return;
+  stopMseObserver = library.value.observeXphMsePreview?.(contentRoot.value, preview.url) ?? null;
 }
 async function load(): Promise<void> {
   reset();
@@ -81,7 +94,10 @@ async function load(): Promise<void> {
     if (!supported.value) return;
     const prepared = await preparePreview(source, { signal: abort.signal, streamingOnly: media });
     if (!gate.isCurrent(token)) { release(prepared); return; }
+    const preparedKind = lib.getFileType({ name, type: mediaMimeType(name, prepared.plan.mimeType), url: prepared.url });
+    media = preparedKind === "audio" || preparedKind === "video";
     handle.value = prepared;
+    await observeMedia(token, prepared);
   } catch (err) {
     if (!gate.isCurrent(token)) return;
     if (media && err instanceof Error && err.name !== "AbortError" && !(err instanceof ApiError && err.status > 0)) {
@@ -102,6 +118,8 @@ async function fallback(token: number): Promise<void> {
   controller?.abort();
   stopPreviewParser();
   const previous = handle.value;
+  stopMseObserver?.();
+  stopMseObserver = null;
   handle.value = null;
   // 释放流式票据后再申请兼容票据，避免同时占用两份预扣额度。
   if (previous) await previous.release().catch(err => logError("preview-release", err));
@@ -155,7 +173,7 @@ onBeforeUnmount(reset);
     <template #actions>
       <AppButton v-if="canDownload" size="sm" variant="primary" icon="download-2-line" :loading="download.busy.value" @click="downloadFile">下载</AppButton>
     </template>
-    <div class="file-preview-content vfp-root" :data-theme="site.state.theme" @error.capture="mediaError" @xph-preview-error="rendererError">
+    <div ref="contentRoot" class="file-preview-content vfp-root" :data-theme="site.state.theme" @error.capture="mediaError" @xph-preview-error="rendererError">
       <div v-if="loading" class="file-preview-state" role="status"><span class="spinner" /><span>{{ compatibility ? compatibilityMessage : "正在准备预览" }}</span></div>
       <div v-else-if="error || !previewAllowed || !supported" class="file-preview-state">
         <AppIcon name="information-fill" :size="40" />
@@ -175,6 +193,8 @@ onBeforeUnmount(reset);
 .file-preview-dialog .modal__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-preview-dialog .modal__body { padding: 0; }
 .file-preview-content { height: min(68dvh, 680px); min-height: 220px; overflow: hidden; }
+.file-preview-content.xph-mse-frame-ready .vfp-renderer-loading { display: none !important; }
+.file-preview-content.xph-mse-frame-ready .vjs-control-bar { visibility: visible !important; opacity: 1 !important; }
 .file-preview-state { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--sp-4); padding: var(--sp-5); text-align: center; color: var(--c-text-muted); }
 .file-preview-state p { margin: 0; overflow-wrap: anywhere; }
 </style>

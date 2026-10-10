@@ -6,6 +6,7 @@ import type { DeliveryPlan } from "@/api/types";
 import { createClientKeyPair, encryptionSupported, resolveContentKey, type ClientKeyPair } from "@/crypto/clientkey";
 import { bytesToBase64 } from "@/crypto/xph";
 import { cipherSourceUrl, settleQuietly, type DeliverySource } from "./download";
+import { mediaMimeType } from "@/lib/mediaFormats";
 
 // 预览的取数通道。
 //
@@ -16,7 +17,7 @@ import { cipherSourceUrl, settleQuietly, type DeliverySource } from "./download"
 //             （直链 URL 或本机中转 URL 皆可）、页面本地解密，支持 seek。
 //   stream —— 中转解密：服务端下发明文流，浏览器直接播放。全部出流量经服务端。
 //   blob   —— 不支持 SW 时（老浏览器、非安全上下文）退化为先整份解密再预览。
-//             只对图片、PDF、小文件可接受。
+//             也作为音视频流式预览失败后的兼容通道。
 
 type PreviewMode = "sw" | "stream" | "blob";
 
@@ -149,7 +150,7 @@ async function buildHandle(
   }
 
   options.signal?.throwIfAborted();
-  if (options.streamingOnly) throw new Error("当前浏览器暂不支持流式预览，请下载后播放");
+  if (options.streamingOnly) throw new Error("当前浏览器流式预览不可用，尝试完整解密预览");
 
   // 没有 SW 时，在独立线程中解密为 Blob。
   const parser = createPreviewParser();
@@ -224,7 +225,7 @@ async function registerStreamSession(
     try {
       active.postMessage({
         type: "xph:register", id, cipherUrl, cipherParts: plan.parts,
-        dek: bytesToBase64(dek), mimeType: plan.mimeType, fileName: plan.fileName,
+        dek: bytesToBase64(dek), mimeType: mediaMimeType(plan.fileName, plan.mimeType), fileName: plan.fileName,
       }, [channel.port2]);
     } catch { finish(null); }
   });

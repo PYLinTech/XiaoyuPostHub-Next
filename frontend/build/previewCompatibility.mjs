@@ -7,6 +7,15 @@ export function adaptPreviewBundle(code, id) {
   const wrapper = path.includes('/@eternalheart/vue-file-preview/lib/') && path.endsWith('.mjs');
   const pptx = path.endsWith('/pptx-preview/dist/pptx-preview.es.js');
   if (!wrapper && !pptx) return;
+  if (path.endsWith('/index-CyaXSkiB.mjs')) {
+    // 优先按明确 MIME 选择音视频，避免纯音频 Ogg 被扩展名强制送进视频渲染器。
+    const media = /  if \(P\.startsWith\("video\/"\) \|\| \["mp4"[\s\S]*?    return "audio";/;
+    if (!media.test(code)) throw new Error('预览库音视频类型识别已变化');
+    code = code.replace(media, `  if (P.startsWith("audio/")) return "audio";
+  if (P.startsWith("video/")) return "video";
+  if (["mp4", "webm", "ogv", "mov", "avi", "mkv", "m4v", "3gp", "3g2", "flv", "mts", "m2ts"].includes(I)) return "video";
+  if (["mp3", "wav", "wave", "ogg", "oga", "opus", "spx", "m4a", "flac", "aac", "adts"].includes(I)) return "audio";`);
+  }
   if (code.includes('__name: "index"') && code.includes('data-outline-key=')) {
     const marker = ')), ew = { class:';
     const index = code.indexOf(marker);
