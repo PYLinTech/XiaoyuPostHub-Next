@@ -9,8 +9,24 @@ import { supportsMediaSourceType } from "./mediaSourceSupport";
 import { durationFromTail } from "./isoDuration";
 
 /** 尾部探测窗口。实测最后一个 moof 距文件末尾 11.9 MiB，取 16 MiB 留出余量。 */
-/** 尾部探测窗口。实测最后一个 moof 距文件末尾 11.9 MiB，取 16 MiB 留出余量。 */
-const TAIL_WINDOW = 16 * 1024 * 1024;
+/**
+ * 尾部探测的渐进窗口（字节），命中即止。
+ *
+ * 末尾 moof 离文件尾多远取决于最后一个分片的大小：常见在几百 KiB 以内，
+ * 但实测遇到过 11.9 MiB 的长分片。逐级放大比每次读满更划算——顺风局只付
+ * 最小那档的钱，逆风局最多也就走到最后一档。
+ */
+const TAIL_WINDOWS = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024, 16 * 1024 * 1024];
+
+/**
+ * 时长探测的总预算。
+ *
+ * 慢网下 8 秒连最小一档都读不完，于是总时长永远拿不到——而总时长对进度条是
+ * 必需的，缺了它用户就得从头拖到尾才知道有多长。宁可多等：底层 cipher() 还有
+ * 30 秒无数据等待超时兜底，这里放宽到 45 秒足够慢网读完 16 MiB 的同时不至于
+ * 在顺风局上无谓等待（顺风局命中第一档就走完了）。
+ */
+const PROBE_TIMEOUT = 45_000;
 
 /** 在字节里读 4 字符的 box 类型。 */
 function readTypeAt(bytes: Uint8Array, offset: number): string {
@@ -137,7 +153,12 @@ export class MediaDemuxSession {
     // 所以先读头部元数据；拿不到再从文件尾部找最后一个 moof 反推——那里的
     // tfdt 带着最后一片的起始时间。两处都失败就返回 null，让播放器留空，
     // 也不要给一个猜出来的值：错的时长会让进度条提前到底然后停住。
-    const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(8000)]);
+    //
+    // 探测要有耐心但不能贪心：慢网上固定 8 秒必然读不完 16 MiB，于是永远
+    // 拿不到总时长；而一开始就铺满窗口又会在顺风局白读十几 MiB。所以改用
+    // 渐进窗口——命中即止，总预算放宽到 PROBE_TIMEOUT。底层 cipher() 另有
+    // 30 秒无数据等待超时兜底，这里管的是"整体允许花多久"。
+    const signal = AbortSignal.any([this.lifetime, AbortSignal.timeout(PROBE_TIMEOUT)]);
     const head = await this.probe(async () => {
       const input = this.source.input(signal, 2 * 1024 * 1024);
       try { return await input.computeDuration(undefined, { metadataOnly: true }); }
@@ -150,7 +171,13 @@ export class MediaDemuxSession {
     return null;
   }
 
-  /** 读文件尾部窗口，从最后一个 moof 反推容器时长。 */
+  /**
+   * 从文件尾部反推容器时长：渐进放大窗口，命中即止。
+   *
+   * 末尾 moof 离文件尾的距离取决于最后一个分片有多大——本项目实测过的极端
+   * 案例是 11.9 MiB，但常见的多在几百 KiB 以内。所以从 256 KiB 起步，找不到
+   * 再逐级放大到 16 MiB，而不是每次都读满。顺风局只付最小那一档的钱。
+   */
   private async tailDuration(signal: AbortSignal): Promise<number | null> {
     const head = await this.source.read(0, Math.min(this.source.size, 1024 * 1024), signal);
     const moovStart = findBox(head, "moov");
@@ -160,8 +187,15 @@ export class MediaDemuxSession {
         : await this.source.read(moovStart, Math.min(this.source.size, moovStart + 4 * 1024 * 1024), signal)
           .then(bytes => bytes.subarray(0, readBoxSize(bytes, 0)));
     if (!moov || readTypeAt(moov, 4) !== "moov") return null;
-    const tail = await this.source.tail(TAIL_WINDOW, signal);
-    return durationFromTail(moov, tail);
+
+    for (const window of TAIL_WINDOWS) {
+      signal.throwIfAborted();
+      const tail = await this.source.tail(window, signal);
+      const duration = durationFromTail(moov, tail);
+      // 找到就用，不继续放大：再往后读到的 moof 只会更早，tfdt 更小。
+      if (duration !== null) return duration;
+    }
+    return null;
   }
 
   /** 探测失败（超时、读预算耗尽、上游不支持）一律当作"拿不到"，不让它打断播放。 */

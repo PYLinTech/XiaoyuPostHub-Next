@@ -89,11 +89,17 @@ export class MediaRangeSource {
           if (position >= end) { output.close(); return; }
           const index = Math.floor(position / this.header.blockSize);
           const current = this.block(index, prefetch);
-          // 预取窗口必须跨过批次边界。block(index) 只组建 [index, index+count) 一批；
-          // 若这里只预取 index+1，它在批次内部必然已在 pending 或 cache 而空转，
-          // 下一批要等消费推进到边界才发起——那正是缓存刚好耗尽的时刻，
-          // 于是每跨一个边界就暴露一次完整网络往返（首帧卡顿即源于此）。
-          // 这里主动把紧邻的下一批也排上，让请求在缓存用完之前就在途。
+          // 预取窗口要够深，且必须跨过批次边界。
+          //
+          // block(index) 只组建 [index, index+count) 一批；若这里只预取 index+1，
+          // 它在批次内部必然已在 pending 或 cache 而空转，下一批要等消费推进到
+          // 边界才发起——那正是缓存刚好耗尽的时刻，于是每跨一个边界就暴露一次
+          // 完整网络往返（首帧卡顿即源于此）。
+          //
+          // 深度取"一个批次 + 一个批次"，而不是再多加几批：预取的意义是让请求在
+          // 消费追上之前就在途，超过两批的部分会让快网白下数据、挤占 seek 和
+          // 后续分片的带宽。真正的缓冲深度由播放器侧的 ahead（秒）控制，
+          // 那一层已经会在数据跟不上时主动收缩。
           if (prefetch && lookahead) {
             const ahead = this.batchCount(true);
             const batchEnd = Math.min(this.header.blockCount, index + ahead);

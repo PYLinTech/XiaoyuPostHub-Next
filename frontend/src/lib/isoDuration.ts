@@ -97,10 +97,13 @@ export function parseMoovTimings(moov: Uint8Array): TrackDeclaration[] {
  * 窗口起点通常落在某个 mdat 的载荷中间，所以不能顺序解析——必须逐字节
  * 试探 box 边界，并用"类型合法 + 尺寸合理 + 内部结构自洽"三重校验排掉
  * 载荷里恰好出现 moof 字样的巧合。
+ *
+ * 尾部窗口里的 moof 按时间递增排列，也就是遇到的**第一个**合法 moof 就是最后
+ * 一个——拿到它就返回。慢网上这一点直接决定成败：扫完整个 16 MiB 窗口才返回，
+ * 等于把窗口里所有分片都读了一遍，而其中一个 moof 只有几 KB。
  */
 export function findLastMoof(window: Uint8Array): Map<number, TrackTiming> {
   const view = new DataView(window.buffer, window.byteOffset, window.byteLength);
-  const best = new Map<number, Omit<TrackTiming, "trackId">>();
 
   for (let offset = 0; offset + 8 <= window.byteLength; offset++) {
     if (readType(view, offset + 4) !== "moof") continue;
@@ -112,17 +115,14 @@ export function findLastMoof(window: Uint8Array): Map<number, TrackTiming> {
     if (first !== "mfhd" && first !== "traf") continue;
 
     const timing = parseMoof(view, offset, offset + size);
-    for (const [trackId, value] of timing) {
-      const previous = best.get(trackId);
-      // 严格取时间最大的那个。窗口内的 moof 通常按时间递增排列，但不必依赖这一点：
-      // 载荷里的假阳性可能乱序出现，用 >= 会让它们覆盖掉真正的末尾片段。
-      if (!previous || value.baseTime > previous.baseTime) best.set(trackId, value);
-    }
+    if (!timing.size) continue;
+
+    const merged: Array<[number, TrackTiming]> = [];
+    for (const [id, value] of timing) merged.push([id, { ...value, trackId: id }]);
+    return new Map(merged);
   }
 
-  const merged: Array<[number, TrackTiming]> = [];
-  for (const [id, value] of best) merged.push([id, { ...value, trackId: id }]);
-  return new Map(merged);
+  return new Map();
 }
 
 /** 解析单个 moof，返回 trackId -> tfdt/trun。 */
