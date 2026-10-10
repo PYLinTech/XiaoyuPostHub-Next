@@ -146,6 +146,33 @@ func GetUploadJob(ctx context.Context, q Querier, sessionID string) (UploadJob, 
 	return job, nil
 }
 
+// ListActiveUploadJobsForUser 返回本人仍未结束的上传任务。
+func ListActiveUploadJobsForUser(ctx context.Context, q Querier, userID int64) ([]UploadJob, error) {
+	rows, err := q.QueryContext(ctx, `SELECT j.session_id, j.user_id, j.client_ip, j.state, j.error,
+		j.result_json, j.total_bytes, j.progress_bytes, j.created_at, j.updated_at, t.target_name
+		FROM upload_jobs j JOIN upload_tasks t ON t.id = j.session_id
+		WHERE j.user_id = ? AND j.state IN ('receiving', 'queued', 'processing')
+		ORDER BY j.created_at, j.session_id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("读取用户活动上传任务失败: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]UploadJob, 0)
+	for rows.Next() {
+		var job UploadJob
+		if err := rows.Scan(&job.SessionID, &job.UserID, &job.ClientIP, &job.State, &job.Error,
+			&job.ResultJSON, &job.TotalBytes, &job.ProgressBytes, &job.CreatedAt, &job.UpdatedAt, &job.TargetName); err != nil {
+			return nil, fmt.Errorf("读取用户活动上传任务失败: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历用户活动上传任务失败: %w", err)
+	}
+	return jobs, nil
+}
+
 func SetUploadJobProgress(ctx context.Context, q Querier, sessionID string, plainBytes int64) error {
 	_, err := q.ExecContext(ctx, `UPDATE upload_jobs SET progress_bytes = MAX(progress_bytes, ?), updated_at = ?
 		WHERE session_id = ? AND state IN ('queued', 'processing', 'receiving')`, plainBytes, Now(), sessionID)

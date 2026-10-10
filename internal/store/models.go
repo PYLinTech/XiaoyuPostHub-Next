@@ -305,6 +305,7 @@ type UploadTask struct {
 type UploadJob struct {
 	SessionID     string `json:"sessionId"`
 	UserID        int64  `json:"userId"`
+	TargetName    string `json:"targetName,omitempty"`
 	ClientIP      string `json:"clientIp"`
 	State         string `json:"state"`
 	Error         string `json:"error,omitempty"`

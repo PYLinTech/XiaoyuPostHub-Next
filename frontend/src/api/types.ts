@@ -395,6 +395,7 @@ export interface UploadProgress {
 
 export interface UploadJobStatus {
   sessionId: string;
+  fileName?: string;
   state: "receiving" | "queued" | "processing" | "done" | "error";
   message: string;
   error?: string;

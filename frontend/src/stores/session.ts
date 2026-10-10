@@ -87,6 +87,7 @@ export function clearSession(): void {
   state.permissions = 0;
   state.storageUsed = 0;
   state.storageLimit = 0;
+  state.actorKey = "";
   notify();
 }
 
@@ -150,12 +151,11 @@ export async function login(account: string, password: string): Promise<void> {
 }
 
 export async function logout(): Promise<void> {
-  try {
-    await authApi.logout();
-  } catch {
+  const revoke = authApi.logout().catch(() => {
     // 服务端可能已经吊销了会话；本地状态照清。
-  }
+  });
   clearSession();
+  await revoke;
 }
 
 export async function register(
@@ -210,6 +210,9 @@ export function installUnauthorizedHandler(): void {
       state.user = null;
       state.group = null;
       state.permissions = 0;
+      state.storageUsed = 0;
+      state.storageLimit = 0;
+      state.actorKey = "";
       setToken("");
       notify();
     }

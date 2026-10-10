@@ -21,12 +21,31 @@ const uploadQueueLimit = 256
 
 type UploadJobStatus struct {
 	SessionID     string      `json:"sessionId"`
+	FileName      string      `json:"fileName,omitempty"`
 	State         string      `json:"state"`
 	Message       string      `json:"message"`
 	Error         string      `json:"error,omitempty"`
 	ProgressBytes int64       `json:"progressBytes"`
 	TotalBytes    int64       `json:"totalBytes"`
 	Node          *store.Node `json:"node,omitempty"`
+}
+
+// ActiveUploadJobsForUser 返回用户尚未结束的上传任务，供新会话恢复传输面板。
+func (s *Service) ActiveUploadJobsForUser(ctx context.Context, p auth.Principal) ([]UploadJobStatus, error) {
+	jobs, err := store.ListActiveUploadJobsForUser(ctx, s.DB.R(), p.UserID())
+	if err != nil {
+		return nil, err
+	}
+	statuses := make([]UploadJobStatus, 0, len(jobs))
+	for _, job := range jobs {
+		status, err := s.uploadJobStatus(job)
+		if err != nil {
+			return nil, err
+		}
+		status.FileName = job.TargetName
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
 }
 
 // QueueUploadCompletion 将已收齐的分片放入持久化收尾队列，HTTP 请求不再等待云盘。

@@ -206,6 +206,14 @@ export function clearFinishedUploads(): void {
   }
 }
 
+/** 切换会话时停止旧用户的前端上传并丢弃其面板条目。 */
+export function clearUploadTasks(): void {
+  for (const item of state.items) {
+    if (item.status === "running") item.controller?.abort();
+  }
+  state.items.splice(0);
+}
+
 export function useUploads() {
   return {
     items: computed(() => state.items),
@@ -218,5 +226,6 @@ export function useUploads() {
     retryUpload,
     removeUpload,
     clearFinishedUploads,
+    clearUploadTasks,
   };
 }

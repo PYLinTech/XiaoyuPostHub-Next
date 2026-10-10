@@ -8,12 +8,15 @@ import { formatBytes } from "@/lib/format";
 import { useUploads } from "@/stores/uploads";
 import { useDownloads, canCancelDownload } from "@/stores/downloads";
 import { transferPanel } from "@/stores/transferPanel";
+import { useServerUploadTasks } from "@/stores/transferTasks";
 
 const uploads = useUploads();
 const downloads = useDownloads();
+const serverUploads = useServerUploadTasks();
 const downloadActive = computed(() => downloads.items.filter(item => item.status === "running").length);
+const serverUploadActive = computed(() => serverUploads.items.filter(item => item.status === "running" || item.status === "queued").length);
 
-const hasTasks = computed(() => uploads.items.value.length + downloads.items.length > 0);
+const hasTasks = computed(() => uploads.items.value.length + downloads.items.length + serverUploads.items.length > 0);
 const labels = { queued: "排队中", running: "进行中", done: "已完成", error: "失败", canceled: "已取消" };
 const uploadMessages = { hashing: "准备上传", uploading: "上传中", finishing: "服务器处理中", done: "已完成" };
 const downloadMessages = { preparing: "准备下载", fetching: "下载中", decrypting: "下载中", verifying: "正在校验", delivering: "正在保存", done: "已完成" };
@@ -53,7 +56,8 @@ function dragThumb(event: PointerEvent) {
 onMounted(() => { observer = new ResizeObserver(updateScrollbar); if (body.value) observer.observe(body.value); });
 onBeforeUnmount(() => { stopDrag?.(); observer?.disconnect(); });
 const tasks = computed(() => transferPanel.selected === "upload"
-  ? uploads.items.value.map(item => ({
+  ? [
+    ...uploads.items.value.map(item => ({
       id: item.id, name: item.file.name, status: item.status,
       active: item.status === "running" || item.status === "queued",
       ratio: isByteTransfer(item.status, item.progress.phase) ? item.progress.ratio : null,
@@ -65,7 +69,21 @@ const tasks = computed(() => transferPanel.selected === "upload"
         ? () => uploads.cancelUploadItem(item.id) : null,
       retry: item.status === "error" ? () => uploads.retryUpload(item.id) : null,
       remove: () => uploads.removeUpload(item.id),
-    }))
+    })),
+    ...serverUploads.items.map(item => ({
+      id: item.id, name: item.fileName, status: item.status,
+      active: item.status === "running" || item.status === "queued",
+      ratio: null,
+      bytesDone: item.progressBytes,
+      bytesTotal: item.totalBytes,
+      message: item.message,
+      error: item.errorMessage,
+      detail: formatBytes(item.totalBytes),
+      cancel: item.status === "queued" ? () => serverUploads.cancel(item) : null,
+      retry: null,
+      remove: () => serverUploads.remove(item.id),
+    })),
+  ]
   : downloads.items.map(item => ({
       id: item.id, name: item.fileName, status: item.status, active: item.status === "running",
       ratio: isByteTransfer(item.status, item.progress.phase) && item.progress.bytesTotal > 0 ? item.progress.bytesDone / item.progress.bytesTotal : null,
@@ -96,7 +114,7 @@ watch(() => [transferPanel.collapsed, transferPanel.selected, tasks.value], () =
     <header v-else class="dock__head">
       <div class="dock__tabs" role="group" aria-label="任务类型">
         <button type="button" :aria-pressed="transferPanel.selected === 'upload'" @click="transferPanel.selected = 'upload'">
-          <AppIcon name="upload-2-line" :size="14" />上传 <span v-if="uploads.activeCount.value">{{ uploads.activeCount.value }}</span>
+          <AppIcon name="upload-2-line" :size="14" />上传 <span v-if="uploads.activeCount.value + serverUploadActive">{{ uploads.activeCount.value + serverUploadActive }}</span>
         </button>
         <button type="button" :aria-pressed="transferPanel.selected === 'download'" @click="transferPanel.selected = 'download'">
           <AppIcon name="download-2-line" :size="14" />下载 <span v-if="downloadActive">{{ downloadActive }}</span>

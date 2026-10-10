@@ -12,6 +12,7 @@ import AppTransferDock from "@/components/AppTransferDock.vue";
 import { useOverlayScroll } from "@/lib/overlayScroll";
 import { onSessionChange, useSession } from "@/stores/session";
 import { loadAnnouncements } from "@/stores/site";
+import { syncTransferTasksForUser } from "@/stores/transferTasks";
 
 // 应用外壳。
 //
@@ -76,6 +77,7 @@ watch(
 onSessionChange(() => {
   closeFilePreview();
   void loadAnnouncements();
+  syncTransferTasksForUser(session.state.authenticated ? session.state.actorKey : "");
 });
 void loadAnnouncements();
 </script>

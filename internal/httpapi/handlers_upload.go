@@ -16,6 +16,20 @@ type uploadInitRequest struct {
 	ConflictAction string `json:"conflictAction"`
 }
 
+// handleUploadTasks 返回当前用户尚未结束的上传任务。
+func (s *Server) handleUploadTasks(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.requireUser(w, r)
+	if !ok {
+		return
+	}
+	tasks, err := s.Svc.ActiveUploadJobsForUser(r.Context(), p)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeData(w, map[string]any{"items": tasks})
+}
+
 // handleUploadInit 初始化上传：先做秒传探测，未命中则返回分片计划。
 func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.requireUser(w, r)

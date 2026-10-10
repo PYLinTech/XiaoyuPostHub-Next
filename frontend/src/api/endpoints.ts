@@ -127,6 +127,7 @@ export const fsApi = {
 // ---------------------------------------------------------------- 上传
 
 export const uploadApi = {
+  tasks: () => request<{ items: UploadJobStatus[] }>("/api/upload/tasks"),
   init: (input: {
     checksum?: string;
     sizePlain: number;

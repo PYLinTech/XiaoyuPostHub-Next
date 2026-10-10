@@ -35,6 +35,14 @@ export function useDownloads() {
   return { items, remove, clearFinished };
 }
 
+/** 切换会话时中止旧用户的下载并丢弃其面板条目。 */
+export function clearDownloads(): void {
+  for (const item of items) {
+    if (item.status === "running") item.cancel();
+  }
+  items.splice(0);
+}
+
 /** 文件已开始落盘或交给浏览器后，取消不能再撤回结果。 */
 export function canCancelDownload(item: DownloadItem): boolean {
   return item.status === "running" && item.progress.phase !== "delivering" && item.progress.phase !== "done";
