@@ -20,6 +20,13 @@ export interface PreviewHandle {
   release(): Promise<void>;
 }
 
+/** 原生播放器使用的临时 URL；释放它只销毁 SW 会话，不结算交付计划。 */
+export interface NativeMediaUrlHandle {
+  url: string;
+  mode: "sw";
+  release(): Promise<void>;
+}
+
 const STREAM_PREFIX = "/__xph/";
 const SW_SCRIPT = "/xph-sw.js";
 
@@ -92,6 +99,30 @@ export async function preparePreview(
     await settleQuietly(plan);
     throw err;
   }
+}
+
+/**
+ * 从已经取得的计划和 DEK 建立原生播放 URL。调用方继续拥有计划的结算责任，
+ * 因而在探测不通过时可以释放 SW 会话后复用同一计划启动兼容内核。
+ */
+export async function createNativeMediaUrl(
+  plan: DeliveryPlan,
+  dek?: Uint8Array,
+  signal?: AbortSignal,
+): Promise<NativeMediaUrlHandle | null> {
+  signal?.throwIfAborted();
+  if (plan.contentForm !== "ciphertext" || !plan.encryption || !dek) {
+    throw new Error("交付计划形态不正确，无法预览");
+  }
+  const registration = await ensureXphWorker();
+  if (!registration?.active) return null;
+  const cipherUrl = cipherSourceUrl(plan);
+  const id = await registerStreamSession(registration, plan, dek, cipherUrl, signal);
+  if (!id) return null;
+  return {
+    url: `${STREAM_PREFIX}${id}`, mode: "sw",
+    async release() { registration.active?.postMessage({ type: "xph:revoke", id }); },
+  };
 }
 
 async function buildHandle(

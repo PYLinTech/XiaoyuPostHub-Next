@@ -50,7 +50,6 @@ const PROBE_TIMEOUT = 45_000;
 function readTypeAt(bytes: Uint8Array, offset: number): string {
   return String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
 }
-
 /** 读 box 的 size 字段（支持 64 位扩展）。 */
 function readBoxSize(bytes: Uint8Array, offset: number): number {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -78,7 +77,18 @@ export type MediaTrackSpec = {
   mime: string;
 };
 
-export type MediaInfo = { tracks: MediaTrackSpec[]; duration: number | null; origin: number };
+export type MediaInfo = {
+  tracks: MediaTrackSpec[];
+  duration: number | null;
+  origin: number;
+  /**
+   * 各轨道的平均码率（bit/s）。拿不到时为 null，由缓冲控制器按运行时观测估计。
+   *
+   * 这是"媒体消费速度"的先验值：有了它，缓冲策略不必先播几秒才能判断该铺多宽。
+   * 扫包有代价，所以限制样本数——对决策而言前几百个包已经足够准。
+   */
+  bitrates: Array<number | null>;
+};
 class MediaCodecError extends Error {
   constructor(message: string) { super(message); this.name = "MediaCodecError"; }
 }
@@ -164,7 +174,10 @@ export class MediaDemuxSession {
     const origin = Math.min(...await Promise.all(tracks.map(track => track.getFirstTimestamp())));
     const duration = await this.input.getDurationFromMetadata(tracks);
     this.lifetime.throwIfAborted();
-    return { tracks: specs, duration: duration !== null && duration > origin ? duration - origin : null, origin };
+    // 包级码率统计会额外遍历媒体包，不能挡住首次播放；缓冲控制器先用运行时交付
+    // 吞吐估计消费能力，之后若能从容器元数据直接取得码率再补充先验。
+    return { tracks: specs, duration: duration !== null && duration > origin ? duration - origin : null,
+      origin, bitrates: tracks.map(() => null) };
   }
   async duration(origin: number): Promise<number | null> {
     // 分片 MP4 把 duration 留在 mvhd 写 0（媒体可无限追加），从头读永远拿不到。
@@ -234,7 +247,7 @@ export class MediaDemuxSession {
 
   /** 顺序遍历编码包，不按固定时间窗口查终点或反复输出初始化段。 */
   async stream(spec: MediaTrackSpec, start: number, origin: number, signal: AbortSignal,
-    onChunk: (data: Uint8Array<ArrayBuffer>, mime: string, keyframes: number[]) => Promise<void>,
+    onChunk: (data: Uint8Array<ArrayBuffer>, mime: string, keyframes: number[], mediaSeconds: number) => Promise<void>,
     permit: (time: number) => Promise<void>): Promise<number> {
     signal.throwIfAborted();
     const track = spec.type === "video" ? await this.input.getPrimaryVideoTrack() : await this.input.getPrimaryAudioTrack();
@@ -254,13 +267,20 @@ export class MediaDemuxSession {
         onCluster: data => { chunks.push(join([data])); },
       }),
     });
-    let actualEnd = start, pendingBytes = 0;
+    let actualEnd = start, emittedEnd = start, pendingBytes = 0;
     const keyframes: number[] = [];
     const flush = async (throttle = true) => {
       if (!chunks.length) return;
       const ready = chunks; chunks = [];
       const mime = (await output.getMimeType()).replace(/^video\//, spec.type + "/");
-      for (const bytes of ready) { signal.throwIfAborted(); await onChunk(bytes, mime, keyframes.splice(0)); }
+      const mediaSeconds = Math.max(0, actualEnd - emittedEnd);
+      emittedEnd = actualEnd;
+      const totalBytes = ready.reduce((sum, bytes) => sum + bytes.byteLength, 0);
+      for (let i = 0; i < ready.length; i++) {
+        signal.throwIfAborted();
+        const chunkSeconds = totalBytes ? mediaSeconds * ready[i].byteLength / totalBytes : 0;
+        await onChunk(ready[i], mime, keyframes.splice(0), chunkSeconds);
+      }
       pendingBytes = 0;
       // 完整片段交给 MSE 后才等待，长 GOP 不会在片段尚未封口时死锁。
       if (throttle) await permit(actualEnd);

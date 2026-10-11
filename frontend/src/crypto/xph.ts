@@ -8,11 +8,13 @@
 const MAGIC = "XPHCRPT1";
 export const HEADER_SIZE = 64;
 const AAD_SIZE = 40;
-const TAG_SIZE = 16;
+/** GCM tag 长度。反推块布局时 cipherSize = HEADER + plainSize + blockCount × TAG_SIZE。 */
+export const TAG_SIZE = 16;
 const NONCE_SIZE = 12;
 export const KEY_SIZE = 32;
-const MIN_BLOCK_LOG2 = 9;
-const MAX_BLOCK_LOG2 = 26;
+/** 块大小指数的合法区间。交付计划反推布局时会遍历这段候选。 */
+export const MIN_BLOCK_LOG2 = 9;
+export const MAX_BLOCK_LOG2 = 26;
 
 export class XphFormatError extends Error {
   constructor(message: string) {
