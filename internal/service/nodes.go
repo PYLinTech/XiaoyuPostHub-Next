@@ -176,7 +176,7 @@ func (s *Service) RenameNode(ctx context.Context, p auth.Principal, path, newNam
 	if err != nil {
 		return "", err
 	}
-	return s.moveNode(ctx, p, node, node.ParentPath, newName)
+	return s.moveNode(ctx, p, node, node.ParentPath, newName, true)
 }
 
 // MoveNode 把节点移动到另一个目录。
@@ -192,10 +192,10 @@ func (s *Service) MoveNode(ctx context.Context, p auth.Principal, path, destPare
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
-	return s.moveNode(ctx, p, node, dest, node.Name)
+	return s.moveNode(ctx, p, node, dest, node.Name, false)
 }
 
-func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Node, destParent, newName string) (string, error) {
+func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Node, destParent, newName string, rename bool) (string, error) {
 	if node.LogicalPath == vpath.Root {
 		return "", fmt.Errorf("%w: 不能移动根目录", ErrBadRequest)
 	}
@@ -230,14 +230,15 @@ func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Nod
 		if err := store.MoveSubtree(ctx, tx, p.UserID(), node.LogicalPath, newPath, destParent, name); err != nil {
 			return err
 		}
-		// 分享的根路径是快照，移动后不会自动跟随。这里让覆盖旧路径的分享失效，
-		// 避免出现“分享指向一个已不存在的路径”这种无法解释的状态；已签发的
-		// 交付票据也必须一并吊销，否则它们绕过分享解析仍能继续取数。
-		_, err := store.DisableSharesByRootPrefix(ctx, tx, p.UserID(), node.LogicalPath)
-		if err != nil {
+		if rename {
+			// 重命名后分享自动指向新路径。路径与文件树在同一事务内修改，
+			// 旧路径签发的票据已在上方吊销。
+			_, err := store.MoveSharesRootPrefix(ctx, tx, p.UserID(), node.LogicalPath, newPath)
 			return err
 		}
-		return nil
+		// 移动目录时分享仍保持原路径语义，因此覆盖旧路径的分享失效。
+		_, err := store.DisableSharesByRootPrefix(ctx, tx, p.UserID(), node.LogicalPath)
+		return err
 	}); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			return "", fmt.Errorf("%w: %s 已存在", ErrConflict, newPath)

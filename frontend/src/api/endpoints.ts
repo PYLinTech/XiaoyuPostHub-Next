@@ -191,6 +191,8 @@ interface CreateShareInput {
 }
 
 export interface UpdateShareInput {
+  path?: string;
+  kind?: "file" | "folder";
   accessMode?: string;
   password?: string;
   allowDownload?: boolean;

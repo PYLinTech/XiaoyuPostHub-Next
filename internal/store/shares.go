@@ -218,6 +218,22 @@ func DisableSharesByRootPrefix(ctx context.Context, q Querier, ownerID int64, pa
 	return n, nil
 }
 
+// MoveSharesRootPrefix 更新分享根路径前缀。文件/目录重命名时调用，
+// 让已有链接跟随逻辑路径迁移；分享配置和启停状态保持不变。
+func MoveSharesRootPrefix(ctx context.Context, q Querier, ownerID int64, oldPath, newPath string) (int64, error) {
+	clause, args := pathSelfOrDescendant("root_path", oldPath)
+	res, err := q.ExecContext(ctx, `
+		UPDATE shares
+		SET root_path = ? || substr(root_path, ?), updated_at = updated_at + 1
+		WHERE owner_id = ? AND `+clause,
+		append([]any{newPath, len([]rune(oldPath)) + 1, ownerID}, args...)...)
+	if err != nil {
+		return 0, fmt.Errorf("迁移分享路径失败: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // InsertShareAccess 记录一次分享访问。
 func InsertShareAccess(ctx context.Context, q Querier, shareID string, actor ActorType, userID int64, ip, action string) error {
 	_, err := q.ExecContext(ctx, `

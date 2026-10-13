@@ -215,6 +215,12 @@ const expiresInPast = computed(() => {
  *  maxVisits、expiresAt 这类字段用零值覆盖掉。 */
 function buildPatch(original: Share, expiresAt: number, maxVisits: number): UpdateShareInput {
   const patch: UpdateShareInput = {};
+  if (form.path.trim() !== original.rootPath) {
+    patch.path = form.path.trim();
+  }
+  if (form.kind !== original.kind) {
+    patch.kind = form.kind;
+  }
   if (form.showSharerName !== original.showSharerName) {
     patch.showSharerName = form.showSharerName;
   }
@@ -262,7 +268,7 @@ async function submit(): Promise<void> {
   const maxVisits = Number.isFinite(parsedVisits) && parsedVisits > 0 ? parsedVisits : 0;
   const original = editing.value;
 
-  if (!original && form.path.trim() === "") {
+  if (form.path.trim() === "") {
     formError.value = "请填写要分享的路径";
     return;
   }
@@ -703,19 +709,12 @@ onMounted(() => {
       <div class="stack">
         <p v-if="formError" class="notice notice--danger">{{ formError }}</p>
 
-        <FormField v-if="!editing" label="路径" required hint="必须是自己的文件或目录，以 / 开头。">
+        <FormField label="目标路径" required hint="可改为自己的其他文件或文件夹，路径以 / 开头。">
           <input v-model="form.path" class="input mono" placeholder="/目录/文件.txt" />
         </FormField>
 
-        <div v-else class="kv">
-          <dt>路径</dt>
-          <dd class="mono">{{ form.path }}</dd>
-          <dt>类型</dt>
-          <dd>{{ kindLabel(form.kind) }}</dd>
-        </div>
-
         <div class="form-grid">
-          <FormField v-if="!editing" label="类型" hint="必须与实际路径的类型一致。">
+          <FormField label="类型" hint="必须与目标路径的实际类型一致，可在文件与文件夹之间转换。">
             <AppSelect v-model="form.kind" aria-label="类型" :options="KIND_OPTIONS" />
           </FormField>
 

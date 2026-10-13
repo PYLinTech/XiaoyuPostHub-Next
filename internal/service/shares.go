@@ -41,6 +41,8 @@ type CreateShareRequest struct {
 // 用零值表示"不变"就无法把 MaxVisits 改成 0（不限次数）或把 Disabled
 // 改成 false（重新启用）。
 type UpdateShareRequest struct {
+	Path           *string
+	Kind           *store.ShareKind
 	AccessMode     *store.AccessMode
 	Password       *string
 	AllowDownload  *bool
@@ -206,11 +208,40 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 	wasExpiresAt := share.ExpiresAt
 	wasAllowDownload := share.AllowDownload
 	wasAllowPreview := share.AllowPreview
+	oldRootPath := share.RootPath
 	// 调用方声明的版本优先；未声明时退回本次读到的版本，用于拦住读取之后、
 	// 写回之前挤进来的并发修改。
 	expectUpdatedAt := req.ExpectUpdatedAt
 	if expectUpdatedAt == 0 {
 		expectUpdatedAt = share.UpdatedAt
+	}
+	if req.Path != nil || req.Kind != nil {
+		rootPath := share.RootPath
+		if req.Path != nil {
+			rootPath, err = vpath.Normalize(*req.Path)
+			if err != nil {
+				return store.Share{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+			}
+		}
+		kind := share.Kind
+		if req.Kind != nil {
+			kind = *req.Kind
+		}
+		if kind != store.ShareFile && kind != store.ShareFolder {
+			return store.Share{}, fmt.Errorf("%w: 未知的分享类型 %q", ErrBadRequest, kind)
+		}
+		node, nodeErr := s.requireOwnNode(ctx, p.UserID(), rootPath)
+		if nodeErr != nil {
+			return store.Share{}, nodeErr
+		}
+		if node.IsFolder() != (kind == store.ShareFolder) {
+			return store.Share{}, fmt.Errorf("%w: 分享类型与目标文件类型不一致", ErrBadRequest)
+		}
+		share.RootPath = rootPath
+		share.Kind = kind
+		if kind != store.ShareFolder {
+			share.AllowSubpath = false
+		}
 	}
 
 	if req.AccessMode != nil {
@@ -283,6 +314,21 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 	}
 
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
+		if req.Path != nil || req.Kind != nil {
+			if share.RootPath != oldRootPath {
+				// 目标迁移后撤销旧根路径签发的票据，避免旧目标仍可通过直链访问。
+				if _, err := store.RevokeTicketsByShareRoot(ctx, tx, share.OwnerID, oldRootPath); err != nil {
+					return err
+				}
+			}
+			current, err := store.GetNode(ctx, tx, share.OwnerID, share.RootPath)
+			if err != nil {
+				return err
+			}
+			if current.IsFolder() != (share.Kind == store.ShareFolder) {
+				return fmt.Errorf("%w: 分享类型与目标文件类型不一致", ErrBadRequest)
+			}
+		}
 		if err := store.UpdateShareIfUnchanged(ctx, tx, share, expectUpdatedAt); err != nil {
 			return err
 		}
@@ -314,7 +360,7 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 		}
 		return store.Share{}, err
 	}
-	s.audit(ctx, p, "share.update", share.ID, fmt.Sprintf("disabled=%v", share.Disabled))
+	s.audit(ctx, p, "share.update", share.ID, fmt.Sprintf("root=%s kind=%s disabled=%v", share.RootPath, share.Kind, share.Disabled))
 	return share, nil
 }
 

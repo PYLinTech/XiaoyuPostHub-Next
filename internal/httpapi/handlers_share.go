@@ -72,6 +72,8 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateShareRequest struct {
+	Path            *string `json:"path"`
+	Kind            *string `json:"kind"`
 	AccessMode      *string `json:"accessMode"`
 	Password        *string `json:"password"`
 	AllowDownload   *bool   `json:"allowDownload"`
@@ -96,6 +98,7 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	update := service.UpdateShareRequest{
+		Path:            req.Path,
 		Password:        req.Password,
 		AllowDownload:   req.AllowDownload,
 		AllowPreview:    req.AllowPreview,
@@ -105,6 +108,10 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		MaxVisits:       req.MaxVisits,
 		Disabled:        req.Disabled,
 		ExpectUpdatedAt: req.ExpectUpdatedAt,
+	}
+	if req.Kind != nil {
+		kind := store.ShareKind(strings.TrimSpace(*req.Kind))
+		update.Kind = &kind
 	}
 	if req.AccessMode != nil {
 		mode := store.AccessMode(*req.AccessMode)
