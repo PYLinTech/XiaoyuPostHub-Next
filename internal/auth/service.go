@@ -411,6 +411,17 @@ func (s *Service) InvalidateGroupCache(groupName string) {
 	s.cacheMu.Unlock()
 }
 
+// GuestPrincipal 暴露访客身份构造，供数据面把请求方一律降级成访客后继续复用
+// 既有交付链路。
+//
+// 直链是裸凭据入口：wget、播放器、脚本都不会带会话 Cookie，而票据归属校验
+// 会比对"票据签发时的身份"与"当前请求的身份"。因此直链签发的票据恒为访客
+// 票据，交付时也必须以访客身份调用同一条链路——在服务端造一个访客身份，
+// 而不是去放宽票据归属校验。
+func (s *Service) GuestPrincipal(ctx context.Context, ip netip.Addr, ipPrefix string) (Principal, error) {
+	return s.guestPrincipal(ctx, ip, ipPrefix)
+}
+
 // guestPrincipal 构造访客身份。
 func (s *Service) guestPrincipal(ctx context.Context, ip netip.Addr, ipPrefix string) (Principal, error) {
 	group, err := s.guestGroupOf(ctx)

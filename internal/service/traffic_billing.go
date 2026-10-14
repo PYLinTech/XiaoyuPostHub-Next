@@ -26,42 +26,106 @@ func (s *Service) personalDeliveryBillingQ(ctx context.Context, q store.Querier,
 	return deliveryBilling{scope: store.ScopeTrafficDown, key: s.deliveryQuotaKey(actor, at), userID: actor.UserID(), groupName: actor.GroupName(), limit: limit, limited: limited}, err
 }
 
-// reserveDeliveryBillingQ 在同一写事务中选择、预扣并返回实际计费主体。
-// 提供者限额失败的条件更新不写入计数，因此可以原子地转扣访问者；
-// 数据库故障或分享授权失败则原样返回，不能被误当作额度不足。
-func (s *Service) reserveDeliveryBillingQ(ctx context.Context, q store.Querier, actor auth.Principal, target DeliveryTarget, at, bytes int64) (deliveryBilling, error) {
-	if target.ShareID != "" {
+// deliveryProvider 是"承担流量的一方"：分享或直链的创建者。
+//
+// 分享与直链在这里汇合成同一套计费规则——先把整笔预扣记在提供者份额上，
+// 不够再整笔回落访问者个人额度。区别只有一处：直链即便被创建者本人使用
+// 也照样记提供者份额，否则创建者可以拿自己的直链把个人
+// 下载额度洗成分享额度，绕开"下载与预览共用日流量"的约束。
+type deliveryProvider struct {
+	owner store.User
+	label string
+}
+
+// deliveryProviderQ 解析本次交付的流量提供者，没有外部入口时返回 nil。
+//
+// 顺带完成授权校验：提供者必须与交付目标一致、未失效、账号仍启用。
+// 这些检查放在计费事务内，与预扣同生共死——放到事务外就会出现
+// "校验通过之后、预扣之前链接被关掉"的窗口，凭据还能白扣一次流量。
+func (s *Service) deliveryProviderQ(ctx context.Context, q store.Querier, actor auth.Principal, target DeliveryTarget, at int64) (*deliveryProvider, error) {
+	switch {
+	case target.ShareID != "":
 		share, err := store.GetShare(ctx, q, target.ShareID)
 		if err != nil {
-			return deliveryBilling{}, err
+			return nil, err
 		}
 		if share.OwnerID != target.OwnerUserID || (share.RootPath != target.Path && !vpath.IsWithin(share.RootPath, target.Path)) {
-			return deliveryBilling{}, fmt.Errorf("%w: 分享与交付目标不匹配", ErrForbidden)
+			return nil, fmt.Errorf("%w: 分享与交付目标不匹配", ErrForbidden)
 		}
 		if share.Disabled || (share.ExpiresAt > 0 && share.ExpiresAt <= at) {
-			return deliveryBilling{}, fmt.Errorf("%w: 分享已失效", ErrForbidden)
+			return nil, fmt.Errorf("%w: 分享已失效", ErrForbidden)
 		}
 		owner, err := store.GetUserByID(ctx, q, share.OwnerID)
 		if err != nil {
-			return deliveryBilling{}, err
+			return nil, err
 		}
 		if owner.Status != store.UserEnabled {
-			return deliveryBilling{}, fmt.Errorf("%w: 分享创建者已停用", ErrForbidden)
+			return nil, fmt.Errorf("%w: 分享创建者已停用", ErrForbidden)
 		}
-		if actor.IsGuest() || actor.UserID() != owner.ID {
-			quotas, err := store.GroupQuotaMap(ctx, q, owner.GroupName)
-			if err != nil {
-				return deliveryBilling{}, fmt.Errorf("%w: 读取分享流量配额失败", ErrUnavailable)
+		// 创建者访问自己的分享记个人额度：分享流量桶是"给别人访问"准备的。
+		if !actor.IsGuest() && actor.UserID() == owner.ID {
+			return nil, nil
+		}
+		return &deliveryProvider{owner: owner, label: "分享"}, nil
+
+	case target.DirectLinkID != "":
+		link, err := store.GetDirectLink(ctx, q, target.DirectLinkID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, ErrNotFound
 			}
-			limit, limited := quotas[store.QuotaTrafficDailyShare]
-			billing := deliveryBilling{scope: store.ScopeTrafficShare, key: store.UserCounterKey(owner.ID, store.DayKey(at)), userID: owner.ID, groupName: owner.GroupName, limit: limit, limited: limited}
-			err = s.reserveBillingQ(ctx, q, billing, bytes)
-			if err == nil {
-				return billing, nil
-			}
-			if !errors.Is(err, ErrQuotaExceeded) {
-				return deliveryBilling{}, err
-			}
+			return nil, err
+		}
+		if link.OwnerID != target.OwnerUserID || link.FileChecksum != target.Checksum {
+			return nil, fmt.Errorf("%w: 直链与交付目标不匹配", ErrForbidden)
+		}
+		if link.Disabled || (link.ExpiresAt > 0 && link.ExpiresAt <= at) {
+			return nil, fmt.Errorf("%w: 直链已失效", ErrForbidden)
+		}
+		owner, err := store.GetUserByID(ctx, q, link.OwnerID)
+		if err != nil {
+			return nil, err
+		}
+		if owner.Status != store.UserEnabled {
+			return nil, fmt.Errorf("%w: 直链创建者已停用", ErrForbidden)
+		}
+		return &deliveryProvider{owner: owner, label: "直链"}, nil
+	}
+	return nil, nil
+}
+
+// reserveProviderShareQ 预扣提供者份额上的当日分享流量。
+func (s *Service) reserveProviderShareQ(ctx context.Context, q store.Querier, p deliveryProvider, at, bytes int64) (deliveryBilling, error) {
+	quotas, err := store.GroupQuotaMap(ctx, q, p.owner.GroupName)
+	if err != nil {
+		return deliveryBilling{}, fmt.Errorf("%w: 读取分享流量配额失败", ErrUnavailable)
+	}
+	limit, limited := quotas[store.QuotaTrafficDailyShare]
+	billing := deliveryBilling{
+		scope: store.ScopeTrafficShare, key: store.UserCounterKey(p.owner.ID, store.DayKey(at)),
+		userID: p.owner.ID, groupName: p.owner.GroupName, limit: limit, limited: limited,
+	}
+	if err := s.reserveBillingQ(ctx, q, billing, bytes); err != nil {
+		return deliveryBilling{}, err
+	}
+	return billing, nil
+}
+
+// reserveDeliveryBillingQ 在同一写事务内预扣提供者份额，不足时转扣访问者。
+func (s *Service) reserveDeliveryBillingQ(ctx context.Context, q store.Querier, actor auth.Principal, target DeliveryTarget, at, bytes int64) (deliveryBilling, error) {
+	provider, err := s.deliveryProviderQ(ctx, q, actor, target, at)
+	if err != nil {
+		return deliveryBilling{}, err
+	}
+	if provider != nil {
+		billing, err := s.reserveProviderShareQ(ctx, q, *provider, at, bytes)
+		if err == nil {
+			return billing, nil
+		}
+		// 提供者限额失败的条件更新不写入计数，因此可以原子地转扣访问者；
+		// 数据库故障或授权失败则原样返回，不能被误当作额度不足。
+		if !errors.Is(err, ErrQuotaExceeded) {
+			return deliveryBilling{}, err
 		}
 	}
 	billing, err := s.personalDeliveryBillingQ(ctx, q, actor, at)
@@ -69,14 +133,14 @@ func (s *Service) reserveDeliveryBillingQ(ctx context.Context, q store.Querier, 
 		return deliveryBilling{}, err
 	}
 	if err := s.reserveBillingQ(ctx, q, billing, bytes); err != nil {
-		if target.ShareID != "" && errors.Is(err, ErrQuotaExceeded) && (actor.IsGuest() || actor.UserID() != target.OwnerUserID) {
-			return deliveryBilling{}, fmt.Errorf("%w: 分享提供者与访问者的今日流量额度均不足", ErrQuotaExceeded)
+		// provider != nil 即"刚刚尝试过提供者额度"，此时两侧都缺才给这句提示。
+		if provider != nil && errors.Is(err, ErrQuotaExceeded) {
+			return deliveryBilling{}, fmt.Errorf("%w: %s提供者与访问者的今日流量额度均不足", ErrQuotaExceeded, provider.label)
 		}
 		return deliveryBilling{}, err
 	}
 	return billing, nil
 }
-
 func (s *Service) reserveBillingQ(ctx context.Context, q store.Querier, billing deliveryBilling, bytes int64) error {
 	if bytes <= 0 {
 		return nil

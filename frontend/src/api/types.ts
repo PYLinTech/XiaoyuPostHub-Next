@@ -66,6 +66,7 @@ export const Perm = {
   MailAccess: 1 << 15,
   AdminMail: 1 << 16,
   AdminUnbind: 1 << 17,
+  DirectLink: 1 << 18,
 } as const;
 
 /** 权限位的展示名，用于用户组编辑界面。 */
@@ -88,6 +89,7 @@ export const PERM_LABELS: ReadonlyArray<{ bit: number; label: string; group: str
   { bit: Perm.MailAccess, label: "访问邮件（收件箱 / 阅读）", group: "邮件" },
   { bit: Perm.AdminMail, label: "管理收件域名与全局邮件", group: "邮件" },
   { bit: Perm.AdminUnbind, label: "审核邮箱解绑申请", group: "邮件" },
+  { bit: Perm.DirectLink, label: "创建直链", group: "分享" },
 ];
 
 export function hasPerm(mask: number, bit: number): boolean {
@@ -189,6 +191,36 @@ export interface GuestShare extends Pick<Share, "customMarkdown" | "id" | "kind"
   isOwner: boolean;
   sharerName?: string;
   size: number;
+}
+
+/**
+ * 一条直链：分享的直链版本。
+ *
+ * 绑定的是内容哈希而不是逻辑路径，所以重命名与跨目录移动都不影响它；
+ * 反向的失效由内容被删除/拉黑、以及用户删除自己的文件承担。
+ */
+export interface DirectLink {
+  id: string;
+  ownerId: number;
+  checksum: string;
+  sourcePath?: string;
+  sourceName: string;
+  mimeType?: string;
+  size: number;
+  /** 0 / 缺省表示永久。 */
+  expiresAt?: number;
+  /** 0 表示不限。 */
+  maxHits: number;
+  hits: number;
+  disabled: boolean;
+  createdAt: number;
+  updatedAt?: number;
+  /**
+   * 绑定内容是否仍可交付。它与 disabled 回答的是两件事：
+   * disabled 是「这条链接还开不开放」，targetAvailable 是「绑定的内容还在不在」。
+   * 用户删除文件后两者会分叉（链接已停用，但内容在归档暂存期仍可恢复）。
+   */
+  targetAvailable: boolean;
 }
 
 export interface PickupCode {
@@ -703,6 +735,7 @@ export interface SetupState {
    * 否则侧栏会显示一个点进去就是 404 的邮件入口。
    */
   mailReceiveEnabled: boolean;
+  directLinkEnabled: boolean;
   minAccountLen: number;
   maxAccountLen: number;
   minPasswordLen: number;

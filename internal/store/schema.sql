@@ -316,7 +316,9 @@ CREATE TABLE IF NOT EXISTS download_tickets (
     billed_group_name TEXT NOT NULL DEFAULT '',
     share_id TEXT NOT NULL DEFAULT '',
     pickup_code TEXT NOT NULL DEFAULT '',
-    resource_path TEXT NOT NULL DEFAULT ''
+    resource_path TEXT NOT NULL DEFAULT '',
+    -- 追回是哪条直链签发的票据：计费按创建者分享桶判定，管理端按直链看用量。
+    direct_link_id TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_tickets_checksum ON download_tickets(file_checksum);
@@ -345,7 +347,8 @@ CREATE TABLE IF NOT EXISTS traffic_logs (
     occurred_at   INTEGER NOT NULL,
     quota_scope TEXT NOT NULL DEFAULT '',
     billed_user_id INTEGER NOT NULL DEFAULT 0,
-    billed_group_name TEXT NOT NULL DEFAULT ''
+    billed_group_name TEXT NOT NULL DEFAULT '',
+    direct_link_id TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_traffic_user ON traffic_logs(user_id, occurred_at);
@@ -514,6 +517,45 @@ CREATE INDEX IF NOT EXISTS idx_pickup_share ON pickup_codes(share_id);
 -- 码池占用是「未停用且仍在有效期窗口内」的全局计数，share_id 单列索引
 -- 无法覆盖这个范围扫描。
 CREATE INDEX IF NOT EXISTS idx_pickup_alive ON pickup_codes(disabled, created_at);
+
+-- ---------------------------------------------------------------- 直链
+
+-- 直链是「分享」的直链版本：同样的 token、有效期、次数上限、停用与乐观锁，
+-- 差别只在绑定物与出口。
+--
+-- 绑定的是**内容哈希 + 创建者**，不是逻辑路径、也不是存储侧定位符
+-- （pan_file_id 不在这里，每次交付都经 files 表解析当前对象）。因此重命名与
+-- 跨目录移动都不影响链接，而内容被删除或拉黑时由 files 的状态自然让它失效。
+--
+-- 直链**不持有内容池引用**：它是旁路凭证而不是所有权，Create / Delete 都不碰
+-- files.ref_count。用户删除文件会让直链失效，由 DisableDirectLinksByOwnerAndChecksums
+-- 在删除事务里一并停用——必须带 owner_id 过滤，内容池是跨用户去重共享的。
+CREATE TABLE IF NOT EXISTS direct_links (
+    -- 随机不可枚举的 token，与 shares 同款生成方式。
+    id            TEXT PRIMARY KEY,
+    owner_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- 按哈希查找内容，不持有外键，避免阻止内容池回收或重建。
+    file_checksum TEXT NOT NULL,
+    -- 以下三列是创建时的快照，只用于展示与响应头，不参与任何有效性判定。
+    -- 文件名与类型冻结下来，避免每次交付都去查节点名。
+    source_path   TEXT NOT NULL DEFAULT '',
+    source_name   TEXT NOT NULL DEFAULT '',
+    mime_type     TEXT NOT NULL DEFAULT '',
+    size_plain    INTEGER NOT NULL DEFAULT 0,
+    -- 0 表示永久；与分享的 expires_at 口径一致。
+    expires_at    INTEGER NOT NULL DEFAULT 0,
+    -- 0 表示不限；与分享的 max_visits 口径一致。
+    max_hits      INTEGER NOT NULL DEFAULT 0,
+    hits          INTEGER NOT NULL DEFAULT 0,
+    disabled      INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    -- 乐观锁版本：每次更新自增，并发的陈旧写回按此判定冲突。
+    updated_at    INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_direct_links_owner ON direct_links(owner_id, created_at);
+-- 服务「文件 → 直链」的反向查询：按内容哈希找出该用户在这份内容上的全部直链。
+CREATE INDEX IF NOT EXISTS idx_direct_links_checksum ON direct_links(file_checksum, owner_id);
 
 -- ---------------------------------------------------------------- 审计
 

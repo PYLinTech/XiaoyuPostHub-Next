@@ -11,11 +11,11 @@ import FormField from "@/components/ui/FormField.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
 import FolderPicker from "@/components/FolderPicker.vue";
 import { openFilePreview } from "@/stores/preview";
-import { adminApi, fsApi } from "@/api/endpoints";
-import { FILE_ARCHIVE, FILE_DISABLED, Perm, type ListNode } from "@/api/types";
+import { adminApi, directLinkApi, directLinkUrl, fsApi } from "@/api/endpoints";
+import { FILE_ARCHIVE, FILE_DISABLED, Perm, type DirectLink, type ListNode } from "@/api/types";
 import { useDeliveryAction } from "@/delivery/actions";
 import { fileDeliverySource } from "@/delivery/sources";
-import { copyText, describeError, logError, useAsync } from "@/lib/async";
+import { copyText, createRequestGate, describeError, logError, useAsync } from "@/lib/async";
 import { formatBytes, formatRelative, formatTime, pathSegments } from "@/lib/format";
 import { useSession } from "@/stores/session";
 import { topbarSlot } from "@/stores/shell";
@@ -70,6 +70,7 @@ const selection = ref<string[]>([]);
 const canUpload = computed(() => session.can(Perm.Upload));
 const canManage = computed(() => session.can(Perm.ManageOwnNodes));
 const canShare = computed(() => session.can(Perm.Share));
+const canDirectLink = computed(() => session.directLinksEnabled.value && session.can(Perm.DirectLink));
 
 // ---------------------------------------------------------------- 排序
 
@@ -156,6 +157,14 @@ const selectedItems = computed<ListNode[]>(() => {
     }
   }
   return picked;
+});
+
+// 从直链定位当前文件，目录加载后选中它；路径来自服务端按内容哈希解析。
+watch([() => route.query.select, () => list.data.value.items], ([path, nodes]) => {
+  if (typeof path === "string" && nodes.some(item => item.path === path)) {
+    selection.value = [path];
+    void router.replace({ query: { ...route.query, select: undefined } });
+  }
 });
 
 /** 移动与删除要的是路径，顺序与勾选一致。 */
@@ -487,6 +496,12 @@ function openDetail(item: FileRow): void {
   closeMenu();
   detailItem.value = item;
   detailOpen.value = true;
+  detailLinksGate.next();
+  detailLinksLoading.value = false;
+  detailLinks.value = [];
+  if (item.checksum && session.directLinksEnabled.value) {
+    void loadDetailLinks(item.checksum);
+  }
 }
 
 /**
@@ -543,6 +558,52 @@ async function shareItem(item: ListNode): Promise<void> {
     path: "/shares",
     query: { create: item.path, kind: item.isFolder ? "folder" : "file" },
   });
+}
+
+/**
+ * 创建直链。与 shareItem 同一套交接方式：带 query 跳到管理页，由那边读参数
+ * 打开表单。直链只支持文件，文件夹这一项不出现。
+ */
+async function directLinkItem(item: ListNode): Promise<void> {
+  closeMenu();
+  await router.push({ path: "/direct-links", query: { create: item.path } });
+}
+
+// ---------------------------------------------------------------- 文件 → 直链
+
+/**
+ * 详情弹窗里列出这份内容上已创建的直链。
+ *
+ * 直链绑的是内容哈希而不是路径，所以同一份内容在用户的不同路径下会共用同一条
+ * 反查结果——这里按当前文件的 checksum 查，回来的可能不止一条。
+ */
+const detailLinksGate = createRequestGate();
+const detailLinks = ref<DirectLink[]>([]);
+const detailLinksLoading = ref(false);
+
+async function loadDetailLinks(checksum: string): Promise<void> {
+  const token = detailLinksGate.next();
+  detailLinksLoading.value = true;
+  try {
+    const res = await directLinkApi.forChecksums([checksum]);
+    if (detailLinksGate.isCurrent(token)) detailLinks.value = res.items;
+  } catch (error) {
+    if (!detailLinksGate.isCurrent(token)) return;
+    // 反查失败不该让整个详情弹窗变成错误页：文件信息仍然有用。
+    logError("读取文件的直链列表失败", error);
+    detailLinks.value = [];
+  } finally {
+    if (detailLinksGate.isCurrent(token)) detailLinksLoading.value = false;
+  }
+}
+
+async function copyDirectLink(link: DirectLink): Promise<void> {
+  const ok = await copyText(directLinkUrl(link.id));
+  if (ok) {
+    toasts.success("直链已复制");
+  } else {
+    toasts.error("复制失败", "浏览器不允许自动复制，请手动选中地址栏中的链接");
+  }
 }
 </script>
 
@@ -729,7 +790,16 @@ async function shareItem(item: ListNode): Promise<void> {
             <button v-if="canShare" type="button" class="iconbtn" title="创建分享" @click="shareItem(row)">
               <AppIcon name="share" :size="17" />
             </button>
-            <span v-if="canManage || canShare" class="frow__menu-root">
+            <button
+              v-if="canDirectLink && !row.isFolder"
+              type="button"
+              class="iconbtn"
+              title="创建直链"
+              @click="directLinkItem(row)"
+            >
+              <AppIcon name="link" :size="17" />
+            </button>
+            <span v-if="canManage || canShare || canDirectLink" class="frow__menu-root">
               <button
                 type="button"
                 class="iconbtn"
@@ -752,6 +822,15 @@ async function shareItem(item: ListNode): Promise<void> {
                 <button v-if="canShare" type="button" class="fmenu__item" @click="shareItem(row)">
                   <AppIcon name="share" :size="16" />
                   创建分享
+                </button>
+                <button
+                  v-if="canDirectLink && !row.isFolder"
+                  type="button"
+                  class="fmenu__item"
+                  @click="directLinkItem(row)"
+                >
+                  <AppIcon name="link" :size="16" />
+                  创建直链
                 </button>
                 <button type="button" class="fmenu__item" @click="openDetail(row)">
                   <AppIcon name="info" :size="16" />
@@ -859,6 +938,26 @@ async function shareItem(item: ListNode): Promise<void> {
           </dd>
         </template>
       </dl>
+
+      <!-- 文件 → 直链 的反向绑定：这份内容上已经挂了哪些直链。
+           直链绑内容哈希，所以同一份内容在别的路径下也会一并列出来。 -->
+      <div v-if="session.directLinksEnabled.value && detailItem?.checksum" class="stack" style="margin-top: 1rem">
+        <div class="fdetail__links-head">
+          <strong>已创建的直链</strong>
+          <span v-if="detailLinksLoading" class="faint">加载中…</span>
+        </div>
+        <p v-if="!detailLinksLoading && detailLinks.length === 0" class="faint">
+          还没有直链。直链只支持单个文件，绑定的是内容而不是路径——重命名与移动都不影响它。
+        </p>
+        <ul v-if="!detailLinksLoading && detailLinks.length > 0" class="fdetail__links">
+          <li v-for="link in detailLinks" :key="link.id">
+            <code class="mono">{{ directLinkUrl(link.id) }}</code>
+            <span class="faint">{{ link.hits }} 次</span>
+            <span v-if="link.disabled" class="badge badge--danger">已停用</span>
+            <AppButton size="sm" variant="ghost" icon="copy" title="复制直链" aria-label="复制直链" @click="copyDirectLink(link)" />
+          </li>
+        </ul>
+      </div>
       <template #footer>
         <AppButton
           v-if="session.can(Perm.AdminFiles) && detailItem?.checksum"
@@ -889,6 +988,36 @@ async function shareItem(item: ListNode): Promise<void> {
 </template>
 
 <style scoped>
+/* 详情弹窗里的直链清单。URL 可能很长，单独给它一条布局规则，
+   否则会把弹窗撑出横向滚动条。 */
+.fdetail__links-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.fdetail__links {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.fdetail__links li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.fdetail__links code {
+  flex: 1 1 14rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
 .files {
   display: flex;
   flex-direction: column;

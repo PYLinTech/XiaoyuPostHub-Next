@@ -53,6 +53,12 @@ const routes: RouteRecordRaw[] = [
     meta: { auth: true, title: "我的分享" },
   },
   {
+    path: "/direct-links",
+    name: "direct-links",
+    component: () => import("@/views/DirectLinksView.vue"),
+    meta: { auth: true, title: "直链" },
+  },
+  {
     path: "/pickup",
     name: "pickup",
     component: () => import("@/views/PickupView.vue"),
@@ -249,6 +255,11 @@ router.beforeEach(async (to) => {
       useToasts().error("当前站点未启用邮件功能");
       return { path: firstReachableAdmin() };
     }
+  }
+
+  if (to.name === "direct-links") {
+    await session.reloadSiteInfo();
+    if (!session.directLinksEnabled.value) return { name: "files" };
   }
 
   if (to.meta.perm && !session.can(to.meta.perm)) {

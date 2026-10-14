@@ -113,6 +113,9 @@ func (s *Service) RunMaintenance(ctx context.Context) MaintenanceReport {
 		report.Failures++
 	}
 	for _, snapshot := range expiredTickets {
+		if _, active := s.activeDirectLinks.Load(snapshot.ID); active {
+			continue
+		}
 		var deleted bool
 		var needsRefund bool
 		err := s.DB.InTx(ctx, func(tx store.Querier) error {

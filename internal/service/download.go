@@ -109,9 +109,14 @@ type DeliveryTarget struct {
 	OwnerUserID int64
 	// Path 是逻辑路径。
 	Path string
-	// ShareID / PickupCode 用于分享计费归属与审计。
-	ShareID    string
-	PickupCode string
+	// ShareID / PickupCode / DirectLinkID 用于分享与直链的计费归属与审计。
+	ShareID      string
+	PickupCode   string
+	DirectLinkID string
+	// Checksum 是交付目标绑定的内容哈希。直链按内容寻址，它同时承担
+	// "这条直链确实指向这个对象"的校验：分享有 RootPath 可比，
+	// 直链没有路径可校验，只能靠哈希。
+	Checksum string
 }
 
 // DeliveryRequest 是一次交付请求。
@@ -567,11 +572,10 @@ func (s *Service) SettleDelivery(ctx context.Context, actor auth.Principal, tick
 		}
 		return err
 	}
-	// 已吊销/已过期的票据不得结算。这条守卫必须存在：分享被停用、口令被改、
-	// 文件被拉黑或节点被删除时都会吊销在途票据，并把它们留在"到期后退款"的
-	// 队列里。若结算不检查吊销状态，持有人就能把一张已作废的票据从"待退款"
-	// 转成"永久计费"，同时留下一条本不该有的下载流量账。
-	if ticket.Revoked || time.Now().UTC().After(ticket.ExpiresAt) {
+	// 已吊销票据仍禁止结算。直链的在途请求由服务端计量，超过开流有效期后
+	// 仍须完成收尾；清理任务在流关闭前保留其预扣和票据。
+	_, inFlight := s.activeDirectLinks.Load(ticket.ID)
+	if ticket.Revoked || (time.Now().UTC().After(ticket.ExpiresAt) && !(ticket.DirectLinkID != "" && inFlight)) {
 		return fmt.Errorf("%w: 票据已失效", ErrForbidden)
 	}
 	if err := s.authorizeTicketActor(ctx, ticket, actor); err != nil {
@@ -609,6 +613,7 @@ func (s *Service) SettleDelivery(ctx context.Context, actor auth.Principal, tick
 				QuotaScope:      ticket.QuotaScope,
 				ShareID:         ticket.ShareID,
 				PickupCode:      ticket.PickupCode,
+				DirectLinkID:    ticket.DirectLinkID,
 				ResourcePath:    ticket.ResourcePath,
 				ActorType:       ticket.ActorType,
 				UserID:          ticket.UserID,
@@ -702,6 +707,11 @@ func (s *Service) serverStreamForActor(ctx context.Context, ticketID string, act
 	}
 	if ticket.Revoked || time.Now().UTC().After(ticket.ExpiresAt) || (ticket.MaxUses > 0 && ticket.UseCount >= ticket.MaxUses) {
 		return ServerStream{}, fmt.Errorf("%w: 票据已失效", ErrForbidden)
+	}
+	if ticket.DirectLinkID != "" {
+		if err := s.requireDirectLinks(ctx); err != nil {
+			return ServerStream{}, err
+		}
 	}
 	if err := s.authorizeTicketActor(ctx, ticket, actor); err != nil {
 		return ServerStream{}, err
@@ -806,10 +816,11 @@ func (s *Service) serverStreamForActor(ctx context.Context, ticketID string, act
 
 	// 在消费次数之后、任何字节交付之前的打开失败，只有「整文件读取」才取消
 	// 票据并退款：此时用户拿到的是一次完整失败，额度不该被记走。
-	// Range 分片（媒体播放/seek 会让浏览器主动取消或并发多个分片）绝不能
+	// 普通 Range 分片（媒体播放/seek 会主动取消或并发多个分片）绝不能
 	// 吊销整张票据，否则一次瞬时上游故障会让同一票据上的后续分片全部 403；
 	// 分片票据的剩余预扣由过期清理回收。
-	abortTicketOnOpenFailure := !rangeRequested
+	// 直链失败由 ServeDirectLink 连同命中次数一起回滚。
+	abortTicketOnOpenFailure := !rangeRequested && ticket.DirectLinkID == ""
 	failAfterConsume := func(cause error) (ServerStream, error) {
 		if abortTicketOnOpenFailure {
 			if _, cancelErr := s.cancelTicketAndRefund(ctx, ticket); cancelErr != nil {

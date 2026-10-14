@@ -28,7 +28,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{ "update:limit": [number]; "update:offset": [number] }>();
 
-const rowsOnPage = computed(() => Math.min(props.limit, Math.max(0, props.total - props.offset)));
+const rowsOnPage = computed(() => Math.min(props.limit, Math.max(0, props.exact ? props.total - props.offset : props.total)));
 
 const PAGE_SIZES = [20, 50, 100, 200].map((value) => ({ value, label: `${value} / 页` }));
 

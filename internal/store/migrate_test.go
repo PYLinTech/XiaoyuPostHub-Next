@@ -139,6 +139,7 @@ func normalizeSQL(s string) string {
 func rewindToBaselineSchema(t *testing.T, db *DB) {
 	t.Helper()
 	rewindTrafficBillingSchema(t, db)
+	rewindDirectLinkSchema(t, db)
 	for _, stmt := range []string{
 		`ALTER TABLE shares DROP COLUMN custom_markdown`,
 		`ALTER TABLE shares DROP COLUMN show_sharer_name`,

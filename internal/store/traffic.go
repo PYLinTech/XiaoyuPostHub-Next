@@ -16,10 +16,10 @@ func InsertTrafficLog(ctx context.Context, q Querier, l TrafficLog) error {
 	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO traffic_logs (actor_type, user_id, client_ip, group_name, action,
-			bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at, billed_user_id, billed_group_name, quota_scope)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at, billed_user_id, billed_group_name, quota_scope, direct_link_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(l.ActorType), l.UserID, l.ClientIP, l.GroupName, l.Action,
-		l.BytesPlain, l.BytesWire, l.ResourcePath, l.ShareID, l.PickupCode, l.OccurredAt, l.BilledUserID, l.BilledGroupName, l.QuotaScope)
+		l.BytesPlain, l.BytesWire, l.ResourcePath, l.ShareID, l.PickupCode, l.OccurredAt, l.BilledUserID, l.BilledGroupName, l.QuotaScope, l.DirectLinkID)
 	if err != nil {
 		return fmt.Errorf("写入流量明细失败: %w", err)
 	}
@@ -115,7 +115,7 @@ func ListTrafficLogs(ctx context.Context, q Querier, f TrafficFilter) ([]Traffic
 
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, actor_type, user_id, client_ip, group_name, action,
-		       bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at, billed_user_id, billed_group_name, quota_scope
+		       bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at, billed_user_id, billed_group_name, quota_scope, direct_link_id
 		FROM traffic_logs`+clause+` ORDER BY occurred_at DESC LIMIT ? OFFSET ?`,
 		append(args, limit, f.Offset)...)
 	if err != nil {
@@ -128,7 +128,7 @@ func ListTrafficLogs(ctx context.Context, q Querier, f TrafficFilter) ([]Traffic
 		var l TrafficLog
 		var actor string
 		if err := rows.Scan(&l.ID, &actor, &l.UserID, &l.ClientIP, &l.GroupName, &l.Action,
-			&l.BytesPlain, &l.BytesWire, &l.ResourcePath, &l.ShareID, &l.PickupCode, &l.OccurredAt, &l.BilledUserID, &l.BilledGroupName, &l.QuotaScope); err != nil {
+			&l.BytesPlain, &l.BytesWire, &l.ResourcePath, &l.ShareID, &l.PickupCode, &l.OccurredAt, &l.BilledUserID, &l.BilledGroupName, &l.QuotaScope, &l.DirectLinkID); err != nil {
 			return nil, 0, fmt.Errorf("扫描流量明细失败: %w", err)
 		}
 		l.ActorType = ActorType(actor)

@@ -323,6 +323,17 @@ func (s *Service) DeleteNode(ctx context.Context, p auth.Principal, path string)
 				return err
 			}
 		}
+		// 直链绑的是内容哈希而非路径，没有 DisableSharesByRootPrefix 那样的
+		// 前缀联动可用。它表达的是**用户的删除意图**，与对象是否还在无关：
+		// 同一份内容若还被别人（或本用户的另一处路径）引用着，对象仍然是
+		// FileNormal，直链会继续交付——但用户明明已经把它删了。
+		checksums := make([]string, 0, len(refs))
+		for checksum := range refs {
+			checksums = append(checksums, checksum)
+		}
+		if _, err := store.DisableDirectLinksByOwnerAndChecksums(ctx, tx, p.UserID(), checksums); err != nil {
+			return err
+		}
 		if _, err := store.DisableSharesByRootPrefix(ctx, tx, p.UserID(), norm); err != nil {
 			return err
 		}

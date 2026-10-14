@@ -19,6 +19,7 @@ func rewindTrafficBillingSchema(t *testing.T, db *DB) {
 func TestShareTrafficMigrationKeepsLegacyTicketBilling(t *testing.T) {
 	db := openTestDB(t)
 	rewindTrafficBillingSchema(t, db)
+	rewindDirectLinkSchema(t, db)
 	// Use an existing v7 record: new columns must have neutral defaults so refund
 	// continues to use the original access actor's dated personal counter.
 	mustExec(t, db, `INSERT INTO files(checksum,size_plain,pan_object_name,pan_size_wire,enc_algo,enc_chunk_log2,enc_nonce_prefix,enc_salt,dek_envelope,kek_key_id,status,created_at,updated_at) VALUES('legacy',1,'x',81,'AES-256-GCM',20,1,x'00',x'00','k1',1,1,1)`)

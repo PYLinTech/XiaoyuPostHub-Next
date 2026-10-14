@@ -280,3 +280,13 @@ func FreeName(ctx context.Context, q Querier, userID int64, parentPath, name str
 	}
 	return fmt.Sprintf("%s-%s%s", base, suffix, ext), nil
 }
+
+// FindOwnedNodeByChecksum 返回指定用户仍持有的文件节点，不暴露其他用户的路径。
+func FindOwnedNodeByChecksum(ctx context.Context, q Querier, userID int64, checksum string) (Node, error) {
+	node, err := scanNode(q.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM user_nodes
+  WHERE user_id = ? AND file_checksum = ? AND node_type = ? ORDER BY logical_path LIMIT 1`, userID, checksum, int(NodeFile)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Node{}, ErrNotFound
+	}
+	return node, err
+}

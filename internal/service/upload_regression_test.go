@@ -134,6 +134,30 @@ func TestReuploadAfterPurgeWasBlocked(t *testing.T) {
 	}
 }
 
+func TestReuploadAfterPurgeWithRetainedDirectLink(t *testing.T) {
+	ctx := context.Background()
+	f := newShareFixture(t)
+	f.enableEncryption()
+	f.enableStorage()
+	if err := f.svc.Settings.SetMany(ctx, map[settings.Key]string{settings.KeyDirectLinkEnabled: "true"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	completeUpload(t, f, contentA, "sample.bin")
+	link, err := f.svc.CreateDirectLink(ctx, f.user, CreateDirectLinkRequest{Path: "/a/sample.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := stagedThenArchiveDeleted(t, f, "/a/sample.bin")
+	purgeBatch(t, f, batch)
+	if _, err := completeUploadE(t, f, contentA, "sample2.bin"); err != nil {
+		t.Fatalf("保留的直链不应阻止同内容重传: %v", err)
+	}
+	retained, err := store.GetDirectLink(ctx, f.db.R(), link.ID)
+	if err != nil || !retained.Disabled || retained.FileChecksum != link.FileChecksum {
+		t.Fatalf("旧直链应保留且继续停用: %+v %v", retained, err)
+	}
+}
+
 // TestReuploadOverArchivedObjectDeletesOldRemote：回收态（对象仍在）重传时
 // 旧远端对象必须被删除且只删一次，新上传正常收尾。
 func TestReuploadOverArchivedObjectDeletesOldRemote(t *testing.T) {

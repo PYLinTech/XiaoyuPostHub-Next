@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +10,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/service"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
@@ -120,6 +123,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	s.writeServerStream(w, r, p, stream)
+}
+
+// writeServerStream 统一中转与直链的响应头、区间输出和服务端结算。
+func (s *Server) writeServerStream(w http.ResponseWriter, r *http.Request, actor auth.Principal, stream service.ServerStream) {
 	reader, ticket, file := stream.Reader, stream.Ticket, stream.File
 	if reader != nil {
 		defer reader.Close()
@@ -153,38 +161,35 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
 		w.WriteHeader(http.StatusPartialContent)
 	}
-	if headOnly {
+	if r.Method == http.MethodHead {
 		return
 	}
 
 	written, copyErr := io.Copy(w, reader)
 	if copyErr != nil {
-		// 最常见的原因是播放器 seek 时主动断开旧的 Range 请求，这不是故障。
-		log.Printf("httpapi: 票据 %s 输出中转流中断（已写 %d 字节）: %v", ticketID, written, copyErr)
-		// 只有「整文件明文流」的中断需要服务端按实发字节结算：那是 proxy_decrypt
-		// 的整文件下载，客户端没有自结算通道。
-		// 其余情况一律不动票据：
-		//   - Range 分片（含密文中转）会被频繁取消，吊销票据会让同一张票据上
-		//     的后续分片全部 403；
-		//   - 密文整文件流由客户端在失败路径自行上报结算；
-		//   - 未结算的剩余预扣统一由票据过期清理回收。
-		if !stream.RangeRequested && stream.ContentForm == service.ContentFormPlaintext {
-			if settleErr := s.Svc.SettleDelivery(r.Context(), p, ticketID, written); settleErr != nil {
-				log.Printf("httpapi: 票据 %s 传输中断后的结算失败: %v", ticketID, settleErr)
-			}
-		}
-		return
+		log.Printf("httpapi: 票据 %s 输出流中断（已写 %d 字节）: %v", ticket.ID, written, copyErr)
 	}
-	// 完整下载才在这里结算。Range/媒体播放会产生多次彼此重叠的请求，
-	// 单张票据没有请求级幂等键，若每次都按片段退款会造成少计；未完整
-	// 结算的票据由过期清理回收剩余预扣。
-	// 中转解密时 written 是明文字节数；中转加密时前端自行结算，这里不重复处理。
-	if !stream.RangeRequested && stream.ContentForm == service.ContentFormPlaintext {
-		if err := s.Svc.SettleDelivery(r.Context(), p, ticketID, written); err != nil {
-			// 响应体已经开始写出，错误只能记录，不能再改变状态码。
-			log.Printf("httpapi: 票据 %s 结算失败: %v", ticketID, err)
+	if shouldSettleStream(stream) {
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
+		defer cancel()
+		if err := s.Svc.SettleDelivery(settleCtx, actor, ticket.ID, written); err != nil {
+			// 响应已经开始写出，结算错误只能记录。
+			log.Printf("httpapi: 票据 %s 结算失败: %v", ticket.ID, err)
 		}
 	}
+}
+
+// shouldSettleStream 判断本次响应是否要按实发字节结算。
+//
+// 只有明文（proxy_decrypt）流需要服务端结算：密文流的实际用量由客户端自报，
+// 服务端实测只会重复记账。整文件才结算是分享与普通下载的既有行为；直链的
+// 请求方是 wget / 播放器这类没有自结算通道的裸 HTTP 客户端，Range 是常态，
+// 通过 DirectLinkID 识别这些单次请求票据，按每次请求结算。
+func shouldSettleStream(stream service.ServerStream) bool {
+	if stream.ContentForm != service.ContentFormPlaintext {
+		return false
+	}
+	return stream.Ticket.DirectLinkID != "" || !stream.RangeRequested
 }
 
 // handleCDNAuth 是 123 的回源鉴权端点。

@@ -22,6 +22,8 @@ const (
 	KeyGuestPreview Key = "site.guest_preview"
 	// KeySystemMode 系统模式，决定文件侧与邮件侧各自是否对外可用。
 	KeySystemMode Key = "site.system_mode"
+	// KeyDirectLinkEnabled 是否开放直链功能。
+	KeyDirectLinkEnabled Key = "site.direct_link_enabled"
 
 	// ---- 分享与取件 ----
 
@@ -215,6 +217,14 @@ var registry = []Descriptor{
 		Kind: KindEnum, Default: SystemModeBoth,
 		Enum:  []string{SystemModeBoth, SystemModeFilesOnly},
 		Scope: ScopeHot,
+	},
+	{
+		Key: KeyDirectLinkEnabled, Section: "site", Title: "启用直链",
+		Help: "总开关。关闭后全部已有直链失效，禁止创建、查看、修改与删除，前端隐藏直链入口；" +
+			"已有记录保留，重新启用后按原有状态恢复。" +
+			"直链与分享不同：它的出口由服务器中转解密，全部下行流量走本站，" +
+			"因此这是一个需要显式打开的公开入口。",
+		Kind: KindBool, Default: "false", Scope: ScopeHot,
 	},
 
 	// ---- 分享与取件 ----
@@ -565,6 +575,9 @@ type SiteRuntime struct {
 	// 判断邮件侧是否可用一律用 MailEnabled，不要直接比字符串：脏值不该让
 	// 邮件侧凭空消失。
 	SystemMode string
+	// DirectLinkEnabled 是直链的总开关。关闭时用户侧一律 404，而不是 403——
+	// 与系统模式关闭邮件同一套语义：不向访客泄露「这里有个被关掉的功能」。
+	DirectLinkEnabled bool
 }
 
 // MailEnabled 表示邮件侧是否对外提供。文件侧恒常提供，没有对应的判定。
@@ -829,10 +842,11 @@ func buildRuntime(overlays map[Key]string) Runtime {
 	return Runtime{
 		Raw: full,
 		Site: SiteRuntime{
-			Name:          get(KeySiteName),
-			GuestDownload: boolean(KeyGuestDownload),
-			GuestPreview:  boolean(KeyGuestPreview),
-			SystemMode:    systemMode,
+			Name:              get(KeySiteName),
+			GuestDownload:     boolean(KeyGuestDownload),
+			GuestPreview:      boolean(KeyGuestPreview),
+			SystemMode:        systemMode,
+			DirectLinkEnabled: boolean(KeyDirectLinkEnabled),
 		},
 		Share: ShareRuntime{
 			PickupTTL:        pickupTTL,

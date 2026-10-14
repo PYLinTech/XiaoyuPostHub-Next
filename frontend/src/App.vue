@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { applyDocumentTitle } from "@/router";
 import AppSideNav from "@/components/AppSideNav.vue";
@@ -42,6 +42,25 @@ watch(
     }
   },
 );
+
+// 同步管理员在其他页面/会话修改的公开功能开关。
+let siteRefreshTimer: ReturnType<typeof setInterval> | undefined;
+function refreshSiteInfo(): void {
+  if (document.visibilityState === "visible") void session.reloadSiteInfo();
+}
+onMounted(() => {
+  window.addEventListener("focus", refreshSiteInfo);
+  document.addEventListener("visibilitychange", refreshSiteInfo);
+  siteRefreshTimer = setInterval(refreshSiteInfo, 15000);
+});
+onUnmounted(() => {
+  window.removeEventListener("focus", refreshSiteInfo);
+  document.removeEventListener("visibilitychange", refreshSiteInfo);
+  clearInterval(siteRefreshTimer);
+});
+watch(() => session.directLinksEnabled.value, (enabled) => {
+  if (!enabled && route.name === "direct-links") void router.replace({ name: "files" });
+});
 
 // 滚动条挂在真正的滚动容器上（顶栏下面那块内容区，见 app.css 的 .shell 一节）：
 // 滑块的轨道因此只覆盖那块区域，而不是整页。

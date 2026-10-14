@@ -56,6 +56,7 @@ const userItems: NavItem[] = [
     badge: () => mail.state.unreadInbox,
   },
   { label: "我的分享", to: "/shares", icon: "share", auth: true, perm: Perm.Share },
+  { label: "直链", to: "/direct-links", icon: "link", auth: true },
   { label: "取件码", to: "/pickup", icon: "key" },
   { label: "归档", to: "/archive", icon: "trash", auth: true },
 ];
@@ -68,6 +69,7 @@ const userItems: NavItem[] = [
  * 写在同一处。
  */
 function blockedByMode(item: NavItem): boolean {
+  if (item.to === "/direct-links") return !session.directLinksEnabled.value;
   if (!item.to.startsWith("/mail") && !item.to.startsWith("/admin/mail")) {
     return false;
   }

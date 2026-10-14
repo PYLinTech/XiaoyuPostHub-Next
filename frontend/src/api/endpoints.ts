@@ -12,6 +12,7 @@ import type {
   ConfigEntry,
   DatabaseStats,
   DeliveryPlan,
+  DirectLink,
   GuestTarget,
   GuestShare,
   Group,
@@ -539,7 +540,53 @@ export const adminApi = {
     }),
 };
 
-// ---------------------------------------------------------------- 直链取密文
+// ---------------------------------------------------------------- 直链管理
+
+/**
+ * 直链的对外地址。
+ *
+ * 刻意放在 /d/ 而不是 /api/：直链是数据面入口，返回的是**解密后的明文字节**，
+ * 请求方是 wget、播放器、第三方脚本这类不跑本站前端的裸 HTTP 客户端。
+ * /s/{id} 返回页面、/api/* 返回 JSON，都不适合它。
+ */
+export function directLinkUrl(id: string, origin = window.location.origin): string {
+  return `${origin}/d/${encodeURIComponent(id)}`;
+}
+
+interface CreateDirectLinkInput {
+  path: string;
+  expiresAt?: number;
+  maxHits?: number;
+}
+
+export interface UpdateDirectLinkInput {
+  expectUpdatedAt?: number;
+  expiresAt?: number;
+  maxHits?: number;
+  disabled?: boolean;
+}
+
+export const directLinkApi = {
+  target: (id: string) => request<{ path: string }>(`/api/direct-link/${encodeURIComponent(id)}/target`),
+  create: (input: CreateDirectLinkInput) =>
+    request<{ link: DirectLink }>("/api/direct-link", { method: "POST", body: input }),
+  list: (limit = 100, offset = 0) =>
+    request<{ items: DirectLink[] }>("/api/direct-link", { query: { limit, offset } }),
+  update: (id: string, input: UpdateDirectLinkInput) =>
+    request<{ link: DirectLink }>(`/api/direct-link/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: input,
+    }),
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/api/direct-link/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** 「文件 → 直链」的反向查询：这份内容上挂了哪些直链。 */
+  forChecksums: (checksums: string[]) =>
+    request<{ items: DirectLink[] }>("/api/direct-link/nodes", {
+      query: { checksums: checksums.join(",") },
+    }),
+};
+
+// ---------------------------------------------------------------- 密文直链（123 侧）
 
 /**
  * 从密文直链读取一段字节。

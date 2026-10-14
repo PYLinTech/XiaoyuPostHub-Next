@@ -140,7 +140,7 @@ func recoverer(next http.Handler) http.Handler {
 // 真正需要看的 API 调用淹掉，而静态资源的问题（404、缓存）在浏览器侧更容易看。
 func accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAPIPath(r.URL.Path) {
+		if !needsIdentity(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -153,6 +153,22 @@ func accessLog(next http.Handler) http.Handler {
 
 func isAPIPath(p string) bool {
 	return strings.HasPrefix(p, "/api/")
+}
+
+// isDirectLinkPath 是直链数据面（/d/{token}）。
+//
+// 与 /api/* 分开判定：它返回的是文件字节而不是 JSON，既不该被 JSON 404
+// 接管，也不该落进 SPA 的 index.html 兜底。但它**确实**需要请求身份——
+// 访客流量按 IP 前缀分桶计费，票据归属也要比对身份。
+func isDirectLinkPath(p string) bool {
+	return strings.HasPrefix(p, "/d/")
+}
+
+// needsIdentity 是需要解析请求身份的路径集合：API 与直链数据面。
+//
+// 其余路径（静态资源与前端路由）刻意不解析身份，理由见 withIdentity 的注释。
+func needsIdentity(p string) bool {
+	return isAPIPath(p) || isDirectLinkPath(p)
 }
 
 type statusRecorder struct {
@@ -190,7 +206,7 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 // 与真实原因（令牌过期）毫无关系，极难定位。
 func (s *Server) withIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAPIPath(r.URL.Path) {
+		if !needsIdentity(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -230,7 +246,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		// API 响应已由 writeJSON 设置 no-store；这里覆盖所有未经过该
 		// 帮助函数的 API 响应（例如 CDN 鉴权），避免票据被中间层缓存。
-		if isAPIPath(r.URL.Path) {
+		if needsIdentity(r.URL.Path) {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)

@@ -49,13 +49,19 @@ const (
 	// 能改域名的管理员未必该有权删掉别人已注册的地址——那会让外部发信人
 	// 立刻收到退信，而误删的代价不由管理员承担。
 	AdminUnbind
+	// DirectLink 允许创建直链。
+	//
+	// 与 Share 并列但独立成位：直链的出口是服务端中转解密，流量从服务器出去，
+	// 代价与暴露面都高于「浏览器本地解密」的分享。它是追加位而不是插在
+	// Share 旁边——改动既有位会让存量组的语义漂移。
+	DirectLink
 )
 
 // All 是全部已定义权限的并集。
 const All Bit = Upload | Download | Preview | Share | Pickup | ManageOwnNodes |
 	BypassQuota | AdminFiles | AdminUsers | AdminGroups | AdminAnnouncements |
 	AdminInvites | AdminStorage | AdminSystem | AdminAudit |
-	MailAccess | AdminMail | AdminUnbind
+	MailAccess | AdminMail | AdminUnbind | DirectLink
 
 // Has 判断掩码中是否包含指定权限。
 func Has(mask int64, bit Bit) bool {
@@ -113,7 +119,7 @@ func BuiltinGroups() []BuiltinGroup {
 		{
 			Name:        GroupNormal,
 			DisplayName: "普通用户",
-			Permissions: Of(Upload, Download, Preview, Share, Pickup, ManageOwnNodes, MailAccess),
+			Permissions: Of(Upload, Download, Preview, Share, Pickup, DirectLink, ManageOwnNodes, MailAccess),
 			Priority:    100,
 		},
 		{

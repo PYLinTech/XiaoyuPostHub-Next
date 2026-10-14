@@ -5,6 +5,7 @@ import "testing"
 func TestShareNameMigrationEnablesExistingSharesByDefault(t *testing.T) {
 	db := openTestDB(t)
 	rewindTrafficBillingSchema(t, db)
+	rewindDirectLinkSchema(t, db)
 	mustExec(t, db, `INSERT INTO user_groups(name,display_name,is_builtin,permissions,priority,created_at) VALUES('normal','普通用户',1,32831,100,1)`)
 	mustExec(t, db, `INSERT INTO users(id,account,password_hash,group_name,created_at,updated_at) VALUES(1,'legacy','x','normal',1,1)`)
 	mustExec(t, db, `ALTER TABLE shares DROP COLUMN show_sharer_name`)

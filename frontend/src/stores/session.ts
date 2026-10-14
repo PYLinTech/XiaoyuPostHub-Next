@@ -173,15 +173,21 @@ export async function changePassword(oldPassword: string, newPassword: string): 
   await authApi.changePassword(oldPassword, newPassword);
 }
 
+let siteInfoRevision = 0;
+
 /** 重新拉取站点公开信息（改过站点名或配置后调用）。 */
 export async function reloadSiteInfo(): Promise<void> {
+  const revision = ++siteInfoRevision;
   try {
-    state.setup = await setupApi.state();
-    state.siteName = state.setup.siteName;
+    const setup = await setupApi.state();
+    if (revision !== siteInfoRevision) return;
+    const changed = JSON.stringify(state.setup) !== JSON.stringify(setup);
+    state.setup = setup;
+    state.siteName = setup.siteName;
     // 邮件门禁的两个条件都在 setup 里，整个对象换掉即��重新取值：
     // 管理员在系统配置里改完设置回来，侧栏的邮件入口会立刻按新状态出现或消失，
     // 不必等重新登录或刷新页面。
-    notify();
+    if (changed) notify();
   } catch (err) {
     if (err instanceof ApiError) {
       // 无权限或后端不可用时保持旧值。
@@ -229,6 +235,7 @@ export function useSession() {
     /** 访客也会拿到访客组的权限位，因此这个判断对未登录用户同样有意义。 */
     can: (bit: number) => hasPerm(state.permissions, bit),
     isAdmin: computed(() => hasPerm(state.permissions, Perm.AdminAudit) || hasPerm(state.permissions, Perm.AdminUsers)),
+    directLinksEnabled: computed(() => state.setup?.directLinkEnabled === true),
     /**
      * 用户侧邮件是否可用——必须与后端 Runtime.MailAvailable 同口径：
      * 模式为「文件与邮件」**且**开启了收件。

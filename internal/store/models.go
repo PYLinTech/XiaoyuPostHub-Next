@@ -375,14 +375,18 @@ type Ticket struct {
 	ShareID         string       `json:"-"`
 	PickupCode      string       `json:"-"`
 	ResourcePath    string       `json:"-"`
-	ID              string       `json:"id"`
-	FileChecksum    string       `json:"checksum"`
-	ActorType       ActorType    `json:"actorType"`
-	UserID          int64        `json:"userId,omitempty"`
-	ClientIP        string       `json:"-"`
-	IPPrefix        string       `json:"-"`
-	GroupName       string       `json:"groupName"`
-	Purpose         Purpose      `json:"purpose"`
+	// DirectLinkID 标记这张票据由哪条直链签发。直链按实发字节结算，
+	// 优先扣创建者的分享额度，不足时回落访问者额度。
+	DirectLinkID string `json:"-"`
+
+	ID           string    `json:"id"`
+	FileChecksum string    `json:"checksum"`
+	ActorType    ActorType `json:"actorType"`
+	UserID       int64     `json:"userId,omitempty"`
+	ClientIP     string    `json:"-"`
+	IPPrefix     string    `json:"-"`
+	GroupName    string    `json:"groupName"`
+	Purpose      Purpose   `json:"purpose"`
 	// DeliveryMode 是本次交付的通道与字节形态。直链与中转加密下发密文，中转解密下发明文。
 	DeliveryMode  TicketDeliveryMode `json:"-"`
 	ReservedBytes int64              `json:"-"`
@@ -411,6 +415,7 @@ type TrafficLog struct {
 	ResourcePath    string       `json:"resourcePath,omitempty"`
 	ShareID         string       `json:"shareId,omitempty"`
 	PickupCode      string       `json:"pickupCode,omitempty"`
+	DirectLinkID    string       `json:"directLinkId,omitempty"`
 	OccurredAt      int64        `json:"occurredAt"`
 }
 
@@ -521,6 +526,34 @@ type PickupCode struct {
 	Disabled  bool  `json:"disabled"`
 	CreatedBy int64 `json:"createdBy,omitempty"`
 	CreatedAt int64 `json:"createdAt"`
+}
+
+// DirectLink 是一条直链：分享的直链版本。
+//
+// 与分享的差别只有两处，其余（有效期、次数上限、停用、乐观锁）口径一致。
+// 绑定的是**内容哈希 + 创建者**，不是逻辑路径也不是存储侧定位符，所以重命名
+// 与跨目录移动都不影响它；反向的失效由内容池状态与删除联动承担。
+type DirectLink struct {
+	ID           string `json:"id"`
+	OwnerID      int64  `json:"ownerId"`
+	FileChecksum string `json:"checksum"`
+	// 以下是创建时的快照，只用于展示与响应头，不参与有效性判定。
+	SourcePath string `json:"sourcePath,omitempty"`
+	SourceName string `json:"sourceName"`
+	MimeType   string `json:"mimeType,omitempty"`
+	SizePlain  int64  `json:"size"`
+	// ExpiresAt 为 0 表示永久；MaxHits 为 0 表示不限。
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
+	MaxHits   int   `json:"maxHits"`
+	Hits      int   `json:"hits"`
+	Disabled  bool  `json:"disabled"`
+	CreatedAt int64 `json:"createdAt"`
+	// UpdatedAt 是乐观锁版本，每次更新自增。
+	UpdatedAt int64 `json:"updatedAt,omitempty"`
+	// TargetAvailable 不持久化：列表时按绑定内容是否仍可用填充。
+	// 内容被删除或拉黑后直链仍然存在（记录可查、可删），但已经交付不出字节，
+	// 管理界面必须把两者区分开，否则用户会反复复制一条必然 403 的链接。
+	TargetAvailable bool `json:"targetAvailable"`
 }
 
 // AuditLog 是一条管理动作审计。

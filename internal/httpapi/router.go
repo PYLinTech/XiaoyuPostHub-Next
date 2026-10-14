@@ -68,6 +68,23 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/p/{code}/resolve", s.handlePickupResolve)
 	mux.HandleFunc("POST /api/p/{code}/download", s.handlePickupDownload)
 
+	// ---- 直链 ----
+	mux.HandleFunc("POST /api/direct-link", s.directLinksOnly(s.handleCreateDirectLink))
+	mux.HandleFunc("GET /api/direct-link", s.directLinksOnly(s.handleListDirectLinks))
+	mux.HandleFunc("PATCH /api/direct-link/{id}", s.directLinksOnly(s.handleUpdateDirectLink))
+	mux.HandleFunc("DELETE /api/direct-link/{id}", s.directLinksOnly(s.handleDeleteDirectLink))
+	mux.HandleFunc("GET /api/direct-link/nodes", s.directLinksOnly(s.handleNodeDirectLinks))
+	mux.HandleFunc("GET /api/direct-link/{id}/target", s.directLinksOnly(s.handleDirectLinkTarget))
+
+	// 直链交付入口。与 /s/{id} 不同：它直接返回文件字节而不是页面，
+	// 因为请求方是 wget、播放器、第三方脚本这类不跑本站前端的裸 HTTP 客户端。
+	//
+	// 必须显式注册。落进下面 mux.Handle("/", s.staticHandler()) 的 SPA 兜底时
+	// 会返回 index.html，贴进 wget 就变成下载一个网页。ServeMux 按模式具体性
+	// 匹配，这两条比 "/" 优先，因此注册位置放在 catch-all 之前只是可读性考虑。
+	mux.HandleFunc("GET /d/{token}", s.directLinksOnly(s.handleDirectLink))
+	mux.HandleFunc("HEAD /d/{token}", s.directLinksOnly(s.handleDirectLink))
+
 	// ---- 邮件（Webmail 阅读链路） ----
 	mux.HandleFunc("GET /api/mail/messages", s.userMailOnly(s.handleMailList))
 	mux.HandleFunc("GET /api/mail/messages/{id}", s.userMailOnly(s.handleMailDetail))
