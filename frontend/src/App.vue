@@ -8,6 +8,7 @@ import AppToast from "@/components/AppToast.vue";
 import AppTopBar from "@/components/AppTopBar.vue";
 import { closeFilePreview } from "@/stores/preview";
 import AppFilePreview from "@/components/AppFilePreview.vue";
+import AppDownloadBrowserGuide from "@/components/AppDownloadBrowserGuide.vue";
 import AppTransferDock from "@/components/AppTransferDock.vue";
 import { useOverlayScroll } from "@/lib/overlayScroll";
 import { onSessionChange, useSession } from "@/stores/session";
@@ -158,6 +159,7 @@ void loadAnnouncements();
 
   <AppFilePreview />
   <AppTransferDock />
+  <AppDownloadBrowserGuide />
   <AppToast />
 </template>
 

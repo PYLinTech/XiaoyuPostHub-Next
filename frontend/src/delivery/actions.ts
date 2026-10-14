@@ -3,6 +3,7 @@ import { addDownload, canCancelDownload } from "@/stores/downloads";
 import { ref } from "vue";
 import { saveBlob, type DeliverySource } from "./download";
 import { describeError, isAbortError, logError } from "@/lib/async";
+import { confirmDownloadBrowser } from "@/stores/downloadBrowser";
 import { useToasts } from "@/stores/toast";
 
 // 下载动作的封装。
@@ -14,16 +15,12 @@ import { useToasts } from "@/stores/toast";
 export function useDeliveryAction() {
   const busy = ref(false);
 
-  async function run(source: DeliverySource, options: { silent?: boolean; fileName?: string } = {}): Promise<boolean> {
-    if (busy.value) {
-      return false;
-    }
+  async function perform(source: DeliverySource, options: { silent?: boolean; fileName?: string } = {}): Promise<boolean> {
     const toasts = useToasts();
     const abort = new AbortController();
     const item = addDownload(options.fileName ?? "正在准备文件", () => {
       if (canCancelDownload(item)) abort.abort();
     });
-    busy.value = true;
 
     try {
       const result = await runDelivery({
@@ -63,9 +60,26 @@ export function useDeliveryAction() {
       return false;
     } finally {
       item.cancel = () => {};
+    }
+  }
+
+  async function runBatch(entries: { source: DeliverySource; fileName?: string; silent?: boolean }[]): Promise<boolean> {
+    if (busy.value || entries.length === 0) return false;
+    busy.value = true;
+    try {
+      if (!await confirmDownloadBrowser()) return false;
+      for (const { source, ...options } of entries) {
+        if (!await perform(source, options)) return false;
+      }
+      return true;
+    } finally {
       busy.value = false;
     }
   }
 
-  return { busy, run };
+  function run(source: DeliverySource, options: { silent?: boolean; fileName?: string } = {}): Promise<boolean> {
+    return runBatch([{ source, ...options }]);
+  }
+
+  return { busy, run, runBatch };
 }

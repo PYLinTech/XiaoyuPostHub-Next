@@ -20,6 +20,8 @@ const props = withDefaults(
   defineProps<{
     open: boolean;
     title?: string;
+    /** 自定义正文标题的弹窗可隐藏标准头部。 */
+    hideHeader?: boolean;
     wide?: boolean;
     /** 特定弹窗的内容布局样式，应用到 Teleport 内的实际面板。 */
     panelClass?: string;
@@ -210,7 +212,8 @@ const {
         :class="{ 'modal--compact': compact }"
         role="dialog"
         aria-modal="true"
-        :aria-labelledby="title ? titleId : undefined"
+        :aria-labelledby="!hideHeader && title ? titleId : undefined"
+        :aria-label="hideHeader ? title : undefined"
       >
         <div class="modal__backdrop" @click="dismissible && closeOnBackdrop && emit('close')" />
         <div
@@ -219,7 +222,7 @@ const {
           :class="[{ 'modal__panel--wide': wide, 'modal__panel--compact': compact }, panelClass]"
           tabindex="-1"
         >
-          <header class="modal__head">
+          <header v-if="!hideHeader" class="modal__head">
             <h2 :id="titleId" class="modal__title">{{ title }}</h2>
             <!-- 头部操作与关闭同属右上角那一组，一起右对齐；操作按钮由调用方
                  从 #actions 传进来，于是常驻操作不必再占一条底部操作栏。 -->

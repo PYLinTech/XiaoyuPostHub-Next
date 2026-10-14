@@ -295,13 +295,10 @@ async function downloadSelected(): Promise<void> {
     toasts.info("选中的项里没有文件");
     return;
   }
-  for (const item of targets) {
-    const ok = await downloads.run(fileDeliverySource(item.path, "download"), { silent: true, fileName: item.name });
-    if (!ok) {
-      toasts.error(`批量下载中断于 ${item.name}`);
-      return;
-    }
-  }
+  const ok = await downloads.runBatch(targets.map(item => ({
+    source: fileDeliverySource(item.path, "download"), silent: true, fileName: item.name,
+  })));
+  if (!ok) return;
   toasts.success(`已下载 ${targets.length} 个文件`);
 }
 
