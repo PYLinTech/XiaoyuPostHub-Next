@@ -164,6 +164,7 @@ export interface Announcement {
 }
 
 export interface Share {
+  customMarkdown: string;
   id: string;
   ownerId: number;
   rootPath: string;
@@ -183,7 +184,7 @@ export interface Share {
 }
 
 /** 访客解析接口的脱敏视图，不包含属主账号与绝对路径。 */
-export interface GuestShare extends Pick<Share, "id" | "kind" | "accessMode" | "hasPassword" | "allowDownload" | "allowPreview" | "allowSubpath" | "expiresAt" | "maxVisits" | "visits"> {
+export interface GuestShare extends Pick<Share, "customMarkdown" | "id" | "kind" | "accessMode" | "hasPassword" | "allowDownload" | "allowPreview" | "allowSubpath" | "expiresAt" | "maxVisits" | "visits"> {
   rootName: string;
   isOwner: boolean;
   sharerName?: string;
@@ -223,6 +224,9 @@ export interface InviteUse {
 }
 
 export interface TrafficLog {
+  billedUserId?: number;
+  billedGroupName?: string;
+  quotaScope?: string;
   id: number;
   actorType: ActorType;
   userId?: number;

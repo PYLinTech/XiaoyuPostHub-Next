@@ -39,7 +39,8 @@ const QUOTA_META: Array<{ key: string; label: string; bytes: boolean; hint: stri
   // 口径必须写准：日流量的计数键是 DayKey(...) 即 UTC 日期（store/db.go），
   // 额度在 UTC 00:00 归零。写成"按自然日重置"会让东八区管理员以为归零点是
   // 本地 00:00，实际却是早上 8 点。
-  { key: "traffic.daily.download", label: "每日下载流量", bytes: true, hint: "按 UTC 自然日重置（UTC 00:00 归零，非本地零点）" },
+  { key: "traffic.daily.download", label: "每人每日个人下载流量", bytes: true, hint: "自有文件、邮件附件、自己的分享及分享额度不足时的访问；下载与预览共用，按密文流量计量，UTC 00:00 重置" },
+  { key: "traffic.daily.share", label: "每人每日分享流量", bytes: true, hint: "其他用户及访客访问时由分享创建者承担；所有分享与取件码合计，优先扣创建者，不足时整笔转扣访问者，下载与预览共用；UTC 00:00 重置" },
   { key: "count.pending_uploads", label: "上传最大任务数", bytes: false, hint: "每个文件算一个任务；同一文件的分片并发不另计" },
   // 邮件配额与文件配额相互独立：收件域名在本组的「收件」一栏里设置，
   // 这两项决定每个用户能在这些域名下建多少地址、占多少邮件存储。
@@ -608,6 +609,7 @@ function deleteByName(name: string): void {
 
           <section>
             <h3 class="section__title">配额</h3>
+            <p class="notice">流量优先级：访问权限 → 创建者分享额度 → 访问者个人额度（访客按 IP 前缀计量）。本人访问直接扣个人额度。下载与预览共用；流量方面的“不受配额限制”仅豁免个人额度。取消勾选表示不限，0 表示该额度不可用。</p>
             <div class="stack--tight">
               <div v-for="meta in QUOTA_META" :key="meta.key" class="quota-row">
                 <label class="check">

@@ -79,7 +79,8 @@ function localPreviewWorkerPlugin(worker = false): Plugin {
 export default defineConfig({
   plugins: [vue(), serviceWorkerPlugin(), localPreviewWorkerPlugin(), pdfAssetsPlugin()],
   worker: { format: "es", plugins: () => [localPreviewWorkerPlugin(true)] },
-  optimizeDeps: { exclude: ["@eternalheart/vue-file-preview", "pptx-preview"] },
+  // 预览库保持按需加载；其 CommonJS 依赖须预打包，避免开发模式缺少 default 导出。
+  optimizeDeps: { include: ["jszip"], exclude: ["@eternalheart/vue-file-preview", "pptx-preview"] },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

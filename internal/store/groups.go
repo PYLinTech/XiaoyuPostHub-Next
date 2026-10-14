@@ -18,7 +18,9 @@ const (
 	QuotaStorageTotal = "storage.total"
 	// QuotaFileMax 是单文件上限（明文字节）。
 	QuotaFileMax = "file.max"
-	// QuotaTrafficDailyDown 是每日下载流量上限（明文字节）。
+	// QuotaTrafficDailyShare 是每位用户每日对外分享的流量上限（密文字节）。
+	QuotaTrafficDailyShare = "traffic.daily.share"
+	// QuotaTrafficDailyDown 是每位用户每日个人下载与预览上限（密文字节）。
 	QuotaTrafficDailyDown = "traffic.daily.download"
 	// QuotaPendingUploads 是该组每个用户可同时进行的上传任务上限。
 	QuotaPendingUploads = "count.pending_uploads"

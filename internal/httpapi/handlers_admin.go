@@ -223,15 +223,16 @@ func (s *Server) handleAdminTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, offset := pagingOf(r)
 	items, total, err := s.Svc.AdminListTraffic(r.Context(), p, store.TrafficFilter{
-		ActorType: store.ActorType(strings.TrimSpace(r.URL.Query().Get("actorType"))),
-		UserID:    int64Query(r, "userId", 0),
-		ClientIP:  strings.TrimSpace(r.URL.Query().Get("clientIp")),
-		GroupName: strings.TrimSpace(r.URL.Query().Get("groupName")),
-		Action:    strings.TrimSpace(r.URL.Query().Get("action")),
-		From:      timeQuery(r, "from"),
-		To:        timeQuery(r, "to"),
-		Limit:     limit,
-		Offset:    offset,
+		BilledUserID: int64Query(r, "billedUserId", 0),
+		ActorType:    store.ActorType(strings.TrimSpace(r.URL.Query().Get("actorType"))),
+		UserID:       int64Query(r, "userId", 0),
+		ClientIP:     strings.TrimSpace(r.URL.Query().Get("clientIp")),
+		GroupName:    strings.TrimSpace(r.URL.Query().Get("groupName")),
+		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
+		From:         timeQuery(r, "from"),
+		To:           timeQuery(r, "to"),
+		Limit:        limit,
+		Offset:       offset,
 	})
 	if err != nil {
 		fail(w, err)

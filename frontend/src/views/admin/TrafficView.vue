@@ -24,6 +24,7 @@ const offset = ref(0);
 const filters = reactive({
   actorType: "",
   userId: "",
+  billedUserId: "",
   clientIp: "",
   groupName: "",
   action: "",
@@ -40,7 +41,10 @@ const ACTOR_TYPES = [
 const columns: Column[] = [
   { key: "occurredAt", label: "时间", mobile: "title", width: "160px" },
   { key: "actor", label: "访问者", width: "150px" },
-  { key: "groupName", label: "用户组", width: "110px" },
+  { key: "groupName", label: "访问者组", width: "110px" },
+  { key: "billedActor", label: "流量承担者", width: "150px" },
+  { key: "billedGroupName", label: "计费组", width: "110px" },
+  { key: "billingBucket", label: "额度来源", width: "110px" },
   { key: "action", label: "动作", width: "120px" },
   { key: "bytesPlain", label: "明文大小", align: "right", width: "100px" },
   { key: "bytesWire", label: "密文大小", align: "right", width: "100px" },
@@ -55,6 +59,9 @@ const rows = computed<Record<string, unknown>[]>(() =>
     // 访客没有账号，身份只能由 IP 表达：配额与限流本身也是按 IP 计量的。
     actor: item.actorType === "guest" ? `访客（${item.clientIp || "未知 IP"}）` : `用户 #${item.userId ?? "—"}`,
     groupName: item.groupName || "—",
+    billedActor: item.billedUserId ? `用户 #${item.billedUserId}` : item.quotaScope ? '访客 IP 额度' : item.userId ? `用户 #${item.userId}` : '访客 IP 额度',
+    billedGroupName: item.billedGroupName || item.groupName || "—",
+    billingBucket: item.quotaScope === 'traffic_share' ? '创建者分享额度' : item.quotaScope === 'traffic_down' ? '个人下载额度' : item.action === 'upload' ? '上传统计' : item.action.startsWith('mail_') ? '邮件统计' : '历史下载口径',
     action: item.action,
     bytesPlain: formatBytes(item.bytesPlain),
     bytesWire: formatBytes(item.bytesWire),
@@ -72,6 +79,7 @@ function buildQuery(): TrafficQuery {
   if (filters.userId.trim()) {
     query.userId = Number(filters.userId.trim());
   }
+  if (filters.billedUserId.trim()) query.billedUserId = Number(filters.billedUserId.trim());
   if (filters.clientIp.trim()) {
     query.clientIp = filters.clientIp.trim();
   }
@@ -92,7 +100,7 @@ function buildQuery(): TrafficQuery {
   return query;
 }
 
-const userIdInvalid = computed(() => !!filters.userId.trim() && !/^\d+$/.test(filters.userId.trim()));
+const userIdInvalid = computed(() => [filters.userId, filters.billedUserId].some(value => !!value.trim() && !/^\d+$/.test(value.trim())));
 
 const gate = createRequestGate();
 
@@ -124,6 +132,7 @@ async function search(): Promise<void> {
 function reset(): void {
   filters.actorType = "";
   filters.userId = "";
+  filters.billedUserId = "";
   filters.clientIp = "";
   filters.groupName = "";
   filters.action = "";
@@ -161,6 +170,7 @@ onMounted(search);
         aria-label="动作"
       />
       <template #extra>
+        <input v-model="filters.billedUserId" class="input tf-ip" inputmode="numeric" placeholder="流量承担者编号" aria-label="流量承担者编号" />
         <input
           v-model="filters.clientIp"
           class="input tf-ip"

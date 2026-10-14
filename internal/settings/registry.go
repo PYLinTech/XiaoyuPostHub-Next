@@ -25,6 +25,9 @@ const (
 
 	// ---- 分享与取件 ----
 
+	// KeyShareMarkdownMaxChars 是分享自定义 Markdown 的 Unicode 字符上限。
+	KeyShareMarkdownMaxChars Key = "share.markdown_max_chars"
+
 	// KeySharePickupTTLHours 取件码有效期（小时）。0 表示永久。
 	// 有效期自取件码创建时起算并在每次校验时动态判定，因此改小后，
 	// 已超出新期限的存量取件码立即失效，不需要数据迁移。
@@ -215,6 +218,11 @@ var registry = []Descriptor{
 	},
 
 	// ---- 分享与取件 ----
+	{
+		Key: KeyShareMarkdownMaxChars, Section: "share", Title: "分享自定义内容最大字符数",
+		Help: "Markdown 内容的字符上限，输入与文件导入共用；中文和 emoji 按 Unicode 字符计数。调整后对新建或修改内容生效。",
+		Kind: KindInt, Default: "524288", Min: 1, Max: 16777216, Scope: ScopeHot,
+	},
 	{
 		Key: KeySharePickupTTLHours, Section: "share", Title: "取件码有效期（小时）",
 		Help: "取件码自创建起的有效时长，按小时计；填 0 表示永久有效。" +
@@ -564,6 +572,7 @@ func (s SiteRuntime) MailEnabled() bool { return s.SystemMode != SystemModeFiles
 
 // ShareRuntime 是分享与取件码相关配置。
 type ShareRuntime struct {
+	MarkdownMaxChars int
 	// PickupTTL 取件码有效期；0 表示永久。取件码的到期时间按
 	// created_at + PickupTTL 在每次校验时动态计算，配置改小即时生效。
 	PickupTTL time.Duration
@@ -826,7 +835,8 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			SystemMode:    systemMode,
 		},
 		Share: ShareRuntime{
-			PickupTTL: pickupTTL,
+			PickupTTL:        pickupTTL,
+			MarkdownMaxChars: int(num(KeyShareMarkdownMaxChars)),
 		},
 		Auth: AuthRuntime{
 			RegisterMode:      get(KeyRegisterMode),

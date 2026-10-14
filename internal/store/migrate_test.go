@@ -138,7 +138,9 @@ func normalizeSQL(s string) string {
 // rewindToBaselineSchema 把全新库降回已发布的 v2 结构，供测试完整上传平台迁移。
 func rewindToBaselineSchema(t *testing.T, db *DB) {
 	t.Helper()
+	rewindTrafficBillingSchema(t, db)
 	for _, stmt := range []string{
+		`ALTER TABLE shares DROP COLUMN custom_markdown`,
 		`ALTER TABLE shares DROP COLUMN show_sharer_name`,
 		`ALTER TABLE upload_tasks DROP COLUMN expected_checksum`,
 		`DROP TABLE upload_job_parts`,

@@ -367,14 +367,22 @@ const (
 
 // Ticket 是一次下载/预览授权。
 type Ticket struct {
-	ID           string    `json:"id"`
-	FileChecksum string    `json:"checksum"`
-	ActorType    ActorType `json:"actorType"`
-	UserID       int64     `json:"userId,omitempty"`
-	ClientIP     string    `json:"-"`
-	IPPrefix     string    `json:"-"`
-	GroupName    string    `json:"groupName"`
-	Purpose      Purpose   `json:"purpose"`
+	// QuotaScope / QuotaKey 冻结预扣桶和日期；退款不再根据访问者或当前组重算。
+	QuotaScope      CounterScope `json:"-"`
+	QuotaKey        string       `json:"-"`
+	BilledUserID    int64        `json:"-"`
+	BilledGroupName string       `json:"-"`
+	ShareID         string       `json:"-"`
+	PickupCode      string       `json:"-"`
+	ResourcePath    string       `json:"-"`
+	ID              string       `json:"id"`
+	FileChecksum    string       `json:"checksum"`
+	ActorType       ActorType    `json:"actorType"`
+	UserID          int64        `json:"userId,omitempty"`
+	ClientIP        string       `json:"-"`
+	IPPrefix        string       `json:"-"`
+	GroupName       string       `json:"groupName"`
+	Purpose         Purpose      `json:"purpose"`
 	// DeliveryMode 是本次交付的通道与字节形态。直链与中转加密下发密文，中转解密下发明文。
 	DeliveryMode  TicketDeliveryMode `json:"-"`
 	ReservedBytes int64              `json:"-"`
@@ -388,18 +396,22 @@ type Ticket struct {
 
 // TrafficLog 是一条流量明细。
 type TrafficLog struct {
-	ID           int64     `json:"id"`
-	ActorType    ActorType `json:"actorType"`
-	UserID       int64     `json:"userId,omitempty"`
-	ClientIP     string    `json:"clientIp,omitempty"`
-	GroupName    string    `json:"groupName"`
-	Action       string    `json:"action"`
-	BytesPlain   int64     `json:"bytesPlain"`
-	BytesWire    int64     `json:"bytesWire"`
-	ResourcePath string    `json:"resourcePath,omitempty"`
-	ShareID      string    `json:"shareId,omitempty"`
-	PickupCode   string    `json:"pickupCode,omitempty"`
-	OccurredAt   int64     `json:"occurredAt"`
+	// 访问者与承担流量的用户独立记录；分享流量归属创建者。
+	BilledUserID    int64        `json:"billedUserId,omitempty"`
+	BilledGroupName string       `json:"billedGroupName,omitempty"`
+	QuotaScope      CounterScope `json:"quotaScope,omitempty"`
+	ID              int64        `json:"id"`
+	ActorType       ActorType    `json:"actorType"`
+	UserID          int64        `json:"userId,omitempty"`
+	ClientIP        string       `json:"clientIp,omitempty"`
+	GroupName       string       `json:"groupName"`
+	Action          string       `json:"action"`
+	BytesPlain      int64        `json:"bytesPlain"`
+	BytesWire       int64        `json:"bytesWire"`
+	ResourcePath    string       `json:"resourcePath,omitempty"`
+	ShareID         string       `json:"shareId,omitempty"`
+	PickupCode      string       `json:"pickupCode,omitempty"`
+	OccurredAt      int64        `json:"occurredAt"`
 }
 
 // TrafficDaily 是一个主体某一天的流量聚合。
@@ -420,6 +432,8 @@ const (
 	// ScopeStorage 是存储占用计数器，key 形如 "user:12"。
 	ScopeStorage     CounterScope = "storage"
 	ScopeTrafficDown CounterScope = "traffic_down"
+	// ScopeTrafficShare 是每个分享创建者的每日对外分享流量，独立于个人下载。
+	ScopeTrafficShare CounterScope = "traffic_share"
 	// ScopeMailStorage 是邮件存储占用计数器，与文件配额完全独立。
 	ScopeMailStorage CounterScope = "mail_storage"
 )
@@ -469,6 +483,7 @@ type InviteUse struct {
 
 // Share 是一次分享。
 type Share struct {
+	CustomMarkdown string     `json:"customMarkdown"`
 	ID             string     `json:"id"`
 	OwnerID        int64      `json:"ownerId"`
 	RootPath       string     `json:"rootPath"`

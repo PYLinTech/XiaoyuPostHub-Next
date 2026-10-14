@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import ShareMarkdownEditor from "@/components/ShareMarkdownEditor.vue";
 import AppButton from "@/components/ui/AppButton.vue";
 import AppDateTimePicker from "@/components/ui/AppDateTimePicker.vue";
 import AppEmpty from "@/components/ui/AppEmpty.vue";
@@ -90,7 +91,7 @@ const {
   loading: listLoading,
   error: listError,
   run: loadShares,
-} = useAsync(() => shareApi.list(limit.value, offset.value), { items: [] as Share[] });
+} = useAsync(() => shareApi.list(limit.value, offset.value), { items: [] as Share[], markdownMaxChars: 524288 });
 
 // 后端的列表接口只回 items、不回总数，因此分页只能"有下一页就翻"。
 watch([limit, offset], () => {
@@ -150,6 +151,7 @@ async function copyLink(share: Share): Promise<void> {
 const formOpen = ref(false);
 const editing = ref<Share | null>(null);
 const saving = ref(false);
+const importingMarkdown = ref(false);
 const formError = ref("");
 
 const form = reactive({
@@ -160,6 +162,7 @@ const form = reactive({
   allowDownload: true,
   allowPreview: true,
   allowSubpath: true,
+  customMarkdown: "",
   showSharerName: true,
   expiresAtLocal: "",
   maxVisits: "0",
@@ -176,7 +179,8 @@ function openCreate(path: string, kind: ShareKind): void {
     allowDownload: true,
     allowPreview: true,
     allowSubpath: true,
-    showSharerName: true,
+    customMarkdown: "",
+  showSharerName: true,
     expiresAtLocal: "",
     maxVisits: "0",
     disabled: false,
@@ -196,6 +200,7 @@ function openEdit(share: Share): void {
     allowDownload: share.allowDownload,
     allowPreview: share.allowPreview,
     allowSubpath: share.allowSubpath,
+    customMarkdown: share.customMarkdown ?? "",
     showSharerName: share.showSharerName,
     expiresAtLocal: unixToDateTimeLocal(share.expiresAt),
     maxVisits: String(share.maxVisits),
@@ -215,6 +220,7 @@ const expiresInPast = computed(() => {
  *  maxVisits、expiresAt 这类字段用零值覆盖掉。 */
 function buildPatch(original: Share, expiresAt: number, maxVisits: number): UpdateShareInput {
   const patch: UpdateShareInput = {};
+  if (form.customMarkdown !== (original.customMarkdown ?? "")) patch.customMarkdown = form.customMarkdown;
   if (form.path.trim() !== original.rootPath) {
     patch.path = form.path.trim();
   }
@@ -261,7 +267,12 @@ function buildPatch(original: Share, expiresAt: number, maxVisits: number): Upda
   return patch;
 }
 
+function closeForm(): void {
+  if (!saving.value && !importingMarkdown.value) formOpen.value = false;
+}
+
 async function submit(): Promise<void> {
+  if (importingMarkdown.value) return;
   formError.value = "";
   const expiresAt = dateTimeLocalToUnix(form.expiresAtLocal);
   const parsedVisits = Number.parseInt(form.maxVisits, 10);
@@ -281,6 +292,7 @@ async function submit(): Promise<void> {
     }
   }
 
+  if (Array.from(form.customMarkdown).length > shareData.value.markdownMaxChars) { formError.value = `自定义内容最多允许 ${shareData.value.markdownMaxChars} 个字符`; return; }
   saving.value = true;
   try {
     if (!original) {
@@ -292,6 +304,7 @@ async function submit(): Promise<void> {
         allowDownload: form.allowDownload,
         allowPreview: form.allowPreview,
         allowSubpath: form.kind === "folder" && form.allowSubpath,
+        customMarkdown: form.customMarkdown,
         showSharerName: form.showSharerName,
         expiresAt,
         maxVisits,
@@ -300,7 +313,7 @@ async function submit(): Promise<void> {
     } else {
       const patch = buildPatch(original, expiresAt, maxVisits);
       if (Object.keys(patch).length > 0) {
-        await shareApi.update(original.id, patch);
+        await shareApi.update(original.id, { ...patch, expectUpdatedAt: original.updatedAt });
         toasts.success("已保存修改");
       } else {
         // 改了又改回原值时 patch 是空的：直接关窗会让人以为已经保存过。
@@ -703,8 +716,8 @@ onMounted(() => {
     <AppModal
       :open="formOpen"
       :title="editing ? '编辑分享' : '新建分享'"
-      :dismissible="!saving"
-      @close="formOpen = false"
+      :dismissible="!saving && !importingMarkdown"
+      @close="closeForm"
     >
       <div class="stack">
         <p v-if="formError" class="notice notice--danger">{{ formError }}</p>
@@ -742,6 +755,8 @@ onMounted(() => {
           </FormField>
         </div>
 
+        <ShareMarkdownEditor v-model="form.customMarkdown" :max-chars="shareData.markdownMaxChars" :disabled="saving" @importing="importingMarkdown = $event" />
+
         <div class="stack stack--tight">
           <label class="check">
             <input v-model="form.allowDownload" type="checkbox" />
@@ -773,8 +788,8 @@ onMounted(() => {
       </div>
 
       <template #footer>
-        <AppButton :disabled="saving" @click="formOpen = false">取消</AppButton>
-        <AppButton variant="primary" :loading="saving" @click="submit()">
+        <AppButton :disabled="saving || importingMarkdown" @click="closeForm">取消</AppButton>
+        <AppButton variant="primary" :loading="saving" :disabled="importingMarkdown" @click="submit()">
           {{ editing ? "保存" : "创建" }}
         </AppButton>
       </template>

@@ -13,6 +13,7 @@ import (
 // ---------------------------------------------------------------- 分享管理
 
 type createShareRequest struct {
+	CustomMarkdown string `json:"customMarkdown"`
 	Path           string `json:"path"`
 	Kind           string `json:"kind"`
 	AccessMode     string `json:"accessMode"`
@@ -32,12 +33,13 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req createShareRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSONLimit(w, r, &req, int64(s.Settings.Runtime(r.Context()).Share.MarkdownMaxChars)*12+maxJSONBody) {
 		return
 	}
 	kind := store.ShareKind(strings.TrimSpace(req.Kind))
 	mode := store.AccessMode(strings.TrimSpace(req.AccessMode))
 	share, err := s.Svc.CreateShare(r.Context(), p, service.CreateShareRequest{
+		CustomMarkdown: req.CustomMarkdown,
 		Path:           req.Path,
 		Kind:           kind,
 		AccessMode:     mode,
@@ -68,10 +70,11 @@ func (s *Server) handleListShares(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	writeData(w, map[string]any{"items": itemsOf(shares)})
+	writeData(w, map[string]any{"items": itemsOf(shares), "markdownMaxChars": s.Settings.Runtime(r.Context()).Share.MarkdownMaxChars})
 }
 
 type updateShareRequest struct {
+	CustomMarkdown  *string `json:"customMarkdown"`
 	Path            *string `json:"path"`
 	Kind            *string `json:"kind"`
 	AccessMode      *string `json:"accessMode"`
@@ -94,10 +97,11 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req updateShareRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSONLimit(w, r, &req, int64(s.Settings.Runtime(r.Context()).Share.MarkdownMaxChars)*12+maxJSONBody) {
 		return
 	}
 	update := service.UpdateShareRequest{
+		CustomMarkdown:  req.CustomMarkdown,
 		Path:            req.Path,
 		Password:        req.Password,
 		AllowDownload:   req.AllowDownload,
@@ -218,16 +222,17 @@ type shareAccessRequest struct {
 // 开放，直接回序列 store.Share / service.DeliveryTarget 会外泄属主的绝对
 // 路径、账号标识与访问明细——这里只保留访客界面渲染所需的最小集合。
 type guestShare struct {
-	ID            string           `json:"id"`
-	Kind          store.ShareKind  `json:"kind"`
-	AccessMode    store.AccessMode `json:"accessMode"`
-	HasPassword   bool             `json:"hasPassword"`
-	AllowDownload bool             `json:"allowDownload"`
-	AllowPreview  bool             `json:"allowPreview"`
-	AllowSubpath  bool             `json:"allowSubpath"`
-	ExpiresAt     int64            `json:"expiresAt,omitempty"`
-	MaxVisits     int              `json:"maxVisits"`
-	Visits        int              `json:"visits"`
+	CustomMarkdown string           `json:"customMarkdown"`
+	ID             string           `json:"id"`
+	Kind           store.ShareKind  `json:"kind"`
+	AccessMode     store.AccessMode `json:"accessMode"`
+	HasPassword    bool             `json:"hasPassword"`
+	AllowDownload  bool             `json:"allowDownload"`
+	AllowPreview   bool             `json:"allowPreview"`
+	AllowSubpath   bool             `json:"allowSubpath"`
+	ExpiresAt      int64            `json:"expiresAt,omitempty"`
+	MaxVisits      int              `json:"maxVisits"`
+	Visits         int              `json:"visits"`
 	// RootName 是分享内容的展示名（不含属主路径层级）。
 	RootName string `json:"rootName"`
 	// IsOwner 供受限分享判断"访问者是否就是创建者"，替代暴露 ownerId。
@@ -251,20 +256,21 @@ func guestShareView(share store.Share, p auth.Principal) (guestShare, guestTarge
 		rootName = "根目录"
 	}
 	return guestShare{
-		ID:            share.ID,
-		Kind:          share.Kind,
-		AccessMode:    share.AccessMode,
-		HasPassword:   share.HasPassword,
-		AllowDownload: share.AllowDownload,
-		AllowPreview:  share.AllowPreview,
-		AllowSubpath:  share.AllowSubpath,
-		ExpiresAt:     share.ExpiresAt,
-		MaxVisits:     share.MaxVisits,
-		Visits:        share.Visits,
-		RootName:      rootName,
-		SharerName:    sharerName,
-		Size:          share.Size,
-		IsOwner:       !p.IsGuest() && p.UserID() == share.OwnerID,
+		CustomMarkdown: share.CustomMarkdown,
+		ID:             share.ID,
+		Kind:           share.Kind,
+		AccessMode:     share.AccessMode,
+		HasPassword:    share.HasPassword,
+		AllowDownload:  share.AllowDownload,
+		AllowPreview:   share.AllowPreview,
+		AllowSubpath:   share.AllowSubpath,
+		ExpiresAt:      share.ExpiresAt,
+		MaxVisits:      share.MaxVisits,
+		Visits:         share.Visits,
+		RootName:       rootName,
+		SharerName:     sharerName,
+		Size:           share.Size,
+		IsOwner:        !p.IsGuest() && p.UserID() == share.OwnerID,
 	}, guestTarget{Path: rootName}
 }
 

@@ -79,12 +79,13 @@ type GroupMailDomainInput struct {
 // 界面上骗人。邮件配额长期漏在这里——收件域名并进用户组之后，「每人可
 // 建多少个邮箱地址」正是管理员要按组调的第一个开关。
 var knownQuotaKeys = map[string]bool{
-	store.QuotaStorageTotal:     true,
-	store.QuotaFileMax:          true,
-	store.QuotaTrafficDailyDown: true,
-	store.QuotaPendingUploads:   true,
-	store.QuotaMailStorageTotal: true,
-	store.QuotaMailAddresses:    true,
+	store.QuotaStorageTotal:      true,
+	store.QuotaFileMax:           true,
+	store.QuotaTrafficDailyDown:  true,
+	store.QuotaTrafficDailyShare: true,
+	store.QuotaPendingUploads:    true,
+	store.QuotaMailStorageTotal:  true,
+	store.QuotaMailAddresses:     true,
 }
 
 // AdminListGroups 列出全部用户组及其配额、成员数与收件域名。

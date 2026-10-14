@@ -309,7 +309,14 @@ CREATE TABLE IF NOT EXISTS download_tickets (
     max_uses       INTEGER NOT NULL,
     expires_at     INTEGER NOT NULL,
     revoked        INTEGER NOT NULL DEFAULT 0,
-    created_at     INTEGER NOT NULL
+    created_at     INTEGER NOT NULL,
+    quota_scope TEXT NOT NULL DEFAULT '',
+    quota_key TEXT NOT NULL DEFAULT '',
+    billed_user_id INTEGER NOT NULL DEFAULT 0,
+    billed_group_name TEXT NOT NULL DEFAULT '',
+    share_id TEXT NOT NULL DEFAULT '',
+    pickup_code TEXT NOT NULL DEFAULT '',
+    resource_path TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_tickets_checksum ON download_tickets(file_checksum);
@@ -329,18 +336,22 @@ CREATE TABLE IF NOT EXISTS traffic_logs (
     group_name    TEXT NOT NULL,
     action        TEXT NOT NULL CHECK (action IN ('upload', 'download', 'preview',
                         'mail_recv', 'mail_send', 'mail_view')),
-    -- 双口径记账：对用户展示与配额判定用明文字节，对存储侧实际消耗用密文字节。
+    -- 双口径记账：对用户展示用明文字节，对配额判定与存储侧实际消耗用密文字节。
     bytes_plain   INTEGER NOT NULL DEFAULT 0,
     bytes_wire    INTEGER NOT NULL DEFAULT 0,
     resource_path TEXT NOT NULL DEFAULT '',
     share_id      TEXT NOT NULL DEFAULT '',
     pickup_code   TEXT NOT NULL DEFAULT '',
-    occurred_at   INTEGER NOT NULL
+    occurred_at   INTEGER NOT NULL,
+    quota_scope TEXT NOT NULL DEFAULT '',
+    billed_user_id INTEGER NOT NULL DEFAULT 0,
+    billed_group_name TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_traffic_user ON traffic_logs(user_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_traffic_ip ON traffic_logs(client_ip, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_traffic_time ON traffic_logs(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_traffic_billed_user ON traffic_logs(billed_user_id, occurred_at);
 
 -- 日聚合：报表与对账读它，绝不扫明细表。
 CREATE TABLE IF NOT EXISTS traffic_daily (
@@ -460,7 +471,8 @@ CREATE TABLE IF NOT EXISTS shares (
     created_at     INTEGER NOT NULL,
     -- 乐观锁版本：每次更新自增，并发的陈旧写回按此判定冲突。
     updated_at     INTEGER NOT NULL DEFAULT 0,
-    show_sharer_name INTEGER NOT NULL DEFAULT 1
+    show_sharer_name INTEGER NOT NULL DEFAULT 1,
+    custom_markdown TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id, created_at);

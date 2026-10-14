@@ -109,7 +109,7 @@ type DeliveryTarget struct {
 	OwnerUserID int64
 	// Path 是逻辑路径。
 	Path string
-	// ShareID / PickupCode 仅用于记账与审计。
+	// ShareID / PickupCode 用于分享计费归属与审计。
 	ShareID    string
 	PickupCode string
 }
@@ -198,15 +198,15 @@ func (s *Service) PrepareDelivery(ctx context.Context, actor auth.Principal, tar
 	// 归属解析（节点 / 分享 / 访客开关）到此结束；从拿到可用的内容池记录起，
 	// 票据签发、模式选择与密钥信封全部走与来源无关的统一核心。邮件部件的
 	// 交付（M2+）将绕过上面的节点解析直接复用 prepareDeliveryForFile。
-	return s.prepareDeliveryForFile(ctx, actor, file, node.Name, req)
+	target.Path = norm
+	return s.prepareDeliveryForFile(ctx, actor, file, node.Name, req, target)
 }
 
 // prepareDeliveryForFile 为一条已确认可用的内容池记录准备交付。
 //
-// 它不关心字节是从用户节点、分享链接还是邮件部件进入的：调用方负责
-// "这个身份能不能碰这份内容"的归属判定，这里只负责票据 + 配额预扣 +
-// 交付模式 + 密钥信封，保证任何入口拿到的 DeliveryPlan 形状与语义一致。
-func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Principal, file store.File, fileName string, req DeliveryRequest) (DeliveryPlan, error) {
+// 调用方负责节点/邮件的访问授权；这里根据分享来源选择计费主体，统一完成
+// 票据、配额预扣、交付模式与密钥信封。空 target 表示已授权的个人邮件部件。
+func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Principal, file store.File, fileName string, req DeliveryRequest, target DeliveryTarget) (DeliveryPlan, error) {
 	purpose := req.Purpose
 	rt := s.Settings.Runtime(ctx)
 
@@ -233,7 +233,7 @@ func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Princip
 
 	// ① 票据参数。配额预扣会和票据创建在同一写事务中提交，避免进程在
 	// 两步之间退出后留下无主的流量占用。
-	reservationKey := s.deliveryQuotaKey(actor, s.Now())
+	createdAt := s.Now()
 	ticketID, err := store.NewID("tk")
 	if err != nil {
 		return DeliveryPlan{}, err
@@ -257,12 +257,16 @@ func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Princip
 		ReservedBytes: file.PanSizeWire,
 		MaxUses:       maxUses,
 		ExpiresAt:     time.Now().UTC().Add(ttl),
-		CreatedAt:     s.Now(),
+		CreatedAt:     createdAt,
 	}
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
-		if err := s.reserveDeliveryQuotaAtQ(ctx, tx, actor, file.PanSizeWire, reservationKey); err != nil {
+		billing, err := s.reserveDeliveryBillingQ(ctx, tx, actor, target, createdAt, file.PanSizeWire)
+		if err != nil {
 			return err
 		}
+		ticket.QuotaScope, ticket.QuotaKey = billing.scope, billing.key
+		ticket.BilledUserID, ticket.BilledGroupName = billing.userID, billing.groupName
+		ticket.ShareID, ticket.PickupCode, ticket.ResourcePath = target.ShareID, target.PickupCode, target.Path
 		return store.CreateTicket(ctx, tx, ticket)
 	}); err != nil {
 		return DeliveryPlan{}, err
@@ -597,24 +601,27 @@ func (s *Service) SettleDelivery(ctx context.Context, actor auth.Principal, tick
 		// 结算条件更新只会成功一次，因此这里同时记录一次完整交付
 		// 的流量，不会因客户端重试结算而重复记账。明细走缓冲，额度
 		// 本身仍由上面的同步计数器保证。
-		actorKey := store.UserCounterKey(ticket.UserID, "")
-		if ticket.ActorType == store.ActorGuest {
-			actorKey = store.GuestCounterKey(ticket.IPPrefix, "")
-		}
+		actorKey, billedUserID, billedGroup := ticketBillingActor(ticket)
 		s.DB.Traffic().Record(
 			store.TrafficLog{
-				ActorType:  ticket.ActorType,
-				UserID:     ticket.UserID,
-				ClientIP:   ticket.ClientIP,
-				GroupName:  ticket.GroupName,
-				Action:     string(ticket.Purpose),
-				BytesPlain: actualPlainBytes,
-				BytesWire:  actualWire,
+				BilledUserID:    billedUserID,
+				BilledGroupName: billedGroup,
+				QuotaScope:      ticket.QuotaScope,
+				ShareID:         ticket.ShareID,
+				PickupCode:      ticket.PickupCode,
+				ResourcePath:    ticket.ResourcePath,
+				ActorType:       ticket.ActorType,
+				UserID:          ticket.UserID,
+				ClientIP:        ticket.ClientIP,
+				GroupName:       ticket.GroupName,
+				Action:          string(ticket.Purpose),
+				BytesPlain:      actualPlainBytes,
+				BytesWire:       actualWire,
 			},
 			store.TrafficDaily{
 				ActorKey:  actorKey,
 				Day:       store.DayKey(s.Now()),
-				GroupName: ticket.GroupName,
+				GroupName: billedGroup,
 				DownPlain: actualPlainBytes,
 				DownWire:  actualWire,
 			},
@@ -972,68 +979,6 @@ func (r *closingReader) Close() error {
 		}
 	}
 	return first
-}
-
-// ---------------------------------------------------------------- 配额
-
-// reserveDeliveryQuotaAt 预扣一次交付的流量额度。
-//
-// 计数器键始终带日期后缀，与结算路径保持一致：两条路径用不同的键会让预扣
-// 永远扣不回来。不受限的身份同样记账，只是不做上限判定——账目本身仍然需要，
-// 否则无法解释上游的实际用量。
-func (s *Service) deliveryQuotaKey(actor auth.Principal, at int64) string {
-	return actor.ActorKey() + ":" + store.DayKey(at)
-}
-
-func (s *Service) reserveDeliveryQuotaAtQ(ctx context.Context, q store.Querier, actor auth.Principal, bytes int64, key string) error {
-	if bytes <= 0 {
-		return nil
-	}
-	// 预览与下载共用同一个日额度口径（store.ScopeTrafficDown）：预览消耗的是
-	// 同一份存储出流量，单独开一个额度会让"只预览不下载"绕开总量限制。
-	limit, limited, err := s.dailyTrafficLimit(ctx, actor)
-	if err != nil {
-		return err
-	}
-	if !limited {
-		_, err := store.AddCounter(ctx, q, store.ScopeTrafficDown, key, bytes)
-		return err
-	}
-	if _, err := store.ReserveCounter(ctx, q, store.ScopeTrafficDown, key, bytes, limit); err != nil {
-		if errors.Is(err, store.ErrQuotaExceeded) {
-			return fmt.Errorf("%w: 今日流量额度不足", ErrQuotaExceeded)
-		}
-		return err
-	}
-	return nil
-}
-
-func (s *Service) releaseDeliveryQuotaByTicketQ(ctx context.Context, q store.Querier, ticket store.Ticket, bytes int64) error {
-	if bytes <= 0 {
-		return nil
-	}
-	actorKey := store.UserCounterKey(ticket.UserID, "")
-	if ticket.ActorType == store.ActorGuest {
-		actorKey = store.GuestCounterKey(ticket.IPPrefix, "")
-	}
-	_, err := store.ReleaseCounter(ctx, q, store.ScopeTrafficDown, actorKey+":"+store.DayKey(ticket.CreatedAt), bytes)
-	return err
-}
-
-// dailyTrafficLimit 返回该身份今日的下载流量上限；无限制时返回 false。
-func (s *Service) dailyTrafficLimit(ctx context.Context, actor auth.Principal) (int64, bool, error) {
-	if actor.UnlimitedQuota() {
-		return 0, false, nil
-	}
-	quotas, err := store.GroupQuotaMap(ctx, s.DB.R(), actor.GroupName())
-	if err != nil {
-		return 0, false, fmt.Errorf("%w: 读取流量配额失败", ErrUnavailable)
-	}
-	limit, ok := quotas[store.QuotaTrafficDailyDown]
-	if !ok || limit <= 0 {
-		return 0, false, nil
-	}
-	return limit, true, nil
 }
 
 func (s *Service) ticketTTL(ctx context.Context) time.Duration {

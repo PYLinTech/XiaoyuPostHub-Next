@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import ShareMarkdown from "@/components/ShareMarkdown.vue";
 import AppButton from "@/components/ui/AppButton.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
@@ -256,6 +257,7 @@ watch(
             <span v-if="share.maxVisits > 0">剩余 {{ remainingVisits }} 次访问</span>
           </div>
         </header>
+        <ShareMarkdown v-if="share.customMarkdown" :content="share.customMarkdown" class="share-custom-content" />
         <div v-if="share.kind === 'file'" class="share-file stack">
           <div class="row share-file__actions">
             <AppButton v-if="canDownloadRoot" variant="primary" icon="download" :loading="downloading" @click="download('')">下载</AppButton>
@@ -373,4 +375,10 @@ watch(
 
 .share-file-name { font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; overflow-wrap: anywhere; }
 .share-file-name:hover { color: var(--c-accent); }
+</style>
+
+<style scoped>
+.share-custom-content { margin: 0 24px 24px; padding: 24px; border: 1px solid var(--c-border-card); border-radius: 16px; background: var(--c-surface-2); }
+.share-card--file .share-custom-content { margin: 24px 0 0; }
+@media (max-width: 720px) { .share-custom-content { margin: 0 16px 20px; padding: 16px; } }
 </style>

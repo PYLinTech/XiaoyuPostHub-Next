@@ -186,11 +186,13 @@ interface CreateShareInput {
   allowPreview?: boolean;
   allowSubpath?: boolean;
   showSharerName?: boolean;
+  customMarkdown?: string;
   expiresAt?: number;
   maxVisits?: number;
 }
 
 export interface UpdateShareInput {
+  expectUpdatedAt?: number;
   path?: string;
   kind?: "file" | "folder";
   accessMode?: string;
@@ -199,6 +201,7 @@ export interface UpdateShareInput {
   allowPreview?: boolean;
   allowSubpath?: boolean;
   showSharerName?: boolean;
+  customMarkdown?: string;
   expiresAt?: number;
   maxVisits?: number;
   disabled?: boolean;
@@ -207,7 +210,7 @@ export interface UpdateShareInput {
 export const shareApi = {
   create: (input: CreateShareInput) => request<{ share: Share }>("/api/share", { method: "POST", body: input }),
   list: (limit = 100, offset = 0) =>
-    request<{ items: Share[] }>("/api/share", { query: { limit, offset } }),
+    request<{ items: Share[]; markdownMaxChars: number }>("/api/share", { query: { limit, offset } }),
   update: (id: string, input: UpdateShareInput) =>
     request<{ share: Share }>(`/api/share/${encodeURIComponent(id)}`, { method: "PATCH", body: input }),
   remove: (id: string) =>
@@ -284,6 +287,7 @@ export const guestApi = {
 // ---------------------------------------------------------------- 管理端
 
 export interface TrafficQuery {
+  billedUserId?: number;
   actorType?: string;
   userId?: number;
   clientIp?: string;

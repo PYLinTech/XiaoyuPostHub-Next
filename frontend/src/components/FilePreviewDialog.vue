@@ -107,7 +107,7 @@ onBeforeUnmount(reset);
     <template #actions>
       <AppButton v-if="canDownload" size="sm" variant="primary" icon="download-2-line" :loading="download.busy.value" @click="downloadFile">下载</AppButton>
     </template>
-    <div class="file-preview-content vfp-root" :data-theme="site.state.theme">
+    <div class="file-preview-content vfp-root" :class="{ 'file-preview-content--media': media }" :data-theme="site.state.theme">
       <MediaPreview v-if="open && previewAllowed && source && media" :key="mediaKey" :source="source" :file-name="fileName" :kind="media" />
       <div v-else-if="loading" class="file-preview-state" role="status"><span class="spinner" /><span>正在准备预览</span></div>
       <div v-else-if="error || !previewAllowed || !supported" class="file-preview-state">
@@ -124,9 +124,17 @@ onBeforeUnmount(reset);
 </template>
 
 <style>
+.file-preview-dialog { overflow: hidden; }
 .file-preview-dialog .modal__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-preview-dialog .modal__body { padding: 0; }
 .file-preview-content { height: min(68dvh, 680px); min-height: 220px; overflow: hidden; }
+/* 媒体舞台保留容器边距；圆角与裁剪同时定义，避免视频合成层露出四角。 */
+.file-preview-content--media { margin: var(--sp-4) var(--sp-5) var(--sp-5); border: 1px solid var(--c-border); border-radius: var(--r-md); isolation: isolate; }
+.file-preview-content--media .media-preview { border-radius: inherit; overflow: hidden; }
+.file-preview-content--media .media-preview-stage { border-radius: inherit; }
+.file-preview-content--media video { display: block; border-radius: inherit; }
+.file-preview-content--media video:fullscreen { border-radius: 0; }
+.file-preview-content--media video:-webkit-full-screen { border-radius: 0; }
 .file-preview-state { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--sp-4); padding: var(--sp-5); text-align: center; color: var(--c-text-muted); }
 .file-preview-state p { margin: 0; overflow-wrap: anywhere; }
 </style>

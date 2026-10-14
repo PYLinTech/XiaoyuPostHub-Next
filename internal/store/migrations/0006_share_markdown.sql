@@ -1,0 +1,1 @@
+ALTER TABLE shares ADD COLUMN custom_markdown TEXT NOT NULL DEFAULT '';

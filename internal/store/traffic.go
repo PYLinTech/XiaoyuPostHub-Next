@@ -16,10 +16,10 @@ func InsertTrafficLog(ctx context.Context, q Querier, l TrafficLog) error {
 	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO traffic_logs (actor_type, user_id, client_ip, group_name, action,
-			bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at, billed_user_id, billed_group_name, quota_scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(l.ActorType), l.UserID, l.ClientIP, l.GroupName, l.Action,
-		l.BytesPlain, l.BytesWire, l.ResourcePath, l.ShareID, l.PickupCode, l.OccurredAt)
+		l.BytesPlain, l.BytesWire, l.ResourcePath, l.ShareID, l.PickupCode, l.OccurredAt, l.BilledUserID, l.BilledGroupName, l.QuotaScope)
 	if err != nil {
 		return fmt.Errorf("写入流量明细失败: %w", err)
 	}
@@ -28,7 +28,7 @@ func InsertTrafficLog(ctx context.Context, q Querier, l TrafficLog) error {
 
 // UpsertTrafficDaily 累加某主体某天的流量聚合。
 //
-// 双口径记账：对用户展示与配额判定用明文字节，对存储侧实际消耗用密文字节
+// 双口径记账：对用户展示用明文字节，对配额判定与存储侧实际消耗用密文字节
 // （密文 = 明文 + 16 字节/块）。两者都要记，否则无法解释"为什么 123 后台
 // 的用量比站点统计的多"。
 func UpsertTrafficDaily(ctx context.Context, q Querier, d TrafficDaily) error {
@@ -50,15 +50,16 @@ func UpsertTrafficDaily(ctx context.Context, q Querier, d TrafficDaily) error {
 
 // TrafficFilter 是流量明细的查询条件。零值表示该维度不过滤。
 type TrafficFilter struct {
-	ActorType ActorType
-	UserID    int64
-	ClientIP  string
-	GroupName string
-	Action    string
-	From      int64
-	To        int64
-	Limit     int
-	Offset    int
+	BilledUserID int64
+	ActorType    ActorType
+	UserID       int64
+	ClientIP     string
+	GroupName    string
+	Action       string
+	From         int64
+	To           int64
+	Limit        int
+	Offset       int
 }
 
 // ListTrafficLogs 按条件分页查询流量明细。
@@ -77,6 +78,10 @@ func ListTrafficLogs(ctx context.Context, q Querier, f TrafficFilter) ([]Traffic
 	if f.UserID != 0 {
 		where = append(where, "user_id = ?")
 		args = append(args, f.UserID)
+	}
+	if f.BilledUserID != 0 {
+		where = append(where, "billed_user_id = ?")
+		args = append(args, f.BilledUserID)
 	}
 	if f.ClientIP != "" {
 		where = append(where, "client_ip = ?")
@@ -110,7 +115,7 @@ func ListTrafficLogs(ctx context.Context, q Querier, f TrafficFilter) ([]Traffic
 
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, actor_type, user_id, client_ip, group_name, action,
-		       bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at
+		       bytes_plain, bytes_wire, resource_path, share_id, pickup_code, occurred_at, billed_user_id, billed_group_name, quota_scope
 		FROM traffic_logs`+clause+` ORDER BY occurred_at DESC LIMIT ? OFFSET ?`,
 		append(args, limit, f.Offset)...)
 	if err != nil {
@@ -123,7 +128,7 @@ func ListTrafficLogs(ctx context.Context, q Querier, f TrafficFilter) ([]Traffic
 		var l TrafficLog
 		var actor string
 		if err := rows.Scan(&l.ID, &actor, &l.UserID, &l.ClientIP, &l.GroupName, &l.Action,
-			&l.BytesPlain, &l.BytesWire, &l.ResourcePath, &l.ShareID, &l.PickupCode, &l.OccurredAt); err != nil {
+			&l.BytesPlain, &l.BytesWire, &l.ResourcePath, &l.ShareID, &l.PickupCode, &l.OccurredAt, &l.BilledUserID, &l.BilledGroupName, &l.QuotaScope); err != nil {
 			return nil, 0, fmt.Errorf("扫描流量明细失败: %w", err)
 		}
 		l.ActorType = ActorType(actor)

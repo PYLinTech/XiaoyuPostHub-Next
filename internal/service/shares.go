@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
@@ -25,6 +26,7 @@ const maxShareSecretBytes = 128
 // 只开放预览或只开放下载都是合法配置，猜调用方意图会让"我明明关掉了下载"
 // 失效。默认值由 HTTP 层在构造请求时决定。
 type CreateShareRequest struct {
+	CustomMarkdown string
 	Path           string
 	Kind           store.ShareKind
 	AccessMode     store.AccessMode
@@ -41,6 +43,7 @@ type CreateShareRequest struct {
 // 用零值表示"不变"就无法把 MaxVisits 改成 0（不限次数）或把 Disabled
 // 改成 false（重新启用）。
 type UpdateShareRequest struct {
+	CustomMarkdown *string
 	Path           *string
 	Kind           *store.ShareKind
 	AccessMode     *store.AccessMode
@@ -67,6 +70,9 @@ type UpdateShareRequest struct {
 // 访客只得到一个无法解释的错误，指向别人的路径则等于把越权访问包装成分享。
 func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateShareRequest) (store.Share, error) {
 	if err := auth.RequirePermission(p, perm.Share); err != nil {
+		return store.Share{}, err
+	}
+	if err := s.validateShareMarkdown(ctx, req.CustomMarkdown); err != nil {
 		return store.Share{}, err
 	}
 	norm, err := vpath.Normalize(req.Path)
@@ -132,15 +138,16 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 		return store.Share{}, err
 	}
 	share := store.Share{
-		ID:            strings.ToLower(id),
-		OwnerID:       p.UserID(),
-		RootPath:      norm,
-		Kind:          kind,
-		AccessMode:    mode,
-		PwdHash:       pwdHash,
-		HasPassword:   pwdHash != "",
-		AllowDownload: req.AllowDownload,
-		AllowPreview:  req.AllowPreview,
+		CustomMarkdown: req.CustomMarkdown,
+		ID:             strings.ToLower(id),
+		OwnerID:        p.UserID(),
+		RootPath:       norm,
+		Kind:           kind,
+		AccessMode:     mode,
+		PwdHash:        pwdHash,
+		HasPassword:    pwdHash != "",
+		AllowDownload:  req.AllowDownload,
+		AllowPreview:   req.AllowPreview,
 		// 文件分享没有"子路径"这个概念，落库为假以免前端据此渲染出
 		// 一个永远不会生效的开关。
 		AllowSubpath:   kind == store.ShareFolder && req.AllowSubpath,
@@ -268,6 +275,12 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 			share.PwdHash = hashed
 		}
 		share.HasPassword = share.PwdHash != ""
+	}
+	if req.CustomMarkdown != nil {
+		if err := s.validateShareMarkdown(ctx, *req.CustomMarkdown); err != nil {
+			return store.Share{}, err
+		}
+		share.CustomMarkdown = *req.CustomMarkdown
 	}
 	if req.ShowSharerName != nil {
 		share.ShowSharerName = *req.ShowSharerName
@@ -728,4 +741,12 @@ func validAccessMode(mode store.AccessMode) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Service) validateShareMarkdown(ctx context.Context, content string) error {
+	limit := s.Settings.Runtime(ctx).Share.MarkdownMaxChars
+	if !utf8.ValidString(content) || utf8.RuneCountInString(content) > limit {
+		return fmt.Errorf("%w: 自定义内容最多允许 %d 个字符", ErrBadRequest, limit)
+	}
+	return nil
 }

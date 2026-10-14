@@ -61,5 +61,5 @@ func (s *Service) PrepareMailPart(ctx context.Context, actor auth.Principal,
 	return s.prepareDeliveryForFile(ctx, actor, file, name, DeliveryRequest{
 		Purpose:         purpose,
 		ClientPublicKey: clientPublicKey,
-	})
+	}, DeliveryTarget{})
 }

@@ -64,7 +64,11 @@ func writeErr(w http.ResponseWriter, status int, message, detail string) {
 // decodeJSON 解析请求体。拒绝未知字段：客户端传错字段名时应当明确报错，
 // 而不是静默按默认值处理（那会变成"设置没生效"这类难查的问题）。
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	return decodeJSONLimit(w, r, out, maxJSONBody)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, out any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {

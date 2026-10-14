@@ -9,7 +9,7 @@ import (
 )
 
 const shareColumns = `id, owner_id, root_path, kind, access_mode, pwd_hash, pwd_salt,
-	allow_download, allow_preview, allow_subpath, show_sharer_name, expires_at, max_visits, visits,
+	allow_download, allow_preview, allow_subpath, show_sharer_name, custom_markdown, expires_at, max_visits, visits,
 	disabled, created_at, updated_at`
 
 func scanShare(row rowScanner) (Share, error) {
@@ -17,7 +17,7 @@ func scanShare(row rowScanner) (Share, error) {
 	var kind, mode string
 	var allowDown, allowPrev, allowSub, showName, disabled int
 	err := row.Scan(&s.ID, &s.OwnerID, &s.RootPath, &kind, &mode, &s.PwdHash, &s.PwdSalt,
-		&allowDown, &allowPrev, &allowSub, &showName, &s.ExpiresAt, &s.MaxVisits, &s.Visits,
+		&allowDown, &allowPrev, &allowSub, &showName, &s.CustomMarkdown, &s.ExpiresAt, &s.MaxVisits, &s.Visits,
 		&disabled, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return Share{}, err
@@ -56,12 +56,12 @@ func CreateShare(ctx context.Context, q Querier, s Share) error {
 	// 一个库里根本不存在的版本号自撞冲突。
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO shares (id, owner_id, root_path, kind, access_mode, pwd_hash, pwd_salt,
-			allow_download, allow_preview, allow_subpath, show_sharer_name, expires_at, max_visits, visits,
+			allow_download, allow_preview, allow_subpath, show_sharer_name, custom_markdown, expires_at, max_visits, visits,
 			disabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
 		s.ID, s.OwnerID, s.RootPath, string(s.Kind), string(s.AccessMode), s.PwdHash, s.PwdSalt,
 		boolToInt(s.AllowDownload), boolToInt(s.AllowPreview), boolToInt(s.AllowSubpath), boolToInt(s.ShowSharerName),
-		s.ExpiresAt, s.MaxVisits, Now(), s.UpdatedAt)
+		s.CustomMarkdown, s.ExpiresAt, s.MaxVisits, Now(), s.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY KEY") {
 			return fmt.Errorf("%w: 分享标识冲突", ErrConflict)
@@ -115,12 +115,12 @@ func ListSharesByOwner(ctx context.Context, q Querier, ownerID int64, limit, off
 func UpdateShareIfUnchanged(ctx context.Context, q Querier, s Share, expectUpdatedAt int64) error {
 	res, err := q.ExecContext(ctx, `
 		UPDATE shares SET root_path = ?, kind = ?, access_mode = ?, pwd_hash = ?, pwd_salt = ?,
-			allow_download = ?, allow_preview = ?, allow_subpath = ?, show_sharer_name = ?,
+			allow_download = ?, allow_preview = ?, allow_subpath = ?, show_sharer_name = ?, custom_markdown = ?,
 			expires_at = ?, max_visits = ?, disabled = ?, updated_at = updated_at + 1
 		WHERE id = ? AND updated_at = ?`,
 		s.RootPath, string(s.Kind), string(s.AccessMode), s.PwdHash, s.PwdSalt,
 		boolToInt(s.AllowDownload), boolToInt(s.AllowPreview), boolToInt(s.AllowSubpath), boolToInt(s.ShowSharerName),
-		s.ExpiresAt, s.MaxVisits, boolToInt(s.Disabled), s.ID, expectUpdatedAt)
+		s.CustomMarkdown, s.ExpiresAt, s.MaxVisits, boolToInt(s.Disabled), s.ID, expectUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("更新分享失败: %w", err)
 	}

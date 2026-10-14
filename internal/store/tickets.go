@@ -8,7 +8,7 @@ import (
 )
 
 const ticketColumns = `id, file_checksum, actor_type, user_id, client_ip, ip_prefix, group_name,
-	purpose, delivery_mode, reserved_bytes, settled_bytes, use_count, max_uses, expires_at, revoked, created_at`
+	purpose, delivery_mode, reserved_bytes, settled_bytes, use_count, max_uses, expires_at, revoked, created_at, quota_scope, quota_key, billed_user_id, billed_group_name, share_id, pickup_code, resource_path`
 
 func scanTicket(row rowScanner) (Ticket, error) {
 	var t Ticket
@@ -16,7 +16,7 @@ func scanTicket(row rowScanner) (Ticket, error) {
 	var expires int64
 	var revoked int
 	err := row.Scan(&t.ID, &t.FileChecksum, &actor, &t.UserID, &t.ClientIP, &t.IPPrefix, &t.GroupName,
-		&purpose, &mode, &t.ReservedBytes, &t.SettledBytes, &t.UseCount, &t.MaxUses, &expires, &revoked, &t.CreatedAt)
+		&purpose, &mode, &t.ReservedBytes, &t.SettledBytes, &t.UseCount, &t.MaxUses, &expires, &revoked, &t.CreatedAt, &t.QuotaScope, &t.QuotaKey, &t.BilledUserID, &t.BilledGroupName, &t.ShareID, &t.PickupCode, &t.ResourcePath)
 	if err != nil {
 		return Ticket{}, err
 	}
@@ -32,10 +32,10 @@ func scanTicket(row rowScanner) (Ticket, error) {
 func CreateTicket(ctx context.Context, q Querier, t Ticket) error {
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO download_tickets (id, file_checksum, actor_type, user_id, client_ip, ip_prefix,
-			group_name, purpose, delivery_mode, reserved_bytes, settled_bytes, use_count, max_uses, expires_at, revoked, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0, ?)`,
+			group_name, purpose, delivery_mode, reserved_bytes, settled_bytes, use_count, max_uses, expires_at, revoked, created_at, quota_scope, quota_key, billed_user_id, billed_group_name, share_id, pickup_code, resource_path)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.FileChecksum, string(t.ActorType), t.UserID, t.ClientIP, t.IPPrefix,
-		t.GroupName, string(t.Purpose), string(t.DeliveryMode), t.ReservedBytes, t.MaxUses, FromTime(t.ExpiresAt), t.CreatedAt)
+		t.GroupName, string(t.Purpose), string(t.DeliveryMode), t.ReservedBytes, t.MaxUses, FromTime(t.ExpiresAt), t.CreatedAt, t.QuotaScope, t.QuotaKey, t.BilledUserID, t.BilledGroupName, t.ShareID, t.PickupCode, t.ResourcePath)
 	if err != nil {
 		return fmt.Errorf("签发下载票据失败: %w", err)
 	}

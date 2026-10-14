@@ -55,6 +55,8 @@ var migrations = []migration{
 	{Version: 4, Name: "parallel_upload_checksum", File: "0003_parallel_upload_checksum.sql"},
 	{Version: 5, Name: "share_sharer_name", File: "0004_share_sharer_name.sql"},
 	{Version: 6, Name: "upload_config_rework", File: "0005_upload_config_rework.sql"},
+	{Version: 7, Name: "share_markdown", File: "0006_share_markdown.sql"},
+	{Version: 8, Name: "share_traffic", File: "0007_share_traffic.sql"},
 }
 
 // loadMigrations 按注册表读取每个迁移的 SQL 并做完整性校验。
