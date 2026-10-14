@@ -35,7 +35,6 @@ ALL=0
 
 die() { printf '\033[31m错误\033[0m %s\n' "$1" >&2; exit 1; }
 info() { printf '\033[36m==>\033[0m %s\n' "$1"; }
-warn() { printf '\033[33m警告\033[0m %s\n' "$1" >&2; }
 
 usage() {
   # 打印文件头部注释块（第 2 行到第一个空行为止），而不是写死行号——
@@ -88,7 +87,7 @@ if [ "$SKIP_FRONTEND" -eq 0 ]; then
 
   [ -f "$FRONTEND_DIR/dist/index.html" ] || die "前端构建结束但没有产出 dist/index.html"
 elif [ ! -f "$FRONTEND_DIR/dist/index.html" ]; then
-  warn "--skip-frontend 但 frontend/dist 不存在，内嵌的会是上一份产物或空目录"
+  die "--skip-frontend 需要 frontend/dist/index.html，请先构建前端"
 fi
 
 if [ "$ONLY_FRONTEND" -eq 1 ]; then
@@ -100,11 +99,10 @@ fi
 # ---------------------------------------------------------------- 同步进 Go 包
 
 # go:embed 只能内嵌"包目录之内"的文件，frontend/dist 在包外，因此必须先搬进
-# internal/webui/dist 再编译。.gitkeep 是占位（保证没跑过前端构建时也能编译），
-# 同步时保留它。
+# internal/webui/dist，再通过 webui 构建标签启用内嵌。
 info "同步前端产物到 internal/webui/dist"
 mkdir -p "$EMBED_DIR"
-find "$EMBED_DIR" -mindepth 1 -not -name '.gitkeep' -delete 2>/dev/null || true
+find "$EMBED_DIR" -mindepth 1 -delete
 if [ -d "$FRONTEND_DIR/dist" ]; then
   # 逐项拷贝而不是 cp -R 整个目录：后者在不同系统上会把目录本身套进去一层。
   for item in "$FRONTEND_DIR"/dist/*; do
@@ -138,7 +136,7 @@ build_one() {
 
   info "编译 $goos/$goarch → ${out#$ROOT/}"
   GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags "$LDFLAGS" -o "$out" ./cmd/XiaoyuPostHub-Next
+    go build -tags webui -trimpath -ldflags "$LDFLAGS" -o "$out" ./cmd/XiaoyuPostHub-Next
 }
 
 if [ "$ALL" -eq 1 ]; then

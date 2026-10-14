@@ -345,7 +345,9 @@ GOOS=linux GOARCH=arm64 ./build.sh          # 指定单个目标
 1. `npm ci`（有 lockfile 时）或 `npm install`
 2. `npm run build`——**先跑 vue-tsc 类型检查再打包**，类型不过就不产出二进制
 3. 把 `frontend/dist` 同步进 `internal/webui/dist`（`go:embed` 只能内嵌**包目录之内**的文件）
-4. `CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"`
+4. `CGO_ENABLED=0 go build -tags webui -trimpath -ldflags "-s -w"`
+
+普通 Go 构建不需要前端产物；`build.sh` 使用 `webui` 构建标签启用内嵌。手动使用该标签编译前，须先同步前端产物。
 
 **发布时只拷 `dist/xphd` 一个文件**，不会出现"二进制传上去了、dist 忘了拷"
 这类只在打开页面时才暴露的事故。

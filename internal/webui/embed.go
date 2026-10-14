@@ -1,3 +1,5 @@
+//go:build webui
+
 // 内嵌的前端构建产物。
 //
 // 产物目录 dist/ 由 ../../build.sh 从 frontend/dist 同步进来，再由 go:embed
@@ -14,9 +16,7 @@
 // 产物，运维临时换一套前端、或用未内嵌的二进制跑 go run 联调时，需要能不重新
 // 编译就换掉。优先级是 环境变量指定的目录 > 内嵌产物。
 //
-// dist/ 目录里始终保留一个 .gitkeep：go:embed 要求被内嵌的目录在编译时存在，
-// 而"目录不存在"是编译期错误——那意味着没跑过 build.sh 的人连 go build 都
-// 执行不了。真正的产物不进版本库（见 .gitignore）。
+// 仅正式构建启用 webui 标签；普通 Go 构建不依赖前端产物。
 package webui
 
 import (
@@ -29,8 +29,7 @@ var embedded embed.FS
 
 // FS 返回内嵌的前端产物，根目录就是 dist/ 的内容。
 //
-// 始终返回可用的 fs.FS（哪怕里面只有 .gitkeep）：调用方要靠 Available 判断
-// 有没有真正的页面，而不是靠这里的返回值是否为 nil。
+// 调用方通过 Available 判断是否有可用页面。
 func FS() fs.FS {
 	sub, err := fs.Sub(embedded, "dist")
 	if err != nil {
@@ -44,8 +43,7 @@ func FS() fs.FS {
 
 // Available 报告内嵌产物里是否真的有页面。
 //
-// 判据是 index.html 在不在，而不是"dist 里有没有文件"：占位用的 .gitkeep
-// 也会被 all: 内嵌进来，只看"非空"会把占位状态误判成已构建。
+// 以入口文件 index.html 是否存在为准。
 func Available() bool {
 	f, err := FS().Open("index.html")
 	if err != nil {
