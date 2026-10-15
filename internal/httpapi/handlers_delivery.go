@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/relayauth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/service"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
@@ -208,13 +209,22 @@ func shouldSettleStream(stream service.ServerStream) bool {
 //   - 票据：我们在签发直链时自己写上去的，123 原样带在 $request_uri 里；
 //   - 访客地址：123 观测到的，即 $remote_addr。
 //
+// 服务端中转改用同一 xph 参数承载独立签名凭据：绑定对象路径与有效期，
+// HEAD 和多个 Range 可复用，不消费用户票据。只验证签名，不按服务器 IP 放行。
+//
 // 状态码是双方唯一都稳定的契约：200 放行，403 拒绝。
 func (s *Server) handleCDNAuth(w http.ResponseWriter, r *http.Request) {
 	ticketID := claimedTicketID(r)
 	claimedIP := claimedClientIP(r)
 	// 鉴权结果与具体访客地址相关，任何中间层缓存都可能把放行结果带给别人。
 	w.Header().Set("Cache-Control", "no-store")
-	if _, err := s.Svc.AuthorizeCDN(r.Context(), ticketID, claimedIP); err != nil {
+	var authErr error
+	if strings.HasPrefix(ticketID, relayauth.Prefix) {
+		authErr = s.Svc.AuthorizeRelayCDN(r.Context(), ticketID, claimedRequestPath(r))
+	} else {
+		_, authErr = s.Svc.AuthorizeCDN(r.Context(), ticketID, claimedIP)
+	}
+	if err := authErr; err != nil {
 		// 响应体不回细节：端点公开可达，错误信息会变成探测工具。
 		// 但**必须**落服务端日志——123 那边只看得到 403，运维手里没有任何线索。
 		// 拒绝原因恰好分属三种互不相同的配置问题：request_uri 没配上导致票据
@@ -272,6 +282,33 @@ func claimedTicketID(r *http.Request) string {
 		return ""
 	}
 	return strings.TrimSpace(inner.Get(service.HeaderPanTicket))
+}
+
+// claimedRequestPath 保留原始转义路径。兼容 123 未编码 request_uri、
+// 或把整个 request_uri 编码为一个参数的两种回调；缺失路径一律拒绝。
+func claimedRequestPath(r *http.Request) string {
+	for _, field := range strings.Split(r.URL.RawQuery, "&") {
+		name, raw, _ := strings.Cut(field, "=")
+		if name != paramRequestURI {
+			continue
+		}
+		if !strings.HasPrefix(raw, "/") {
+			var err error
+			raw, err = url.QueryUnescape(raw)
+			if err != nil {
+				return ""
+			}
+		}
+		if !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+			return ""
+		}
+		uri, err := url.ParseRequestURI(raw)
+		if err != nil || uri.IsAbs() || uri.Host != "" {
+			return ""
+		}
+		return uri.EscapedPath()
+	}
+	return ""
 }
 
 // claimedClientIP 取 123 观测到的访客地址，即 $remote_addr。

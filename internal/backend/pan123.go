@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/relayauth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/xph"
 )
 
@@ -39,7 +40,7 @@ const (
 	apiUploadFinish      = "/upload/v2/file/upload_complete"
 
 	// 服务端解密器按加密块顺序读取；默认块为 1 MiB。4 MiB 窗口减少
-	// 中转大文件的上游 Range 请求，同时把每个活跃读取器的缓冲控制在 4 MiB。
+	// 中转大文件的上游 Range 请求。每条流预取最多四个窗口（16 MiB）。
 	rangeReadChunk = 4 << 20
 )
 
@@ -118,6 +119,7 @@ type Pan123 struct {
 	limGlobal       *limiter
 	limUserInfo     *limiter
 	limFileList     *limiter
+	relaySlots      chan struct{}
 	limDownloadInfo *limiter
 	limDirectLink   *limiter
 	limMkdir        *limiter
@@ -165,6 +167,7 @@ func NewPan123(cfg Pan123Config) (*Pan123, error) {
 		limGlobal:       newLimiter(cfg.QPS),
 		limUserInfo:     newLimiter(1),
 		limFileList:     newLimiter(3),
+		relaySlots:      make(chan struct{}, 16),
 		limDownloadInfo: newLimiter(5),
 		limDirectLink:   newLimiter(5),
 		limMkdir:        newLimiter(2),
@@ -1108,6 +1111,14 @@ func (b *Pan123) Delete(ctx context.Context, ref string) error {
 // 直链空间、直链流量用尽，或 CDN 回源鉴权开启导致服务端自取被拒）时静默
 // 改走自用下载通道，保证交付不中断。
 func (b *Pan123) Open(ctx context.Context, ref string) (io.ReadSeekCloser, error) {
+	return b.openRange(ctx, ref, 0, 0)
+}
+
+func (b *Pan123) OpenRange(ctx context.Context, ref string, offset, length int64) (io.ReadCloser, error) {
+	return b.openRange(ctx, ref, offset, length)
+}
+
+func (b *Pan123) openRange(ctx context.Context, ref string, offset, length int64) (io.ReadSeekCloser, error) {
 	id, err := parseFileID(ref)
 	if err != nil {
 		return nil, err
@@ -1118,7 +1129,7 @@ func (b *Pan123) Open(ctx context.Context, ref string) (io.ReadSeekCloser, error
 	}
 	// Open 的契约是可 Seek 的 ReadSeekCloser；没有对象长度就无法实现
 	// SeekEnd，不能把 HEAD 失败静默降级成一个半可用的 reader。
-	return &httpRangeReader{client: b.client, url: link, size: size, ctx: ctx}, nil
+	return newParallelRangeReader(ctx, b.client, link, size, offset, length, b.relaySlots)
 }
 
 // Stat 返回对象在存储侧的字节数。
@@ -1138,17 +1149,29 @@ func (b *Pan123) Stat(ctx context.Context, ref string) (int64, error) {
 //
 // 决策链固定为：直链流量（direct-link/url + auth_key）→ 自用流量
 // （download_info）。回退只在这一层决策：直链地址即使签发成功，也可能
-// 在 CDN 侧被拒（例如开启了回源鉴权回调、服务端请求无法携带访客票据），
+// 在 CDN 侧被拒（例如回源参数配置错误或上游流量不可用），
 // 因此必须以 HEAD 实际验证通过后才算通道可用。
 func (b *Pan123) relayLink(ctx context.Context, id int64) (string, int64, error) {
 	if strings.TrimSpace(b.cfg.PrivateKey) != "" {
 		link, size, err := b.relayLinkVia(ctx, id, true)
 		if err == nil {
+			log.Printf("backend: fileID=%d 中转取流通道=直链流量", id)
 			return link, size, nil
 		}
-		log.Printf("backend: fileID=%d 直链流量通道不可用，回退自用下载通道: %v", id, err)
+		if ctx.Err() != nil {
+			return "", 0, ctx.Err()
+		}
+		log.Printf("backend: fileID=%d 直链流量通道不可用，回退自用下载通道: %v", id, safeRelayError(err))
 	}
-	return b.relayLinkVia(ctx, id, false)
+	link, size, err := b.relayLinkVia(ctx, id, false)
+	if err == nil {
+		reason := "直链通道验证失败"
+		if strings.TrimSpace(b.cfg.PrivateKey) == "" {
+			reason = "未配置链接鉴权私钥"
+		}
+		log.Printf("backend: fileID=%d 中转取流通道=自用下载 原因=%s", id, reason)
+	}
+	return link, size, err
 }
 
 // relayLinkVia 按指定通道换取地址并做 HEAD 验证。
@@ -1158,8 +1181,8 @@ func (b *Pan123) relayLinkVia(ctx context.Context, id int64, direct bool) (strin
 		err  error
 	)
 	if direct {
-		// 服务端自取不附票据参数：票据核销在本系统的服务端中转入口已经
-		// 完成，CDN 回源回调不能也不应再消费同一张票据。
+		// 空用户票据会签发独立的对象级中转凭据，供 HEAD 和多路 Range
+		// 回源鉴权复用；不重复核销用户票据。
 		link, err = b.signedDirectLink(ctx, id, b.cfg.DirectLinkTTL, "")
 	} else {
 		link, err = b.selfDownloadURL(ctx, id)
@@ -1241,7 +1264,7 @@ func (b *Pan123) PresignParts(ctx context.Context, ref string, size int64, opt P
 // signedDirectLink 经直链流量通道换取原始地址并完成 URL 鉴权签名。
 //
 // ticketID 非空时追加为票据参数：浏览器直连跨域 CDN 时自定义请求头会触发
-// 预检，票据只能走 URL；服务端自取（服务端中转）传空。
+// 预检，票据只能走 URL；服务端自取传空，改签独立的短期中转凭据。
 func (b *Pan123) signedDirectLink(ctx context.Context, id int64, ttl time.Duration, ticketID string) (string, error) {
 	var resp directLinkResp
 	if err := b.call(ctx, fmt.Sprintf("%s?fileID=%d", apiDirectLink, id), b.limDirectLink, http.MethodGet, nil, &resp); err != nil {
@@ -1265,9 +1288,10 @@ func (b *Pan123) signedDirectLink(ctx context.Context, id int64, ttl time.Durati
 		return "", err
 	}
 	query.Set("auth_key", authKey)
-	if ticketID != "" {
-		query.Set("xph", ticketID)
+	if ticketID == "" {
+		ticketID = relayauth.Sign(b.cfg.PrivateKey, parsed.EscapedPath(), time.Now().Add(ttl))
 	}
+	query.Set("xph", ticketID)
 	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
@@ -1355,8 +1379,11 @@ type httpRangeReader struct {
 	bufAt  int64
 	// 上游忽略 Range 并返回 200 时保留顺序响应流，避免后续窗口反复从
 	// 对象开头下载并丢弃前缀，使大文件读取退化为 O(n²) 流量。
-	fallback io.ReadCloser
-	closed   bool
+	fallback       io.ReadCloser
+	readEnd        int64
+	requirePartial bool
+	rangeIgnored   bool
+	closed         bool
 }
 
 func (r *httpRangeReader) Read(p []byte) (int, error) {
@@ -1392,7 +1419,7 @@ func (r *httpRangeReader) fetchWindow() error {
 	}
 	// 对象长度在 Open 时已通过 HEAD 取得。读指针越过 EOF 时直接返回空窗口，
 	// 让 Read 产生 io.EOF。
-	if r.size >= 0 && r.pos >= r.size {
+	if (r.size >= 0 && r.pos >= r.size) || (r.readEnd > 0 && r.pos >= r.readEnd) {
 		r.buf = nil
 		r.bufAt = r.pos
 		return nil
@@ -1407,6 +1434,9 @@ func (r *httpRangeReader) fetchWindow() error {
 	if r.size >= 0 && end >= r.size {
 		end = r.size - 1
 	}
+	if r.readEnd > 0 && end >= r.readEnd {
+		end = r.readEnd - 1
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url, nil)
 	if err != nil {
 		return err
@@ -1415,7 +1445,7 @@ func (r *httpRangeReader) fetchWindow() error {
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.pos, end))
 	res, err := r.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("backend: 范围读取失败: %w", err)
+		return fmt.Errorf("backend: 范围读取失败: %w", safeRelayError(err))
 	}
 	keepBody := false
 	defer func() {
@@ -1431,6 +1461,10 @@ func (r *httpRangeReader) fetchWindow() error {
 	// 偏移，再保留该响应流、逐窗口读取；对 206 响应拒绝超出窗口的异常响应。
 	var data []byte
 	if res.StatusCode == http.StatusOK {
+		if r.requirePartial {
+			return fmt.Errorf("backend: 上游不再支持 Range，停止并发取流")
+		}
+		r.rangeIgnored = true
 		if r.pos > 0 {
 			if _, err := io.CopyN(io.Discard, res.Body, r.pos); err != nil {
 				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -1453,8 +1487,8 @@ func (r *httpRangeReader) fetchWindow() error {
 			return fmt.Errorf("backend: 范围响应超过读取窗口")
 		}
 		if err == nil {
-			start, end, total, ok := parseContentRange(res.Header.Get("Content-Range"))
-			if !ok || start != r.pos || end < start || end-start+1 != int64(len(data)) {
+			start, responseEnd, total, ok := parseContentRange(res.Header.Get("Content-Range"))
+			if !ok || start != r.pos || responseEnd < start || responseEnd-start+1 != int64(len(data)) || responseEnd != end {
 				return fmt.Errorf("backend: 上游范围响应与请求不一致")
 			}
 			if total > 0 && r.size >= 0 && total != r.size {
@@ -1481,6 +1515,9 @@ func (r *httpRangeReader) fetchWindow() error {
 // readFallbackWindow 消费保留的顺序响应；短窗口标记 EOF，避免未知长度时重复请求。
 func (r *httpRangeReader) readFallbackWindow() error {
 	limit := int64(rangeReadChunk)
+	if r.readEnd > 0 && r.readEnd-r.pos < limit {
+		limit = r.readEnd - r.pos
+	}
 	if r.size >= 0 && r.size-r.pos < limit {
 		limit = r.size - r.pos
 	}

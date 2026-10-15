@@ -106,3 +106,29 @@ func TestCipherPartRangesRespectVolumeLimit(t *testing.T) {
 		t.Fatalf("分卷覆盖不完整：plain=%d wire=%d", plain, wire)
 	}
 }
+
+// Bounded logical reads must cross only the required volumes and preserve the
+// same plaintext interval when used by server-side decryption.
+func TestManagerOpenRangeAcrossVolumes(t *testing.T) {
+	b := &multipartTestBackend{objects: map[string][]byte{"p1": []byte("abcdef"), "p2": []byte("ghijkl"), "p3": []byte("mnopqr")}}
+	ref, err := ComposeObjectRef([]ObjectPart{{Ref: "p1", Offset: 0, Size: 6}, {Ref: "p2", Offset: 6, Size: 6}, {Ref: "p3", Offset: 12, Size: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager()
+	m.current = b
+	for _, tc := range []struct {
+		offset, length int64
+		want           string
+	}{{4, 5, "efghi"}, {7, 2, "hi"}, {12, 0, "mnopqr"}, {18, 0, ""}} {
+		r, err := m.OpenRange(context.Background(), ref, tc.offset, tc.length)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(r)
+		_ = r.Close()
+		if err != nil || string(got) != tc.want {
+			t.Fatalf("offset=%d length=%d got=%q err=%v", tc.offset, tc.length, got, err)
+		}
+	}
+}

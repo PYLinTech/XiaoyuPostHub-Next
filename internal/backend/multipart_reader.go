@@ -15,7 +15,8 @@ type multipartReader struct {
 	size    int64
 	pos     int64
 	index   int
-	current io.ReadSeekCloser
+	current io.ReadCloser
+	end     int64
 }
 
 func totalPartSize(parts []ObjectPart) int64 {
@@ -30,29 +31,35 @@ func (r *multipartReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-	if r.pos >= r.size {
+	readEnd := r.size
+	if r.end > 0 && r.end < readEnd {
+		readEnd = r.end
+	}
+	if r.pos >= readEnd {
 		return 0, io.EOF
 	}
 	var total int
-	for len(p) > 0 && r.pos < r.size {
+	for len(p) > 0 && r.pos < readEnd {
 		if r.current == nil {
 			if r.index >= len(r.parts) {
 				return total, io.ErrUnexpectedEOF
 			}
 			part := r.parts[r.index]
-			reader, err := r.backend.Open(r.ctx, part.Ref)
+			length := part.Offset + part.Size - r.pos
+			if readEnd-r.pos < length {
+				length = readEnd - r.pos
+			}
+			reader, err := OpenRange(r.ctx, r.backend, part.Ref, r.pos-part.Offset, length)
 			if err != nil {
 				return total, err
 			}
 			r.current = reader
-			if _, err := reader.Seek(r.pos-part.Offset, io.SeekStart); err != nil {
-				_ = reader.Close()
-				r.current = nil
-				return total, err
-			}
 		}
 		part := r.parts[r.index]
 		left := part.Offset + part.Size - r.pos
+		if readEnd-r.pos < left {
+			left = readEnd - r.pos
+		}
 		want := len(p)
 		if int64(want) > left {
 			want = int(left)
@@ -64,8 +71,8 @@ func (r *multipartReader) Read(p []byte) (int, error) {
 		if err != nil && err != io.EOF {
 			return total, err
 		}
-		if r.pos == part.Offset+part.Size || err == io.EOF {
-			if err == io.EOF && r.pos != part.Offset+part.Size {
+		if r.pos == part.Offset+part.Size || r.pos == readEnd || err == io.EOF {
+			if err == io.EOF && r.pos != part.Offset+part.Size && r.pos != readEnd {
 				return total, io.ErrUnexpectedEOF
 			}
 			_ = r.current.Close()

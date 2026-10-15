@@ -21,6 +21,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/backend"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/relayauth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/vpath"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/xph"
@@ -442,6 +443,16 @@ func mimeOf(name string) string {
 	return "application/octet-stream"
 }
 
+// AuthorizeRelayCDN 校验服务器自取凭据，不消费用户票据、次数或额度。
+// 对象路径与到期时间必须由服务器签发；不依赖 IP 白名单。
+func (s *Service) AuthorizeRelayCDN(ctx context.Context, token, escapedPath string) error {
+	key := s.Settings.Runtime(ctx).Pan123.PrivateKey
+	if !relayauth.Verify(key, escapedPath, token, time.Now()) {
+		return fmt.Errorf("%w: 中转凭据无效、已过期或对象不匹配", ErrForbidden)
+	}
+	return nil
+}
+
 // AuthorizeCDN 是 123 回源时问"这条能不能放"的判定。
 //
 // 判定链固定为：票据有效（走原子条件更新，顺带防重放）→ 对象未被拉黑 →
@@ -455,7 +466,7 @@ func mimeOf(name string) string {
 //
 // 上游不给地址时它为空，此时**拒绝**：来源校验是票据安全模型的一部分，"缺来源
 // 就放行"等于允许绕过 IP 绑定。部署侧必须让 123 带上 $remote_addr，否则回源
-// 鉴权对全部直链一律拒绝。
+// 鉴权对用户直连票据一律拒绝。
 func (s *Service) AuthorizeCDN(ctx context.Context, ticketID, claimedIP string) (store.Ticket, error) {
 	ticketID = strings.TrimSpace(ticketID)
 	if ticketID == "" {
@@ -800,18 +811,11 @@ func (s *Service) serverStreamForActor(ctx context.Context, ticketID string, act
 	// 打开底层对象的公共闭包：密文区间已经是相对整个对象的绝对偏移
 	// （xph 的 BlockCipherOffset 自带 64 字节文件头长度），只需定位 + 限长。
 	open := func(openCtx context.Context, off, length int64) (io.ReadCloser, error) {
-		base, err := s.Backend.Open(openCtx, file.PanFileID)
+		reader, err := backend.OpenRange(openCtx, s.Backend, file.PanFileID, off, length)
 		if err != nil {
 			return nil, fmt.Errorf("%w: 打开存储对象失败", ErrUnavailable)
 		}
-		if _, err := base.Seek(off, io.SeekStart); err != nil {
-			_ = base.Close()
-			return nil, err
-		}
-		if length <= 0 {
-			return base, nil
-		}
-		return &closingReader{Reader: io.LimitReader(base, length), extra: base}, nil
+		return reader, nil
 	}
 
 	// 在消费次数之后、任何字节交付之前的打开失败，只有「整文件读取」才取消

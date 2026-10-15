@@ -137,6 +137,26 @@ func (m *Manager) Open(ctx context.Context, ref string) (io.ReadSeekCloser, erro
 	return current.Open(ctx, ref)
 }
 
+func (m *Manager) OpenRange(ctx context.Context, ref string, offset, length int64) (io.ReadCloser, error) {
+	current := m.Current()
+	if parts, err := SplitObjectRef(ref, -1); err == nil && len(parts) > 1 {
+		size := totalPartSize(parts)
+		if offset < 0 || offset > size {
+			return nil, fmt.Errorf("backend: 读取位置超出对象范围")
+		}
+		end := size
+		if length > 0 && length < size-offset {
+			end = offset + length
+		}
+		r := &multipartReader{backend: current, ctx: ctx, parts: parts, size: size, end: end}
+		if _, err := r.Seek(offset, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return r, nil
+	}
+	return OpenRange(ctx, current, ref, offset, length)
+}
+
 func (m *Manager) Delete(ctx context.Context, ref string) error {
 	current := m.Current()
 	if parts, err := SplitObjectRef(ref, -1); err == nil && len(parts) > 1 {
