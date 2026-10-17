@@ -1,23 +1,31 @@
 import { readonly, ref } from "vue";
+import { useToasts } from "@/stores/toast";
 
 const open = ref(false);
 let resolvePending: ((allowed: boolean) => void) | null = null;
 
-function copyCurrentPageUrl(): void {
+async function copyCurrentPageUrl(): Promise<boolean> {
   const value = window.location.href;
-  if (navigator.clipboard?.writeText) {
-    void navigator.clipboard.writeText(value).catch(() => {});
-    return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    try {
+      input.select();
+      return document.execCommand("copy");
+    } finally {
+      input.remove();
+    }
+  } catch {
+    return false;
   }
-  const input = document.createElement("textarea");
-  input.value = value;
-  input.setAttribute("readonly", "");
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.appendChild(input);
-  input.select();
-  try { document.execCommand("copy"); } catch { /* 剪贴板权限不可用时静默忽略 */ }
-  input.remove();
 }
 
 /** 仅用于用户主动保存文件；不影响预览、正文资源和直链。 */
@@ -26,7 +34,11 @@ export function confirmDownloadBrowser(): Promise<boolean> {
   if (!isRestrictedUA) return Promise.resolve(true);
   // 已有引导时不覆盖原操作，也不重复弹窗。
   if (resolvePending) return Promise.resolve(false);
-  copyCurrentPageUrl();
+  void copyCurrentPageUrl().then(copied => {
+    const toasts = useToasts();
+    if (copied) toasts.success("已复制链接", undefined, "bottom");
+    else toasts.error("复制链接失败，请您手动操作", undefined, "bottom");
+  });
   open.value = true;
   return new Promise(resolve => { resolvePending = resolve; });
 }

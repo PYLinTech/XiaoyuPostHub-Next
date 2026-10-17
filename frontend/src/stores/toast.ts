@@ -8,11 +8,14 @@ import { reactive } from "vue";
 
 export type ToastKind = "info" | "success" | "error";
 
+export type ToastPosition = "top" | "center" | "bottom";
+
 export interface Toast {
   id: number;
   kind: ToastKind;
   message: string;
   detail?: string;
+  position: ToastPosition;
 }
 
 const state = reactive({ current: null as Toast | null });
@@ -49,11 +52,11 @@ function schedule(ms: number): void {
   hideTimer = window.setTimeout(dismiss, ms);
 }
 
-function push(kind: ToastKind, message: string, detail?: string): number {
+function push(kind: ToastKind, message: string, detail?: string, position: ToastPosition = "top"): number {
   // 顶掉旧条目时必须连它的存活计时器一起清掉，否则旧计时器会把新通知提前带走。
   clearHideTimer();
   const id = nextId++;
-  state.current = { id, kind, message, detail };
+  state.current = { id, kind, message, detail, position };
   const ttl = ttlOf(kind, detail);
   if (ttl > 0) {
     schedule(ttl);
@@ -97,9 +100,9 @@ export function useToasts(): {
   dismiss: () => void;
   pause: () => void;
   resume: () => void;
-  info: (message: string, detail?: string) => number;
-  success: (message: string, detail?: string) => number;
-  error: (message: string, detail?: string) => number;
+  info: (message: string, detail?: string, position?: ToastPosition) => number;
+  success: (message: string, detail?: string, position?: ToastPosition) => number;
+  error: (message: string, detail?: string, position?: ToastPosition) => number;
 } {
   return {
     // 必须用 getter：current 是整体替换的引用，直接赋值会把调用那一刻的
@@ -110,8 +113,8 @@ export function useToasts(): {
     dismiss,
     pause,
     resume,
-    info: (message, detail) => push("info", message, detail),
-    success: (message, detail) => push("success", message, detail),
-    error: (message, detail) => push("error", message, detail),
+    info: (message, detail, position) => push("info", message, detail, position),
+    success: (message, detail, position) => push("success", message, detail, position),
+    error: (message, detail, position) => push("error", message, detail, position),
   };
 }

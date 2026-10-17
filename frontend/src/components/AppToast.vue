@@ -13,7 +13,7 @@ const ICON_BY_KIND = { info: "info", success: "check", error: "warning" } as con
 </script>
 
 <template>
-  <div class="toast-anchor" role="status" aria-live="polite">
+  <div class="toast-anchor" :class="`toast-anchor--${toasts.current?.position ?? 'top'}`" role="status" aria-live="polite">
     <Transition name="toast" mode="out-in">
       <div
         v-if="toasts.current"

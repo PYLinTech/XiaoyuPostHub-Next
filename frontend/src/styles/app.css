@@ -1205,6 +1205,16 @@ input[type="checkbox"]:disabled {
   pointer-events: none;
 }
 
+.toast-anchor--center {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.toast-anchor--bottom {
+  top: auto;
+  bottom: var(--sp-3);
+}
+
 .toast-anchor .toast {
   pointer-events: auto;
   max-width: min(480px, calc(100vw - 32px));

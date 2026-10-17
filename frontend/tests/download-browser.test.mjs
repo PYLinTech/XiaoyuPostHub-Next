@@ -14,7 +14,7 @@ const { createApp, nextTick, reactive } = await import('vue');
 const vue = import.meta.resolve('vue');
 const url = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
 const transpile = code => ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
-const calls = { tasks: 0, plans: 0, saves: 0, errors: [], copiedUrls: [] };
+const calls = { tasks: 0, plans: 0, saves: 0, errors: [], copiedUrls: [], toasts: [] };
 Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: { writeText: value => { calls.copiedUrls.push(value); return Promise.resolve(); } } });
 const route = reactive({ fullPath: '/files' });
 globalThis.downloadBrowserTest = { calls, route };
@@ -24,7 +24,7 @@ const mocks = {
   '@/delivery/transferClient': url('export async function runDelivery(source){await source.plan(null);return {blob:new Blob(["test"]),fileName:"test.txt"};}'),
   '@/stores/downloads': url('export const canCancelDownload=()=>true;export const addDownload=()=>{globalThis.downloadBrowserTest.calls.tasks++;return {};};'),
   '@/lib/async': url('export const describeError=String;export const isAbortError=()=>false;export const logError=()=>{};'),
-  '@/stores/toast': url('export const useToasts=()=>({success(){},info(){},error(...args){globalThis.downloadBrowserTest.calls.errors.push(args);}});'),
+  '@/stores/toast': url('export const useToasts=()=>({success(...args){globalThis.downloadBrowserTest.calls.toasts.push(["success",...args]);},info(...args){globalThis.downloadBrowserTest.calls.toasts.push(["info",...args]);},error(...args){globalThis.downloadBrowserTest.calls.errors.push(args);globalThis.downloadBrowserTest.calls.toasts.push(["error",...args]);}});'),
   '@/lib/overlayScroll': url(`import {ref} from ${JSON.stringify(vue)};export const useOverlayScroll=()=>({visible:ref(false),style:ref({}),onThumbPointerDown(){},onThumbPointerMove(){},onThumbPointerUp(){}});`),
 };
 const cache = new Map();
@@ -63,11 +63,18 @@ test('受限 UA 下载前提示、取消不取数、主动尝试仅放行当前�
       const pending = download.run(source); await flush();
       assert.ok(document.querySelector('[role="dialog"]'));
       assert.equal(calls.copiedUrls.at(-1), window.location.href);
+      assert.deepEqual(calls.toasts.at(-1), ['success', '已复制链接', undefined, 'bottom']);
       assert.equal(calls.tasks, 0); assert.equal(calls.plans, 0);
       assert.equal(document.body.classList.contains('modal-open'), true);
       button('我知道了').click(); assert.equal(await pending, false); await flush();
       assert.equal(document.body.classList.contains('modal-open'), false);
     }
+    dom.window.navigator.clipboard.writeText = () => Promise.reject(new Error('denied'));
+    ua('QQ/8.9.0');
+    const failedCopy = download.run(source); await flush();
+    assert.deepEqual(calls.toasts.at(-1), ['error', '复制链接失败，请您手动操作', undefined, 'bottom']);
+    button('我知道了').click(); assert.equal(await failedCopy, false); await flush();
+    dom.window.navigator.clipboard.writeText = value => { calls.copiedUrls.push(value); return Promise.resolve(); };
     ua('MicroMessenger');
     const batch = download.runBatch([{ source, silent: true }, { source, silent: true }]); await flush();
     button('仍要尝试直接下载').click(); assert.equal(await batch, true); await flush();
@@ -78,6 +85,7 @@ test('受限 UA 下载前提示、取消不取数、主动尝试仅放行当前�
     assert.equal(await again, false); assert.equal(calls.tasks, 2);
     ua('Mozilla/5.0 Chrome');
     assert.equal(await download.run(source), true); assert.equal(calls.tasks, 3);
-    assert.deepEqual(calls.errors, []);
+    assert.equal(calls.errors.length, 1);
+    assert.equal(calls.errors[0][0], '复制链接失败，请您手动操作');
   } finally { app.unmount(); store.finishDownloadBrowser(false); }
 });
