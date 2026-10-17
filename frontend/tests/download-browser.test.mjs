@@ -57,7 +57,7 @@ test('受限 UA 下载前提示、取消不取数、主动尝试仅放行当前�
   const app = createApp(component); app.mount('#app');
   try {
     const download = useDeliveryAction();
-    for (const value of ['MicroMessenger', 'alipayclient', 'AlipayDefined']) {
+    for (const value of ['MicroMessenger', 'QQ/8.9.0', 'alipayclient', 'AlipayDefined']) {
       ua(value);
       const pending = download.run(source); await flush();
       assert.ok(document.querySelector('[role="dialog"]'));
