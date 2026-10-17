@@ -14,7 +14,8 @@ const { createApp, nextTick, reactive } = await import('vue');
 const vue = import.meta.resolve('vue');
 const url = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
 const transpile = code => ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
-const calls = { tasks: 0, plans: 0, saves: 0, errors: [] };
+const calls = { tasks: 0, plans: 0, saves: 0, errors: [], copiedUrls: [] };
+Object.defineProperty(dom.window.navigator, 'clipboard', { configurable: true, value: { writeText: value => { calls.copiedUrls.push(value); return Promise.resolve(); } } });
 const route = reactive({ fullPath: '/files' });
 globalThis.downloadBrowserTest = { calls, route };
 const mocks = {
@@ -61,6 +62,7 @@ test('受限 UA 下载前提示、取消不取数、主动尝试仅放行当前�
       ua(value);
       const pending = download.run(source); await flush();
       assert.ok(document.querySelector('[role="dialog"]'));
+      assert.equal(calls.copiedUrls.at(-1), window.location.href);
       assert.equal(calls.tasks, 0); assert.equal(calls.plans, 0);
       assert.equal(document.body.classList.contains('modal-open'), true);
       button('我知道了').click(); assert.equal(await pending, false); await flush();
