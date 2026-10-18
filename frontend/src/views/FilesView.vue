@@ -6,6 +6,7 @@ import AppButton from "@/components/ui/AppButton.vue";
 import AppEmpty from "@/components/ui/AppEmpty.vue";
 import AppIcon from "@/components/ui/AppIcon.vue";
 import AppModal from "@/components/ui/AppModal.vue";
+import AppSelect from "@/components/ui/AppSelect.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import FormField from "@/components/ui/FormField.vue";
 import FileKindIcon from "@/components/ui/FileKindIcon.vue";
@@ -18,6 +19,7 @@ import { useDeliveryAction } from "@/delivery/actions";
 import { fileDeliverySource } from "@/delivery/sources";
 import { copyText, createRequestGate, describeError, logError, useAsync } from "@/lib/async";
 import { formatBytes, formatRelative, formatTime, pathSegments } from "@/lib/format";
+import { collectDroppedFiles } from "@/lib/droppedFiles";
 import { rememberFilePath } from "@/lib/filePathMemory";
 import { useSession } from "@/stores/session";
 import { topbarSlot } from "@/stores/shell";
@@ -200,17 +202,40 @@ async function reload(): Promise<void> {
   );
 }
 
-// 上传完成后只刷新"当前目录"：后台可能正在上传别的目录的文件，
-// 那些目录的列表会在用户切过去时自然刷新。
+// 普通文件只刷新其直接父目录；目录批次会在全部任务收尾时统一刷新，避免逐文件重复请求。
 const offUploadComplete = onUploadComplete((_node, parent) => {
-  if (parent === currentPath.value) {
-    void reload();
-  }
+  if (parent === currentPath.value) void reload();
 });
+const uploadBatchWatchStops = new Set<() => void>();
+
+function watchUploadBatch(ids: string[], basePath: string): void {
+  if (ids.length === 0) return;
+  const batchIds = new Set(ids);
+  let stopWatch = () => {};
+  const hasPendingItems = () => uploadState.items.value.some(
+    (item) => batchIds.has(item.id) && (item.status === "queued" || item.status === "running"),
+  );
+  const finish = () => {
+    stopWatch();
+    uploadBatchWatchStops.delete(stopWatch);
+    const current = currentPath.value;
+    if (route.name === "files" && (current === basePath || current.startsWith(basePath === "/" ? "/" : `${basePath}/`))) {
+      void reload();
+    }
+  };
+  stopWatch = watch(hasPendingItems, (pending) => {
+    if (!pending) finish();
+  });
+  uploadBatchWatchStops.add(stopWatch);
+  if (!hasPendingItems()) finish();
+}
 
 onMounted(() => {
   document.addEventListener("click", onDocumentClick);
   document.addEventListener("keydown", onDocumentKeydown);
+  document.addEventListener("dragover", onDragOver, true);
+  document.addEventListener("dragleave", onDragLeave, true);
+  document.addEventListener("drop", onDrop, true);
   // 把当前落点当成最新意图；这也确保手动回到根目录后，下一次站内返回仍停在根目录。
   rememberFilePath(session.state.actorKey, currentPath.value);
   void reload();
@@ -219,7 +244,12 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener("click", onDocumentClick);
   document.removeEventListener("keydown", onDocumentKeydown);
+  document.removeEventListener("dragover", onDragOver, true);
+  document.removeEventListener("dragleave", onDragLeave, true);
+  document.removeEventListener("drop", onDrop, true);
   offUploadComplete();
+  for (const stop of uploadBatchWatchStops) stop();
+  uploadBatchWatchStops.clear();
 });
 
 watch(currentPath, (path) => {
@@ -455,54 +485,265 @@ async function doDelete(): Promise<void> {
 // ---------------------------------------------------------------- 上传
 
 const fileInput = ref<HTMLInputElement | null>(null);
+const folderInput = ref<HTMLInputElement | null>(null);
 const dragActive = ref(false);
+const folderUploadBusy = ref(false);
+const uploadActionModel = ref<string>("");
+const uploadOptions: { value: string; label: string }[] = [
+  { value: "files", label: "选择文件" },
+  { value: "folder", label: "选择文件夹" },
+];
+
+function onUploadOption(value: string): void {
+  if (value === "files") pickFiles();
+  else if (value === "folder") pickFolder();
+}
 
 function pickFiles(): void {
+  if (fileInput.value) fileInput.value.value = "";
   fileInput.value?.click();
+}
+
+interface PickerFileHandle {
+  kind: "file";
+  name: string;
+  getFile(): Promise<File>;
+}
+
+interface PickerDirectoryHandle {
+  kind: "directory";
+  name: string;
+  values(): AsyncIterableIterator<PickerFileHandle | PickerDirectoryHandle>;
+}
+
+interface DirectoryPickerWindow extends Window {
+  showDirectoryPicker?: () => Promise<PickerDirectoryHandle>;
+}
+
+function pickFolder(): void {
+  const showDirectoryPicker = (window as DirectoryPickerWindow).showDirectoryPicker;
+  if (showDirectoryPicker) {
+    void pickFolderWithHandle(showDirectoryPicker);
+    return;
+  }
+  if (folderInput.value) folderInput.value.value = "";
+  folderInput.value?.click();
+}
+
+async function pickFolderWithHandle(showDirectoryPicker: () => Promise<PickerDirectoryHandle>): Promise<void> {
+  try {
+    const root = await showDirectoryPicker.call(window);
+    const batch = { files: [] as File[], relativePaths: [] as string[], directories: [] as string[] };
+    await collectDirectoryHandle(root, "", batch);
+    if (batch.files.length === 0 && batch.directories.length === 0) {
+      toasts.info("所选文件夹为空");
+      return;
+    }
+    await queueUploadBatch(batch.files, batch.relativePaths, batch.directories);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return;
+    toasts.error("无法读取所选文件夹", describeError(error));
+  }
+}
+
+async function collectDirectoryHandle(
+  directory: PickerDirectoryHandle,
+  prefix: string,
+  batch: { files: File[]; relativePaths: string[]; directories: string[] },
+): Promise<void> {
+  const path = prefix ? `${prefix}/${directory.name}` : directory.name;
+  batch.directories.push(path);
+  for await (const child of directory.values()) {
+    if (child.kind === "directory") {
+      await collectDirectoryHandle(child, path, batch);
+    } else {
+      batch.files.push(await child.getFile());
+      batch.relativePaths.push(`${path}/${child.name}`);
+    }
+  }
 }
 
 function onFilesPicked(event: Event): void {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
   input.value = "";
-  if (files.length > 0) {
-    enqueueUploads(files, currentPath.value, "rename");
+  void queueUploadBatch(files, files.map(file => file.name), []);
+}
+
+function onFolderPicked(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = "";
+  if (files.length === 0) {
+    toasts.info("所选文件夹为空，或当前浏览器没有返回文件夹内容");
+    return;
+  }
+  const relativePaths = files.map(file => (file as File & { webkitRelativePath?: string }).webkitRelativePath || "");
+  if (relativePaths.some(path => !path.includes("/"))) {
+    toasts.error("当前浏览器不支持保留文件夹结构，请使用支持目录选择的浏览器");
+    return;
+  }
+  void queueUploadBatch(files, relativePaths, []);
+}
+
+function relativeSegments(path: string): string[] {
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length === 0 || segments.some(part => part === "." || part === "..")) {
+    throw new Error(`文件夹路径无效：${path}`);
+  }
+  return segments;
+}
+
+function joinLogicalPath(parent: string, relative: string): string {
+  return relativeSegments(relative).reduce(
+    (path, part) => path === "/" ? `/${part}` : `${path}/${part}`,
+    parent,
+  );
+}
+
+function uploadDirectories(relativePaths: readonly string[], explicitDirectories: readonly string[]): string[] {
+  const directories = new Set<string>();
+  for (const directory of explicitDirectories) {
+    const parts = relativeSegments(directory);
+    for (let index = 1; index <= parts.length; index++) directories.add(parts.slice(0, index).join("/"));
+  }
+  for (const relative of relativePaths) {
+    const parts = relativeSegments(relative).slice(0, -1);
+    for (let index = 1; index <= parts.length; index++) directories.add(parts.slice(0, index).join("/"));
+  }
+  return [...directories].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
+}
+
+async function ensureUploadDirectories(basePath: string, directories: readonly string[]): Promise<number> {
+  if (directories.length === 0) return 0;
+  if (!canManage.value) {
+    for (let offset = 0; offset < directories.length; offset += 4) {
+      await Promise.all(directories.slice(offset, offset + 4).map(async (directory) => {
+        const target = joinLogicalPath(basePath, directory);
+        let nodeType: number;
+        try {
+          nodeType = (await fsApi.stat(target)).node.nodeType;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 404) {
+            throw new Error("所选文件夹包含尚不存在的目录，当前账号没有创建文件夹权限");
+          }
+          throw error;
+        }
+        if (nodeType !== 1) throw new Error(`同名文件阻止创建目录：${target}`);
+      }));
+    }
+    return directories.length;
+  }
+
+  const maxDepth = directories.reduce((max, directory) => Math.max(max, directory.split("/").length), 0);
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    const level = directories.filter(directory => directory.split("/").length === depth);
+    for (let offset = 0; offset < level.length; offset += 4) {
+      await Promise.all(level.slice(offset, offset + 4).map(async (directory) => {
+        const parts = directory.split("/");
+        const name = parts.pop()!;
+        const parentPath = parts.length ? joinLogicalPath(basePath, parts.join("/")) : basePath;
+        const target = joinLogicalPath(basePath, directory);
+        try {
+          await fsApi.mkdir(parentPath, name);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.status !== 409) throw error;
+          const { node } = await fsApi.stat(target);
+          if (node.nodeType !== 1) throw error;
+        }
+      }));
+    }
+  }
+  return directories.length;
+}
+
+async function queueUploadBatch(files: File[], relativePaths: string[], explicitDirectories: string[]): Promise<void> {
+  if (files.length === 0 && explicitDirectories.length === 0) return;
+  const basePath = currentPath.value;
+  let safePaths: string[];
+  let directories: string[];
+  try {
+    safePaths = files.map((file, index) => relativeSegments(relativePaths[index] || file.name).join("/"));
+    directories = uploadDirectories(safePaths, explicitDirectories);
+  } catch (error) {
+    toasts.error("准备上传失败", describeError(error));
+    return;
+  }
+
+  if (directories.length === 0) {
+    enqueueUploads(files, basePath, "rename", safePaths);
     toasts.info(`已加入上传队列（${files.length} 个文件）`);
+    return;
+  }
+  if (folderUploadBusy.value) {
+    toasts.info("正在准备另一个文件夹上传，请稍后再试");
+    return;
+  }
+
+  folderUploadBusy.value = true;
+  let directoryCount = 0;
+  toasts.info(`正在准备 ${directories.length} 个文件夹…`);
+  try {
+    directoryCount = await ensureUploadDirectories(basePath, directories);
+    const ids = enqueueUploads(files, basePath, "rename", safePaths);
+    if (ids.length > 0) watchUploadBatch(ids, basePath);
+    if (route.name === "files" && currentPath.value === basePath) void reload();
+    if (files.length > 0) {
+      toasts.info(`已加入上传队列（${files.length} 个文件，${directoryCount} 个文件夹）`);
+    } else {
+      toasts.success(`已准备 ${directoryCount} 个文件夹`);
+    }
+  } catch (error) {
+    toasts.error(
+      "准备上传失败",
+      `${describeError(error)}。若已创建部分文件夹，它们会保留，重试时可复用。`,
+    );
+    if (route.name === "files" && currentPath.value === basePath) void reload();
+  } finally {
+    folderUploadBusy.value = false;
   }
 }
 
-function onDrop(event: DragEvent): void {
+function hasFileTransfer(transfer: DataTransfer | null): transfer is DataTransfer {
+  return Boolean(transfer && (
+    Array.from(transfer.items ?? []).some(item => item.kind === "file") || transfer.files.length > 0
+  ));
+}
+
+async function onDrop(event: DragEvent): Promise<void> {
   dragActive.value = false;
+  const transfer = event.dataTransfer;
+  if (!hasFileTransfer(transfer)) return;
+  // 捕获阶段在 document 上统一接管整个应用页面，避免侧栏区域漏接文件拖放。
+  event.preventDefault();
   if (!canUpload.value) {
     toasts.error("当前账号没有上传权限");
     return;
   }
-  const files = Array.from(event.dataTransfer?.files ?? []);
-  if (files.length > 0) {
-    enqueueUploads(files, currentPath.value, "rename");
-    toasts.info(`已加入上传队列（${files.length} 个文件）`);
+  try {
+    const batch = await collectDroppedFiles(Array.from(transfer.items ?? []), transfer.files);
+    await queueUploadBatch(batch.files, batch.relativePaths, batch.directories);
+  } catch (error) {
+    toasts.error("无法读取拖入的文件或文件夹", describeError(error));
   }
 }
 
-/** 没有上传权限就不亮遮罩：否则用户会一直看到"松开即可上传"，松手才被告知没权限。 */
-function onDragOver(): void {
+/** 整个文件页都可接收文件拖放；无上传权限时仍阻止浏览器直接打开拖入文件。 */
+function onDragOver(event: DragEvent): void {
+  if (!hasFileTransfer(event.dataTransfer)) return;
+  event.preventDefault();
   if (!canUpload.value) {
+    dragActive.value = false;
     return;
   }
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
   dragActive.value = true;
 }
 
-/**
- * dragleave 在指针从容器移向任一子元素时也会冒泡上来（事件目标是容器）。
- * 只有真正离开整个容器才撤遮罩，否则遮罩会在掠过行、按钮时闪一下。
- */
+/** dragleave 在页面元素之间切换时保持遮罩，仅离开整个文档才撤掉提示。 */
 function onDragLeave(event: DragEvent): void {
-  const container = event.currentTarget as HTMLElement | null;
   const next = event.relatedTarget as Node | null;
-  // relatedTarget 为空表示指针离开了窗口，按离开处理。
-  if (container && next && container.contains(next)) {
-    return;
-  }
+  if (next && document.documentElement.contains(next)) return;
   dragActive.value = false;
 }
 
@@ -630,13 +871,13 @@ async function copyDirectLink(link: DirectLink): Promise<void> {
 </script>
 
 <template>
-  <div
-    class="files"
-    :class="{ 'files--drop': dragActive }"
-    @dragover.prevent="onDragOver"
-    @dragleave="onDragLeave"
-    @drop.prevent="onDrop"
-  >
+  <div class="files">
+    <Teleport to="body">
+      <div v-if="dragActive" class="files__drop-overlay" aria-hidden="true">
+        <span>松开即可上传到当前目录</span>
+      </div>
+    </Teleport>
+
     <h1 class="sr-only">文件</h1>
 
     <div class="files__head">
@@ -651,9 +892,32 @@ async function copyDirectLink(link: DirectLink): Promise<void> {
     <Teleport v-if="topbarSlot" :to="topbarSlot">
       <div class="files__head-actions">
         <input ref="fileInput" type="file" multiple class="sr-only" @change="onFilesPicked" />
-        <AppButton v-if="canUpload" size="sm" variant="primary" icon="upload" @click="pickFiles">
-          上传
-        </AppButton>
+        <input ref="folderInput" type="file" multiple webkitdirectory directory class="sr-only" @change="onFolderPicked" />
+        <AppSelect
+          v-if="canUpload"
+          :model-value="uploadActionModel"
+          :options="uploadOptions"
+          aria-label="上传方式"
+          placeholder="上传方式"
+          size="sm"
+          @update:model-value="onUploadOption"
+        >
+          <template #trigger="{ triggerRef, expanded, toggle }">
+            <div :ref="triggerRef" class="files__upload-trigger">
+              <AppButton
+                size="sm"
+                variant="primary"
+                icon="upload"
+                aria-label="上传方式"
+                aria-haspopup="listbox"
+                :aria-expanded="expanded"
+                @click="toggle"
+              >
+                上传 <AppIcon name="ri-arrow-down-s-line" :size="14" />
+              </AppButton>
+            </div>
+          </template>
+        </AppSelect>
         <AppButton v-if="canManage" size="sm" icon="plus" @click="mkdirOpen = true">新建文件夹</AppButton>
         <AppButton size="sm" icon="refresh" :loading="list.loading.value" title="刷新" @click="reload()" />
       </div>
@@ -1046,21 +1310,34 @@ async function copyDirectLink(link: DirectLink): Promise<void> {
   gap: var(--sp-3);
 }
 
-.files--drop::after {
-  content: "松开即可上传到当前目录";
+.files__drop-overlay {
   position: fixed;
-  inset: var(--sp-4);
-  border: 2px dashed var(--c-accent);
-  border-radius: var(--r-lg);
-  background: color-mix(in srgb, var(--c-accent-weak) 70%, transparent);
-  color: var(--c-accent);
+  inset: 0;
+  z-index: 75; /* 覆盖侧栏抽屉和传输浮窗，但低于模态框与 toast。 */
   display: flex;
   align-items: center;
   justify-content: center;
+  background: color-mix(in srgb, var(--c-accent-weak) 55%, transparent);
+  color: var(--c-accent);
   font-weight: 650;
   font-size: var(--fs-lg);
-  z-index: 30;
   pointer-events: none;
+}
+
+.files__drop-overlay::before {
+  content: "";
+  position: absolute;
+  inset: var(--sp-4);
+  border: 2px dashed var(--c-accent);
+  border-radius: var(--r-lg);
+}
+
+.files__drop-overlay > span {
+  position: relative;
+  padding: var(--sp-3) var(--sp-5);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  box-shadow: var(--shadow-md);
 }
 
 /* ---------------------------------------------------------------- 页头 */
@@ -1085,6 +1362,10 @@ async function copyDirectLink(link: DirectLink): Promise<void> {
   align-items: center;
   gap: var(--sp-2);
   flex-wrap: wrap;
+}
+
+.files__upload-trigger {
+  display: inline-flex;
 }
 
 /* 尺寸贴着面包屑走：比正文输入框矮一档，才是"同一行的搜索"。 */

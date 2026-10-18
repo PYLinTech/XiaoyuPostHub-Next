@@ -62,14 +62,21 @@ export function enqueueUploads(
   files: File[],
   parentPath: string,
   conflictAction: ConflictAction = "rename",
+  relativePaths?: readonly string[],
 ): string[] {
   const ids: string[] = [];
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
+    const relative = relativePaths?.[index] || file.name;
+    const directories = relative.split("/").filter(Boolean).slice(0, -1);
+    const targetParent = directories.reduce(
+      (path, segment) => path === "/" ? `/${segment}` : `${path}/${segment}`,
+      parentPath,
+    );
     const id = `up-${nextId++}`;
     state.items.push({
       id,
       file,
-      parentPath,
+      parentPath: targetParent,
       conflictAction,
       status: "queued",
       progress: emptyProgress(file.name, file.size),

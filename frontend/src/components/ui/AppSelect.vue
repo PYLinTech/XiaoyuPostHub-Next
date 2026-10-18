@@ -1,5 +1,5 @@
 <script setup lang="ts" generic="T extends string | number">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, type ComponentPublicInstance } from "vue";
 import { useOverlayScroll } from "@/lib/overlayScroll";
 import { usePopover } from "@/lib/popover";
 
@@ -23,6 +23,13 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{ "update:modelValue": [T] }>();
+defineSlots<{
+  trigger?: (props: {
+    triggerRef: (element: Element | ComponentPublicInstance | null) => void;
+    expanded: boolean;
+    toggle: () => void;
+  }) => unknown;
+}>();
 
 const triggerEl = ref<HTMLElement | null>(null);
 const menuEl = ref<HTMLElement | null>(null);
@@ -52,6 +59,10 @@ function toggle(): void {
     return;
   }
   toggleMenu();
+}
+
+function setTriggerElement(element: Element | ComponentPublicInstance | null): void {
+  triggerEl.value = element instanceof HTMLElement ? element : null;
 }
 
 function scrollToSelected(): void {
@@ -92,19 +103,21 @@ function pick(value: T): void {
 
 <template>
   <div class="asel" :class="{ 'asel--sm': size === 'sm' }">
-    <button
-      ref="triggerEl"
-      type="button"
-      class="select asel__trigger"
-      :class="{ 'select--sm': size === 'sm' }"
-      :aria-label="ariaLabel"
-      aria-haspopup="listbox"
-      :aria-expanded="open"
-      :disabled="disabled"
-      @click="toggle"
-    >
-      <span class="truncate">{{ currentLabel }}</span>
-    </button>
+    <slot name="trigger" :trigger-ref="setTriggerElement" :expanded="open" :toggle="toggle">
+      <button
+        ref="triggerEl"
+        type="button"
+        class="select asel__trigger"
+        :class="{ 'select--sm': size === 'sm' }"
+        :aria-label="ariaLabel"
+        aria-haspopup="listbox"
+        :aria-expanded="open"
+        :disabled="disabled"
+        @click="toggle"
+      >
+        <span class="truncate">{{ currentLabel }}</span>
+      </button>
+    </slot>
 
     <!-- 宿主层不滚，给滑块轨道提供定位上下文；真正的滚动容器是里面的 ul。 -->
     <div
