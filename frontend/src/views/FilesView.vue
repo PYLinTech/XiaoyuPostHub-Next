@@ -18,6 +18,7 @@ import { useDeliveryAction } from "@/delivery/actions";
 import { fileDeliverySource } from "@/delivery/sources";
 import { copyText, createRequestGate, describeError, logError, useAsync } from "@/lib/async";
 import { formatBytes, formatRelative, formatTime, pathSegments } from "@/lib/format";
+import { rememberFilePath } from "@/lib/filePathMemory";
 import { useSession } from "@/stores/session";
 import { topbarSlot } from "@/stores/shell";
 import { enqueueUploads, onUploadComplete, useUploads } from "@/stores/uploads";
@@ -53,20 +54,6 @@ const currentPath = computed(() => {
   const trimmed = String(value).replace(/^\/+|\/+$/g, "");
   return trimmed ? `/${trimmed}` : "/";
 });
-
-const rememberedPathKey = computed(() => `xph.files.lastPath:${session.state.actorKey || "guest"}`);
-function readRememberedPath(): string {
-  try {
-    const value = localStorage.getItem(rememberedPathKey.value) ?? "/";
-    return value.startsWith("/") ? value : "/";
-  } catch {
-    return "/";
-  }
-}
-
-function rememberPath(path: string): void {
-  try { localStorage.setItem(rememberedPathKey.value, path); } catch { /* 存储禁用不影响文件浏览。 */ }
-}
 
 function fileRoute(path: string): string {
   return path === "/" ? "/files" : `/files${path}`;
@@ -207,7 +194,6 @@ async function reload(): Promise<void> {
     return;
   }
 
-  if (typeof route.query.select !== "string") rememberPath(requestedPath);
   // 目录内容变了，之前选中的项可能已经不存在。
   selection.value = selection.value.filter((path) =>
     list.data.value.items.some((item) => item.path === path),
@@ -225,14 +211,9 @@ const offUploadComplete = onUploadComplete((_node, parent) => {
 onMounted(() => {
   document.addEventListener("click", onDocumentClick);
   document.addEventListener("keydown", onDocumentKeydown);
-  const remembered = currentPath.value === "/" && typeof route.query.select !== "string"
-    ? readRememberedPath()
-    : "/";
-  if (remembered !== "/" && remembered !== currentPath.value) {
-    void router.replace(fileRoute(remembered));
-  } else {
-    void reload();
-  }
+  // 把当前落点当成最新意图；这也确保手动回到根目录后，下一次站内返回仍停在根目录。
+  rememberFilePath(session.state.actorKey, currentPath.value);
+  void reload();
 });
 
 onBeforeUnmount(() => {
@@ -241,7 +222,8 @@ onBeforeUnmount(() => {
   offUploadComplete();
 });
 
-watch(currentPath, () => {
+watch(currentPath, (path) => {
+  rememberFilePath(session.state.actorKey, path);
   closeMenu();
   void reload();
 });

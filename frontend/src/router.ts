@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router"
 import { Perm } from "@/api/types";
 import { bootstrap, useSession } from "@/stores/session";
 import { useToasts } from "@/stores/toast";
+import { readRememberedFilePath } from "@/lib/filePathMemory";
 
 // 路由表。
 //
@@ -45,6 +46,19 @@ const routes: RouteRecordRaw[] = [
     name: "files",
     component: () => import("@/views/FilesView.vue"),
     meta: { auth: true, perm: Perm.Download, title: "文件" },
+    beforeEnter: (to, from) => {
+      // 仅从其他页面通过站内导航返回文件页根目录时恢复本标签页上次访问的位置。
+      // 文件页内的面包屑点击、初次访问 /files、显式根目录 URL 与直链定位都尊重根目录。
+      const rawPath = to.params.path;
+      const hasPath = Array.isArray(rawPath) ? rawPath.length > 0 : Boolean(rawPath);
+      if (hasPath || from.name == null || from.name === "files" || typeof to.query.select === "string") {
+        return;
+      }
+      const remembered = readRememberedFilePath(useSession().state.actorKey);
+      if (remembered !== "/") {
+        return { path: `/files${remembered}`, query: to.query, hash: to.hash, replace: true };
+      }
+    },
   },
   {
     path: "/shares",
