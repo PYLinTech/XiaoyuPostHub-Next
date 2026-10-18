@@ -230,10 +230,121 @@ func (s *Server) withIdentity(next http.Handler) http.Handler {
 	})
 }
 
-// wrap 组合全局中间件。顺序固定：日志与 panic 捕获必须在身份解析之外，
-// 否则身份解析自身的 panic 会把请求打成裸 500。
+// wrap 组合全局中间件。安全头、日志与 panic 捕获包在身份解析之外；CORS 位于
+// 身份解析之前，以便 OPTIONS 预检不要求登录，同时仍由外层日志和安全头兜底。
 func (s *Server) wrap(h http.Handler) http.Handler {
-	return securityHeaders(recoverer(accessLog(s.withIdentity(h))))
+	return securityHeaders(recoverer(accessLog(s.cors(s.withIdentity(h)))))
+}
+
+const (
+	corsAllowedMethods = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+	corsAllowedHeaders = "Authorization, Content-Type, Range"
+	corsExposedHeaders = "Accept-Ranges, Content-Disposition, Content-Length, Content-Range"
+)
+
+var corsMethodSet = map[string]struct{}{
+	http.MethodGet: {}, http.MethodHead: {}, http.MethodPost: {}, http.MethodPut: {},
+	http.MethodPatch: {}, http.MethodDelete: {}, http.MethodOptions: {},
+}
+
+var corsHeaderSet = map[string]struct{}{
+	"authorization": {}, "content-type": {}, "range": {},
+}
+
+// cors 动态读取运行期配置，并在身份中间件前结束预检请求。
+// 即使业务路由要求登录，浏览器也必须先能无凭据地完成 OPTIONS 预检。
+func (s *Server) cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := corsPolicyForPath(s.Settings.Runtime(r.Context()).CORS, r.URL.Path)
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if !cfg.Enabled || origin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		addVary(w.Header(), "Origin")
+
+		allowed, wildcard := false, false
+		for _, candidate := range cfg.Origins {
+			if candidate == "*" {
+				wildcard = true
+				allowed = true
+				break
+			}
+			if strings.EqualFold(candidate, origin) {
+				allowed = true
+			}
+		}
+
+		preflight := r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
+		if preflight {
+			addVary(w.Header(), "Access-Control-Request-Method")
+			addVary(w.Header(), "Access-Control-Request-Headers")
+		}
+		if !allowed {
+			if preflight {
+				http.Error(w, "跨域来源不在允许列表中", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if wildcard {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		if preflight {
+			method := strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
+			if _, ok := corsMethodSet[method]; !ok || !corsHeadersAllowed(r.Header.Get("Access-Control-Request-Headers")) {
+				http.Error(w, "跨域预检请求不被允许", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)
+			w.Header().Set("Access-Control-Allow-Headers", corsAllowedHeaders)
+			w.Header().Set("Access-Control-Max-Age", "600")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		w.Header().Set("Access-Control-Expose-Headers", corsExposedHeaders)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func corsPolicyForPath(cfg settings.CORSRuntime, path string) settings.CORSPolicy {
+	switch {
+	case path == "/d" || strings.HasPrefix(path, "/d/") || path == "/api/direct-link" || strings.HasPrefix(path, "/api/direct-link/"):
+		return cfg.DirectLink
+	case path == "/s" || strings.HasPrefix(path, "/s/") || path == "/api/s" || strings.HasPrefix(path, "/api/s/") || path == "/api/p" || strings.HasPrefix(path, "/api/p/"):
+		return cfg.Share
+	default:
+		return cfg.Main
+	}
+}
+
+func corsHeadersAllowed(raw string) bool {
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if _, ok := corsHeaderSet[name]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func addVary(header http.Header, value string) {
+	for _, line := range header.Values("Vary") {
+		for _, item := range strings.Split(line, ",") {
+			if strings.EqualFold(strings.TrimSpace(item), value) {
+				return
+			}
+		}
+	}
+	header.Add("Vary", value)
 }
 
 // securityHeaders 统一写入与业务无关、但每个响应都应具备的浏览器防护头。

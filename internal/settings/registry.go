@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,18 @@ const (
 	KeySystemMode Key = "site.system_mode"
 	// KeyDirectLinkEnabled 是否开放直链功能。
 	KeyDirectLinkEnabled Key = "site.direct_link_enabled"
+
+	// ---- 跨域访问 ----
+
+	// KeyCORSMainEnabled / KeyCORSMainOrigins 主站页面与 API 的跨域策略。
+	KeyCORSMainEnabled Key = "cors.main_enabled"
+	KeyCORSMainOrigins Key = "cors.main_origins"
+	// KeyCORSShareEnabled / KeyCORSShareOrigins 分享页面及访客接口的跨域策略。
+	KeyCORSShareEnabled Key = "cors.share_enabled"
+	KeyCORSShareOrigins Key = "cors.share_origins"
+	// KeyCORSDirectEnabled / KeyCORSDirectOrigins 直链管理 API 与交付地址的跨域策略。
+	KeyCORSDirectEnabled Key = "cors.direct_link_enabled"
+	KeyCORSDirectOrigins Key = "cors.direct_link_origins"
 
 	// ---- 分享与取件 ----
 
@@ -226,6 +239,14 @@ var registry = []Descriptor{
 			"因此这是一个需要显式打开的公开入口。",
 		Kind: KindBool, Default: "false", Scope: ScopeHot,
 	},
+
+	// ---- 跨域访问 ----
+	corsBoolDescriptor("主站", KeyCORSMainEnabled, "除分享页、直链外的主站页面与 API。"),
+	corsOriginsDescriptor("主站", KeyCORSMainOrigins),
+	corsBoolDescriptor("分享", KeyCORSShareEnabled, "分享页面 /s/* 及访客接口 /api/s/*、/api/p/*。"),
+	corsOriginsDescriptor("分享", KeyCORSShareOrigins),
+	corsBoolDescriptor("直链", KeyCORSDirectEnabled, "直链接口 /api/direct-link* 与交付地址 /d/*。"),
+	corsOriginsDescriptor("直链", KeyCORSDirectOrigins),
 
 	// ---- 分享与取件 ----
 	{
@@ -492,6 +513,61 @@ func Defaults() map[Key]string {
 // 保留该字段是为了让对象元数据与"按版本取密钥"的解密路径不必改变。
 const PrimaryKeyID = "primary"
 
+func corsBoolDescriptor(label string, key Key, scope string) Descriptor {
+	return Descriptor{
+		Key: key, Section: "cors", Title: label + "允许跨域访问",
+		Help: "开启后，仅对" + scope + "生效；默认关闭。跨域 Cookie 不会开放。",
+		Kind: KindBool, Default: "false", Scope: ScopeHot,
+	}
+}
+
+func corsOriginsDescriptor(label string, key Key) Descriptor {
+	return Descriptor{
+		Key: key, Section: "cors", Title: label + "允许的跨域来源",
+		Help: "填写完整来源（含 http:// 或 https://），多个来源用逗号分隔；单独填写 * 表示允许所有来源。",
+		Kind: KindCSV, Default: "", Scope: ScopeHot,
+		Placeholder: "https://app.example.com,https://admin.example.com 或 *",
+		Warn:        "单独设置 * 会允许任何网站的前端读取该类响应；仅在确实需要公开访问时使用。",
+		ValidateFn:  validateCORSOrigins,
+	}
+}
+
+// validateCORSOrigins 校验浏览器 Origin 列表。CORS 比对的是完整 origin，
+// 因此仅接受 http(s) scheme + host[:port]，不接受路径、用户信息、查询或片段。
+// * 只能单独出现，避免管理员误以为它与显式来源列表还会取交集。
+func validateCORSOrigins(raw string) error {
+	origins := make([]string, 0, 4)
+	wildcard := false
+	for _, part := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(part)
+		if origin == "" {
+			continue
+		}
+		if origin == "*" {
+			wildcard = true
+			continue
+		}
+		if strings.ContainsAny(origin, "*?#") {
+			return fmt.Errorf("来源 %q 格式不合法", origin)
+		}
+		u, err := url.Parse(origin)
+		if err != nil || (!strings.EqualFold(u.Scheme, "http") && !strings.EqualFold(u.Scheme, "https")) || u.Hostname() == "" || u.User != nil || u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("来源 %q 必须是完整的 http(s) origin，不含路径", origin)
+		}
+		if port := u.Port(); port != "" {
+			n, err := strconv.Atoi(port)
+			if err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("来源 %q 的端口不合法", origin)
+			}
+		}
+		origins = append(origins, origin)
+	}
+	if wildcard && len(origins) > 0 {
+		return fmt.Errorf("* 表示允许所有来源，不能与具体来源同时填写")
+	}
+	return nil
+}
+
 // validateKey 在写入侧就检查"能不能解析成 32 字节密钥"，而不是等到上传时
 // 才发现——那时失败只会表现为"上传报错"，很难联想到是密钥写错了。
 // 编码用 URL 安全 Base64（无填充，43 字符）：手工转录时不会遇到需要区分
@@ -552,6 +628,7 @@ func pepperFromKey(key []byte) []byte {
 // 与锁的访问次数放大一个数量级，也让"同一次操作读到半新半旧的配置"成为可能。
 type Runtime struct {
 	Site     SiteRuntime
+	CORS     CORSRuntime
 	Share    ShareRuntime
 	Auth     AuthRuntime
 	Storage  StorageRuntime
@@ -582,6 +659,19 @@ type SiteRuntime struct {
 
 // MailEnabled 表示邮件侧是否对外提供。文件侧恒常提供，没有对应的判定。
 func (s SiteRuntime) MailEnabled() bool { return s.SystemMode != SystemModeFilesOnly }
+
+// CORSRuntime 是按路由类别拆分的浏览器跨域配置。
+type CORSRuntime struct {
+	Main       CORSPolicy
+	Share      CORSPolicy
+	DirectLink CORSPolicy
+}
+
+// CORSPolicy 是一组来源白名单；启用但列表为空时仍拒绝所有来源。
+type CORSPolicy struct {
+	Enabled bool
+	Origins []string
+}
 
 // ShareRuntime 是分享与取件码相关配置。
 type ShareRuntime struct {
@@ -780,6 +870,15 @@ func buildRuntime(overlays map[Key]string) Runtime {
 	default:
 		systemMode = SystemModeBoth
 	}
+	corsPolicy := func(enabledKey, originsKey Key) CORSPolicy {
+		origins := make([]string, 0, 4)
+		for _, origin := range strings.Split(get(originsKey), ",") {
+			if origin = strings.TrimSpace(origin); origin != "" {
+				origins = append(origins, origin)
+			}
+		}
+		return CORSPolicy{Enabled: boolean(enabledKey), Origins: origins}
+	}
 	// sizeOrInvalid 解析大小配置；非法值返回 -1 哨兵，由业务层拒绝，
 	// 而不是把损坏的上限当成 0（"不限"）放行。
 	sizeOrInvalid := func(k Key) int64 {
@@ -847,6 +946,11 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			GuestPreview:      boolean(KeyGuestPreview),
 			SystemMode:        systemMode,
 			DirectLinkEnabled: boolean(KeyDirectLinkEnabled),
+		},
+		CORS: CORSRuntime{
+			Main:       corsPolicy(KeyCORSMainEnabled, KeyCORSMainOrigins),
+			Share:      corsPolicy(KeyCORSShareEnabled, KeyCORSShareOrigins),
+			DirectLink: corsPolicy(KeyCORSDirectEnabled, KeyCORSDirectOrigins),
 		},
 		Share: ShareRuntime{
 			PickupTTL:        pickupTTL,

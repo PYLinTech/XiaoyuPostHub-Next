@@ -166,6 +166,44 @@ func TestSecretFailsClosedWhenMasterSecretChanges(t *testing.T) {
 	}
 }
 
+func TestCORSDefaultsValidationAndRuntime(t *testing.T) {
+	st, _ := newTestStore(t)
+	ctx := context.Background()
+	rt := st.Runtime(ctx).CORS
+	for _, policy := range []CORSPolicy{rt.Main, rt.Share, rt.DirectLink} {
+		if policy.Enabled || len(policy.Origins) != 0 {
+			t.Fatalf("三类跨域策略默认都应关闭: %+v", rt)
+		}
+	}
+	for _, key := range []Key{KeyCORSMainEnabled, KeyCORSShareEnabled, KeyCORSDirectEnabled} {
+		if got := st.Get(ctx, key); got != "false" {
+			t.Errorf("%s 默认应关闭，实得 %q", key, got)
+		}
+	}
+
+	if err := st.SetMany(ctx, map[Key]string{
+		KeyCORSMainEnabled: "true",
+		KeyCORSMainOrigins: "https://app.example.com, http://localhost:5173",
+	}, 1); err != nil {
+		t.Fatalf("写入合法跨域配置失败: %v", err)
+	}
+	got := st.Runtime(ctx).CORS.Main
+	if !got.Enabled || len(got.Origins) != 2 || got.Origins[0] != "https://app.example.com" || got.Origins[1] != "http://localhost:5173" {
+		t.Fatalf("跨域运行快照错误: %+v", got)
+	}
+	if err := st.Set(ctx, KeyCORSMainOrigins, "*", 1); err != nil {
+		t.Fatalf("应接受全来源通配符: %v", err)
+	}
+	for _, invalid := range []string{"https://example.com/path", "https://example.com?", "https://example.com#"} {
+		if err := st.Set(ctx, KeyCORSMainOrigins, invalid, 1); err == nil {
+			t.Errorf("不应接受非法来源 %q", invalid)
+		}
+	}
+	if err := st.Set(ctx, KeyCORSMainOrigins, "*,https://example.com", 1); err == nil {
+		t.Fatal("通配符不应与具体来源混用")
+	}
+}
+
 // TestValidationRejectsBadValues 写入侧必须拦住坏值。
 func TestValidationRejectsBadValues(t *testing.T) {
 	st, _ := newTestStore(t)

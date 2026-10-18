@@ -85,6 +85,7 @@ onMounted(load);
 // 直接跳过去，而横向页签在窄屏会被挤进横向滚动条，多一个分区就少一个可见。
 const SECTION_ICONS: Record<string, string> = {
   site: "ri-home-smile-line",
+  cors: "ri-global-line",
   share: "share",
   auth: "user",
   storage: "hardDrive",

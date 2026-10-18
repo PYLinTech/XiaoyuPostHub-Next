@@ -51,6 +51,7 @@ type Section struct {
 // Sections 按管理端展示顺序列出全部分组。
 var Sections = []Section{
 	{ID: "site", Title: "站点"},
+	{ID: "cors", Title: "跨域访问"},
 	{ID: "share", Title: "分享与取件"},
 	{ID: "auth", Title: "账号与注册"},
 	{ID: "storage", Title: "存储"},
