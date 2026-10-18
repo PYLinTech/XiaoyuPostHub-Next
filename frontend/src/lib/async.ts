@@ -10,6 +10,8 @@ export interface AsyncState<T> {
   data: Ref<T>;
   loading: Ref<boolean>;
   error: Ref<string>;
+  /** 最近一次请求的原始异常；用于调用方按 HTTP 状态码处理特殊恢复逻辑。 */
+  cause: Ref<unknown>;
   /** 执行一次并写入 data；失败时写入 error 且不抛出，便于模板直接用。 */
   run: () => Promise<T | null>;
   reset: () => void;
@@ -19,6 +21,7 @@ export function useAsync<T>(loader: () => Promise<T>, initial: T): AsyncState<T>
   const data = ref(initial) as Ref<T>;
   const loading = ref(false);
   const error = ref("");
+  const cause = ref<unknown>(null);
   // 守卫放在这里而不是让每个调用方自己记得配：这四个使用点全都挂在
   // "某个参数变了要重载" 上（目录、页长、offset），连点两次就一定会交叉。
   // 少了它，先返回的那次会把 loading 提前关掉，慢的那次还会用旧结果盖掉新的。
@@ -28,6 +31,7 @@ export function useAsync<T>(loader: () => Promise<T>, initial: T): AsyncState<T>
     const token = gate.next();
     loading.value = true;
     error.value = "";
+    cause.value = null;
     try {
       const result = await loader();
       // 过期结果一律不写回：data 只能反映最后一次请求。
@@ -37,6 +41,7 @@ export function useAsync<T>(loader: () => Promise<T>, initial: T): AsyncState<T>
     } catch (err) {
       if (!gate.isCurrent(token)) return null;
       error.value = describeError(err);
+      cause.value = err;
       return null;
     } finally {
       if (gate.isCurrent(token)) loading.value = false;
@@ -46,9 +51,10 @@ export function useAsync<T>(loader: () => Promise<T>, initial: T): AsyncState<T>
   function reset(): void {
     data.value = initial;
     error.value = "";
+    cause.value = null;
   }
 
-  return { data, loading, error, run, reset };
+  return { data, loading, error, cause, run, reset };
 }
 
 /**

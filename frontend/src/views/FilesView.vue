@@ -12,6 +12,7 @@ import FileKindIcon from "@/components/ui/FileKindIcon.vue";
 import FolderPicker from "@/components/FolderPicker.vue";
 import { openFilePreview } from "@/stores/preview";
 import { adminApi, directLinkApi, directLinkUrl, fsApi } from "@/api/endpoints";
+import { ApiError } from "@/api/client";
 import { FILE_ARCHIVE, FILE_DISABLED, Perm, type DirectLink, type ListNode } from "@/api/types";
 import { useDeliveryAction } from "@/delivery/actions";
 import { fileDeliverySource } from "@/delivery/sources";
@@ -52,6 +53,29 @@ const currentPath = computed(() => {
   const trimmed = String(value).replace(/^\/+|\/+$/g, "");
   return trimmed ? `/${trimmed}` : "/";
 });
+
+const rememberedPathKey = computed(() => `xph.files.lastPath:${session.state.actorKey || "guest"}`);
+function readRememberedPath(): string {
+  try {
+    const value = localStorage.getItem(rememberedPathKey.value) ?? "/";
+    return value.startsWith("/") ? value : "/";
+  } catch {
+    return "/";
+  }
+}
+
+function rememberPath(path: string): void {
+  try { localStorage.setItem(rememberedPathKey.value, path); } catch { /* 存储禁用不影响文件浏览。 */ }
+}
+
+function fileRoute(path: string): string {
+  return path === "/" ? "/files" : `/files${path}`;
+}
+
+function parentDirectoryPath(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index <= 0 ? "/" : path.slice(0, index);
+}
 
 const segments = computed(() => pathSegments(currentPath.value));
 const parentPath = computed(() => (segments.value.length ? segments.value[segments.value.length - 1].path : "/"));
@@ -171,7 +195,19 @@ watch([() => route.query.select, () => list.data.value.items], ([path, nodes]) =
 const selectedPaths = computed(() => selectedItems.value.map((item) => item.path));
 
 async function reload(): Promise<void> {
-  await Promise.all([list.run(), stats.run()]);
+  const requestedPath = currentPath.value;
+  const [loaded] = await Promise.all([list.run(), stats.run()]);
+  if (requestedPath !== currentPath.value) return;
+
+  if (!loaded) {
+    const cause = list.cause.value;
+    if (requestedPath !== "/" && cause instanceof ApiError && [403, 404].includes(cause.status)) {
+      void router.replace(fileRoute(parentDirectoryPath(requestedPath)));
+    }
+    return;
+  }
+
+  if (typeof route.query.select !== "string") rememberPath(requestedPath);
   // 目录内容变了，之前选中的项可能已经不存在。
   selection.value = selection.value.filter((path) =>
     list.data.value.items.some((item) => item.path === path),
@@ -189,7 +225,14 @@ const offUploadComplete = onUploadComplete((_node, parent) => {
 onMounted(() => {
   document.addEventListener("click", onDocumentClick);
   document.addEventListener("keydown", onDocumentKeydown);
-  void reload();
+  const remembered = currentPath.value === "/" && typeof route.query.select !== "string"
+    ? readRememberedPath()
+    : "/";
+  if (remembered !== "/" && remembered !== currentPath.value) {
+    void router.replace(fileRoute(remembered));
+  } else {
+    void reload();
+  }
 });
 
 onBeforeUnmount(() => {
