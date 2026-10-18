@@ -119,37 +119,40 @@ function pick(value: T): void {
       </button>
     </slot>
 
-    <!-- 宿主层不滚，给滑块轨道提供定位上下文；真正的滚动容器是里面的 ul。 -->
-    <div
-      v-if="open"
-      ref="menuWrapEl"
-      class="asel__menuwrap ovscroll-layer ovscroll-layer--y"
-      :style="menuStyle"
-    >
-      <ul ref="menuEl" class="asel__menu ovscroll" role="listbox">
-        <li v-for="option in options" :key="option.value">
-          <button
-            type="button"
-            class="asel__option"
-            :class="{ 'asel__option--on': option.value === modelValue }"
-            role="option"
-            :aria-selected="option.value === modelValue"
-            @click="pick(option.value)"
-          >
-            {{ option.label }}
-          </button>
-        </li>
-      </ul>
-      <div class="ovscroll__track" :class="{ 'ovscroll__track--on': barVisible }">
-        <div
-          class="ovscroll__thumb"
-          :style="barStyle"
-          @pointerdown="onThumbPointerDown"
-          @pointermove="onThumbPointerMove"
-          @pointerup="onThumbPointerUp"
-        />
+    <!-- 固定定位的浮层挂到 body，避开顶栏 backdrop-filter 等会创建 fixed 包含块的祖先。 -->
+    <Teleport to="body">
+      <!-- 宿主层不滚，给滑块轨道提供定位上下文；真正的滚动容器是里面的 ul。 -->
+      <div
+        v-if="open"
+        ref="menuWrapEl"
+        class="asel__menuwrap ovscroll-layer ovscroll-layer--y"
+        :style="menuStyle"
+      >
+        <ul ref="menuEl" class="asel__menu ovscroll" role="listbox">
+          <li v-for="option in options" :key="option.value">
+            <button
+              type="button"
+              class="asel__option"
+              :class="{ 'asel__option--on': option.value === modelValue }"
+              role="option"
+              :aria-selected="option.value === modelValue"
+              @click="pick(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </li>
+        </ul>
+        <div class="ovscroll__track" :class="{ 'ovscroll__track--on': barVisible }">
+          <div
+            class="ovscroll__thumb"
+            :style="barStyle"
+            @pointerdown="onThumbPointerDown"
+            @pointermove="onThumbPointerMove"
+            @pointerup="onThumbPointerUp"
+          />
+        </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
