@@ -11,14 +11,13 @@ async function load(path, replacements = {}) {
 }
 globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 const api = await import(await load("../src/api/client.ts"));
-test("线程、JSON、Blob 和上传 401 走同一个去重出口，重新登录后可再次通知", async () => {
+test("线程、JSON 和上传 401 走同一个去重出口，重新登录后可再次通知", async () => {
   let count = 0;
   api.setUnauthorizedHandler(() => { count++; });
   globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "未授权" } }), { status: 401 });
   api.setToken("first");
   api.notifyUnauthorized();
   await assert.rejects(api.request("/test"), error => error.status === 401);
-  await assert.rejects(api.requestBlob("/test", {}), error => error.status === 401);
   globalThis.XMLHttpRequest = class {
     upload = {};
     status = 401;

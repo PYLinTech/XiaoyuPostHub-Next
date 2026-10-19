@@ -13,7 +13,6 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/clientip"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/config"
-	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/mailresource"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/service"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
 )
@@ -34,19 +33,17 @@ type Server struct {
 	Svc      *service.Service
 	Settings *settings.Store
 
-	proxies       proxyCache
-	mailResources *mailresource.Gateway
-	handlers      http.Handler
+	proxies  proxyCache
+	handlers http.Handler
 }
 
 // NewServer 构造 HTTP 层并注册路由。
 func NewServer(boot *config.Bootstrap, authSvc *auth.Service, svc *service.Service, st *settings.Store) *Server {
 	s := &Server{
-		Boot:          boot,
-		Auth:          authSvc,
-		Svc:           svc,
-		Settings:      st,
-		mailResources: mailresource.NewGateway(),
+		Boot:     boot,
+		Auth:     authSvc,
+		Svc:      svc,
+		Settings: st,
 	}
 	s.handlers = s.routes()
 	return s
