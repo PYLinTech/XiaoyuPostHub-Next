@@ -40,6 +40,7 @@ import type {
   SetupState,
   SetupValidateRequest,
   Share,
+  ShareAccessRecord,
   StatsResult,
   StorageProbeSession,
   StorageProbeVerifyResult,
@@ -216,9 +217,9 @@ export const shareApi = {
     request<{ share: Share }>(`/api/share/${encodeURIComponent(id)}`, { method: "PATCH", body: input }),
   remove: (id: string) =>
     request<{ ok: boolean }>(`/api/share/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  accesses: (id: string, limit = 100) =>
-    request<{ items: AuditLog[] }>(`/api/share/${encodeURIComponent(id)}/accesses`, {
-      query: { limit },
+  accesses: (id: string, limit = 100, offset = 0, snapshotId?: number) =>
+    request<{ items: ShareAccessRecord[]; total: number; snapshotId: number }>(`/api/share/${encodeURIComponent(id)}/accesses`, {
+      query: { limit, offset, ...(snapshotId === undefined ? {} : { snapshotId }) },
     }),
   createPickup: (id: string, maxUses: number) =>
     request<{ pickup: PickupCode }>(`/api/share/${encodeURIComponent(id)}/pickup`, {

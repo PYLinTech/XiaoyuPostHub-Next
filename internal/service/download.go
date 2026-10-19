@@ -608,7 +608,7 @@ func (s *Service) SettleDelivery(ctx context.Context, actor auth.Principal, tick
 	if actualWire > ticket.ReservedBytes {
 		return fmt.Errorf("%w: 实际密文用量超过票据预扣", ErrUnavailable)
 	}
-	settled, err := s.settleTicketAndRefund(ctx, ticket, actualWire)
+	settled, err := s.settleTicketAndRefund(ctx, ticket, actualWire, actualPlainBytes, file.SizePlain)
 	if err != nil {
 		return err
 	}
@@ -919,12 +919,10 @@ func parseByteRange(header string, size int64) (offset, limit int64, ranged bool
 	return start, end - start + 1, true, nil
 }
 
-// settleTicketAndRefund 在同一个数据库事务里完成票据结算与预扣回补。
-//
-// 票据状态和配额计数是同一笔业务状态：只更新其中一个会分别造成重复
-// 结算或额度泄漏。条件更新未命中时表示另一个并发请求已经完成结算，
-// 不再重复回补。
-func (s *Service) settleTicketAndRefund(ctx context.Context, ticket store.Ticket, actualWire int64) (bool, error) {
+// settleTicketAndRefund 在同一个数据库事务里结算票据、回补预扣，并记录全量结算的分享下载。
+// direct/proxy 密文模式的全量字节数来自客户端完成回执，不代表服务端能证明文件已落盘。
+// 条件更新未命中时表示另一个并发请求已结算，不再重复回补或写下载记录。
+func (s *Service) settleTicketAndRefund(ctx context.Context, ticket store.Ticket, actualWire, actualPlain, fileSize int64) (bool, error) {
 	if actualWire < 0 || actualWire > ticket.ReservedBytes {
 		return false, fmt.Errorf("%w: 票据实际用量无效", ErrBadRequest)
 	}
@@ -933,10 +931,22 @@ func (s *Service) settleTicketAndRefund(ctx context.Context, ticket store.Ticket
 	err := s.DB.InTx(ctx, func(tx store.Querier) error {
 		var err error
 		settled, err = store.SettleTicket(ctx, tx, ticket.ID, actualWire)
-		if err != nil || !settled || refund == 0 {
+		if err != nil || !settled {
 			return err
 		}
-		return s.releaseDeliveryQuotaByTicketQ(ctx, tx, ticket, refund)
+		if refund > 0 {
+			if err := s.releaseDeliveryQuotaByTicketQ(ctx, tx, ticket, refund); err != nil {
+				return err
+			}
+		}
+		if ticket.ShareID != "" && ticket.Purpose == store.PurposeDownload && actualPlain == fileSize {
+			return store.InsertShareDownloadAccess(ctx, tx, store.ShareDownloadAccess{
+				TicketID: ticket.ID, ShareID: ticket.ShareID, ActorType: ticket.ActorType,
+				UserID: ticket.UserID, ClientIP: ticket.ClientIP, ResourcePath: ticket.ResourcePath,
+				BytesPlain: actualPlain, OccurredAt: s.Now(),
+			})
+		}
+		return nil
 	})
 	return settled, err
 }

@@ -27,6 +27,7 @@ func rewindDirectLinkSchema(t *testing.T, db *DB) {
 func TestDirectLinkMigrationAllowsIndependentContent(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
+	rewindShareDownloadSchema(t, db)
 	rewindDirectLinkSchema(t, db)
 	mustExec(t, db, `PRAGMA user_version = 8`)
 	if err := db.initSchema(); err != nil {

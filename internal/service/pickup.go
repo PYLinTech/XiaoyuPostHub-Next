@@ -189,10 +189,10 @@ func (s *Service) SetPickupDisabled(ctx context.Context, p auth.Principal, code 
 // 不扣次数不会让这个入口变成取件码校验器：查询前的双维度退避与"码不存在即计入
 // 退避"依然生效，反复试错会被迅速挡住。
 func (s *Service) PeekPickupCode(ctx context.Context, code string, p auth.Principal) (DeliveryTarget, store.Share, error) {
-	return s.resolvePickupCode(ctx, code, p, false)
+	return s.resolvePickupCode(ctx, code, p)
 }
 
-func (s *Service) resolvePickupCode(ctx context.Context, code string, p auth.Principal, consume bool) (DeliveryTarget, store.Share, error) {
+func (s *Service) resolvePickupCode(ctx context.Context, code string, p auth.Principal) (DeliveryTarget, store.Share, error) {
 	forbid := func(why string) error { return fmt.Errorf("%w: %s", ErrForbidden, why) }
 
 	code = strings.ToUpper(strings.TrimSpace(code))
@@ -225,34 +225,10 @@ func (s *Service) resolvePickupCode(ctx context.Context, code string, p auth.Pri
 	}
 
 	// 取件码本身就是一次凭据校验：持有它即视为已通过该分享的提取码。
-	target, share, err := s.resolveShare(ctx, pc.ShareID, "", p, true, false, "pickup", !consume)
+	// 这里只解析目标；交付准备成功后的额度核销由 ClaimPickupUseForActor 单独负责。
+	target, share, err := s.resolveShare(ctx, pc.ShareID, "", p, true, false, "pickup", false)
 	if err != nil {
 		return DeliveryTarget{}, store.Share{}, err
-	}
-	if consume {
-		aliveAfter := pickupAliveAfter(now, ttl)
-		err := s.DB.InTx(ctx, func(tx store.Querier) error {
-			if err := s.ensurePickupShareActiveTx(ctx, tx, pc.ShareID); err != nil {
-				return err
-			}
-			if _, err := store.ConsumePickupCode(ctx, tx, code, aliveAfter); err != nil {
-				return err
-			}
-			if err := store.ConsumeShareVisit(ctx, tx, pc.ShareID, now); err != nil {
-				return err
-			}
-			// 审计不是交付的前置条件；写失败不能把已经成功的核销回滚成
-			// 重试时重复扣减的机会，但计数本身必须与核销同事务提交。
-			_ = store.InsertShareAccess(ctx, tx, pc.ShareID, p.Actor, p.UserID(), p.ClientIP.String(), "pickup")
-			return nil
-		})
-		if errors.Is(err, store.ErrNoRowsAffected) {
-			return DeliveryTarget{}, store.Share{}, forbid("取件码或分享已失效、已用尽")
-		}
-		if err != nil {
-			return DeliveryTarget{}, store.Share{}, err
-		}
-		share.Visits++
 	}
 
 	if err := s.Auth.Throttler().Clear(ctx, auth.ThrottlePickup, code); err != nil {

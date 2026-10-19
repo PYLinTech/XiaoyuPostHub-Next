@@ -18,6 +18,7 @@ func rewindTrafficBillingSchema(t *testing.T, db *DB) {
 
 func TestShareTrafficMigrationKeepsLegacyTicketBilling(t *testing.T) {
 	db := openTestDB(t)
+	rewindShareDownloadSchema(t, db)
 	rewindTrafficBillingSchema(t, db)
 	rewindDirectLinkSchema(t, db)
 	// Use an existing v7 record: new columns must have neutral defaults so refund

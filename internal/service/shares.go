@@ -401,16 +401,16 @@ func (s *Service) DeleteShare(ctx context.Context, p auth.Principal, id string) 
 	return nil
 }
 
-// ListShareAccesses 列出自己的分享的访问明细。
-func (s *Service) ListShareAccesses(ctx context.Context, p auth.Principal, id string, limit int) ([]store.AuditLog, error) {
+// ListShareAccesses 列出自己的分享的访问/下载明细。
+func (s *Service) ListShareAccesses(ctx context.Context, p auth.Principal, id string, limit, offset int, snapshotID int64) ([]store.ShareAccessRecord, int64, int64, error) {
 	if err := auth.RequireUser(p); err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	share, err := s.ownShare(ctx, p.UserID(), id)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
-	return store.ListShareAccesses(ctx, s.DB.R(), share.ID, limit)
+	return store.ListShareAccesses(ctx, s.DB.R(), share.ID, limit, offset, snapshotID)
 }
 
 // ResolveShare 解析分享并返回交付目标。

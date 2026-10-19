@@ -17,13 +17,13 @@ import { shareApi, type UpdateShareInput } from "@/api/endpoints";
 import {
   Perm,
   type AccessMode,
-  type AuditLog,
   type PickupCode,
+  type ShareAccessRecord,
   type Share,
   type ShareKind,
 } from "@/api/types";
 import { copyText, createRequestGate, describeError, logError, useAsync } from "@/lib/async";
-import { dateTimeLocalToUnix, formatTime, unixToDateTimeLocal } from "@/lib/format";
+import { dateTimeLocalToUnix, formatBytes, formatTime, unixToDateTimeLocal } from "@/lib/format";
 import { useSession } from "@/stores/session";
 import { topbarSlot } from "@/stores/shell";
 import { useToasts } from "@/stores/toast";
@@ -56,7 +56,7 @@ const ACTION_LABELS: Record<string, string> = {
   open: "打开",
   list: "浏览目录",
   pickup: "取件码提取",
-  download: "下载",
+  download: "已结算下载",
   preview: "预览",
 };
 
@@ -368,8 +368,14 @@ async function confirmDelete(): Promise<void> {
 
 const accessesOpen = ref(false);
 const accessesBusy = ref(false);
-const accesses = ref<AuditLog[]>([]);
+const accessesError = ref(false);
+const accesses = ref<ShareAccessRecord[]>([]);
 const accessesTitle = ref("");
+const accessesShare = ref<Share | null>(null);
+const accessesTotal = ref(0);
+const accessesOffset = ref(0);
+const accessesSnapshotId = ref<number | null>(null);
+const accessesLimit = 100;
 
 const accessColumns: Column[] = [
   { key: "action", label: "动作", mobile: "title" },
@@ -383,18 +389,20 @@ const accessColumns: Column[] = [
 // 记录挂到另一条分享的标题下。用序号守卫保证只有最后一次请求能写回界面。
 const accessesGate = createRequestGate();
 
-async function openAccesses(share: Share): Promise<void> {
+async function loadAccesses(share: Share, offset: number): Promise<void> {
   const token = accessesGate.next();
-  accessesTitle.value = `访问记录 · ${share.rootPath}`;
-  accesses.value = [];
-  accessesOpen.value = true;
   accessesBusy.value = true;
+  accessesError.value = false;
   try {
-    const result = await shareApi.accesses(share.id, 100);
+    const result = await shareApi.accesses(share.id, accessesLimit, offset, accessesSnapshotId.value ?? undefined);
     if (!accessesGate.isCurrent(token)) return;
     accesses.value = result.items ?? [];
+    accessesTotal.value = result.total;
+    accessesOffset.value = offset;
+    accessesSnapshotId.value = result.snapshotId;
   } catch (err) {
     if (!accessesGate.isCurrent(token)) return;
+    accessesError.value = accesses.value.length === 0;
     logError("share-accesses", err);
     toasts.error("访问记录加载失败", describeError(err));
   } finally {
@@ -403,7 +411,26 @@ async function openAccesses(share: Share): Promise<void> {
   }
 }
 
-function actorLabel(log: AuditLog): string {
+async function openAccesses(share: Share): Promise<void> {
+  accessesShare.value = share;
+  accessesTitle.value = `访问与下载记录 · ${share.rootPath}`;
+  accesses.value = [];
+  accessesError.value = false;
+  accessesTotal.value = 0;
+  accessesOffset.value = 0;
+  accessesSnapshotId.value = null;
+  accessesOpen.value = true;
+  await loadAccesses(share, 0);
+}
+
+function loadAccessPage(offset: number): void {
+  const share = accessesShare.value;
+  if (share && offset !== accessesOffset.value) {
+    void loadAccesses(share, offset);
+  }
+}
+
+function actorLabel(log: ShareAccessRecord): string {
   if (log.actorType === "guest") {
     return "访客";
   }
@@ -637,8 +664,8 @@ onMounted(() => {
               <AppButton
                 size="sm"
                 icon="activity"
-                data-tip="访问记录"
-                aria-label="访问记录"
+                data-tip="访问与下载记录"
+                aria-label="访问与下载记录"
                 @click="openAccesses(row.share)"
               />
               <AppButton
@@ -801,7 +828,7 @@ onMounted(() => {
       title="删除分享"
       confirm-text="删除"
       :loading="deleteBusy"
-      message="删除后该分享的取件码与访问记录会一并删除，已发出的链接立即失效。"
+      message="删除后该分享的取件码与访问、下载记录会一并删除，已发出的链接立即失效。"
       detail="此操作不可撤销。如果只是想暂时收回，改用「停用」。"
       @cancel="deleting = null"
       @confirm="confirmDelete()"
@@ -814,16 +841,20 @@ onMounted(() => {
       wide
       @close="accessesOpen = false"
     >
+      <p class="notice notice--info" style="margin: 0 0 var(--sp-3)">
+        翻页期间固定弹窗打开时的记录快照，新记录需重新打开弹窗查看。“已结算下载”表示交付票据完成结算；直链/加密中转由客户端回执，服务端无法独立确认文件已保存。
+      </p>
       <AppTable
         :columns="accessColumns"
         :rows="accesses"
         :loading="accessesBusy"
-        empty-title="还没有访问记录"
-        empty-hint="对方打开、浏览或提取之后才会出现明细。"
+        :empty-title="accessesError ? '记录加载失败' : '还没有访问或下载记录'"
+        :empty-hint="accessesError ? '请关闭弹窗后重试。' : '分享被打开、浏览或下载交付完成结算后，记录会显示在这里。'"
       >
         <template #action="{ row }">{{ actionLabel(row.action) }}</template>
         <template #target="{ row }">
           <span class="mono">{{ row.target || "—" }}</span>
+          <span v-if="row.action === 'download'" class="faint"> · {{ formatBytes(row.bytesPlain) }}</span>
         </template>
         <template #actor="{ row }">
           <span class="badge">{{ actorLabel(row) }}</span>
@@ -832,6 +863,14 @@ onMounted(() => {
           {{ formatTime(row.occurredAt) }}
         </template>
       </AppTable>
+      <AppPagination
+        :total="accessesTotal"
+        :limit="accessesLimit"
+        :offset="accessesOffset"
+        :show-limit-selector="false"
+        :disabled="accessesBusy"
+        @update:offset="loadAccessPage"
+      />
     </AppModal>
 
     <!-- 取件码 -->

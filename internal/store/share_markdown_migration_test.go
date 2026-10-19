@@ -4,6 +4,7 @@ import "testing"
 
 func TestShareMarkdownMigrationPreservesExistingShares(t *testing.T) {
 	db := openTestDB(t)
+	rewindShareDownloadSchema(t, db)
 	rewindTrafficBillingSchema(t, db)
 	rewindDirectLinkSchema(t, db)
 	mustExec(t, db, `INSERT INTO user_groups(name,display_name,is_builtin,permissions,priority,created_at) VALUES('normal','普通用户',1,32831,100,1)`)

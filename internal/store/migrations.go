@@ -50,7 +50,7 @@ type migration struct {
 // v1 → v2 创建邮箱地址解绑申请表；v2 → v3 添加完整上传平台与资源调度优先级；
 // v3 → v4 为并行上传校验持久化最终摘要；v5 → v6 清除已迁移的旧上传配置项；
 // v6 → v7 分享自定义 Markdown；v7 → v8 分享提供者流量计费；
-// v8 → v9 直链（内容哈希绑定）与交付归属。
+// v8 → v9 直链（内容哈希绑定）与交付归属；v9 → v10 分享下载历史。
 var migrations = []migration{
 	{Version: 2, Name: "mail_unbind_requests", File: "0001_mail_unbind.sql"},
 	{Version: 3, Name: "upload_platform", File: "0002_upload_platform.sql"},
@@ -60,6 +60,7 @@ var migrations = []migration{
 	{Version: 7, Name: "share_markdown", File: "0006_share_markdown.sql"},
 	{Version: 8, Name: "share_traffic", File: "0007_share_traffic.sql"},
 	{Version: 9, Name: "direct_links", File: "0008_direct_links.sql"},
+	{Version: 10, Name: "share_download_records", File: "0009_share_download_records.sql"},
 }
 
 // loadMigrations 按注册表读取每个迁移的 SQL 并做完整性校验。

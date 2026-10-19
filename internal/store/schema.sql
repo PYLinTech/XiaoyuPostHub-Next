@@ -488,12 +488,16 @@ CREATE TABLE IF NOT EXISTS share_accesses (
     user_id     INTEGER NOT NULL DEFAULT 0,
     client_ip   TEXT NOT NULL DEFAULT '',
     action      TEXT NOT NULL,
-    occurred_at INTEGER NOT NULL
+    occurred_at INTEGER NOT NULL,
+    resource_path TEXT NOT NULL DEFAULT '',
+    bytes_plain INTEGER NOT NULL DEFAULT 0 CHECK (bytes_plain >= 0),
+    ticket_id   TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_share_accesses_share ON share_accesses(share_id, occurred_at);
 -- 按时间窗口统计访问次数（概览页），与上面的 (share_id, occurred_at) 互补。
 CREATE INDEX IF NOT EXISTS idx_share_accesses_time ON share_accesses(occurred_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_share_accesses_ticket ON share_accesses(ticket_id) WHERE ticket_id <> '';
 
 -- ---------------------------------------------------------------- 取件码
 

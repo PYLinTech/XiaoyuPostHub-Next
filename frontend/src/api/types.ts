@@ -284,6 +284,17 @@ export interface AuditLog {
   occurredAt: number;
 }
 
+export interface ShareAccessRecord {
+  id: number;
+  actorType: string;
+  actorId: number;
+  clientIp: string;
+  action: string;
+  target: string;
+  bytesPlain: number;
+  occurredAt: number;
+}
+
 export interface ConfigEntry {
   key: string;
   value: string;

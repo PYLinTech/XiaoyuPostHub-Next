@@ -148,13 +148,14 @@ func (s *Server) handleShareAccesses(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	limit, _ := pagingOf(r)
-	items, err := s.Svc.ListShareAccesses(r.Context(), p, pathParam(r, "id"), limit)
+	limit, offset := pagingOf(r)
+	snapshotID := int64Query(r, "snapshotId", 0)
+	items, total, snapshotID, err := s.Svc.ListShareAccesses(r.Context(), p, pathParam(r, "id"), limit, offset, snapshotID)
 	if err != nil {
 		fail(w, err)
 		return
 	}
-	writeData(w, map[string]any{"items": itemsOf(items)})
+	writeData(w, map[string]any{"items": itemsOf(items), "total": total, "snapshotId": snapshotID})
 }
 
 // ---------------------------------------------------------------- 取件码

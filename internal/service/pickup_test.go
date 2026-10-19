@@ -48,10 +48,18 @@ func TestPickupPeekDoesNotConsumeUse(t *testing.T) {
 	if used := f.pickupUsedCount(pc.Code); used != 0 {
 		t.Fatalf("查看不应消耗使用次数，实得 used_count=%d", used)
 	}
+	accesses, total, _, err := store.ListShareAccesses(ctx, f.db.R(), share.ID, 100, 0, 0)
+	if err != nil || total != 0 || len(accesses) != 0 {
+		t.Fatalf("查看取件码不应写成提取记录: accesses=%+v total=%d err=%v", accesses, total, err)
+	}
 
 	// 真正取数时由 Claim 核销一次（生产路径：Peek → PrepareDelivery → Claim）。
 	if err := f.svc.ClaimPickupUseForActor(ctx, pc.Code, guest); err != nil {
 		t.Fatalf("首次取数核销应当成功: %v", err)
+	}
+	accesses, total, _, err = store.ListShareAccesses(ctx, f.db.R(), share.ID, 100, 0, 0)
+	if err != nil || total != 1 || len(accesses) != 1 || accesses[0].Action != "pickup" {
+		t.Fatalf("成功核销应只记一条提取记录: accesses=%+v total=%d err=%v", accesses, total, err)
 	}
 	if used := f.pickupUsedCount(pc.Code); used != 1 {
 		t.Fatalf("取数应消耗一次使用次数，实得 used_count=%d", used)

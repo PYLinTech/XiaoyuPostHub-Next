@@ -234,6 +234,30 @@ func MoveSharesRootPrefix(ctx context.Context, q Querier, ownerID int64, oldPath
 	return n, nil
 }
 
+// ShareAccessRecord 是所有者在单个分享中查看的一条访问/下载记录。
+type ShareAccessRecord struct {
+	ID         int64     `json:"id"`
+	ActorType  ActorType `json:"actorType"`
+	ActorID    int64     `json:"actorId"`
+	ClientIP   string    `json:"clientIp"`
+	Action     string    `json:"action"`
+	Target     string    `json:"target"`
+	BytesPlain int64     `json:"bytesPlain"`
+	OccurredAt int64     `json:"occurredAt"`
+}
+
+// ShareDownloadAccess 是一条完成结算的分享下载记录。
+type ShareDownloadAccess struct {
+	TicketID     string
+	ShareID      string
+	ActorType    ActorType
+	UserID       int64
+	ClientIP     string
+	ResourcePath string
+	BytesPlain   int64
+	OccurredAt   int64
+}
+
 // InsertShareAccess 记录一次分享访问。
 func InsertShareAccess(ctx context.Context, q Querier, shareID string, actor ActorType, userID int64, ip, action string) error {
 	_, err := q.ExecContext(ctx, `
@@ -245,27 +269,68 @@ func InsertShareAccess(ctx context.Context, q Querier, shareID string, actor Act
 	return nil
 }
 
-// ListShareAccesses 列出某分享的访问明细。
-func ListShareAccesses(ctx context.Context, q Querier, shareID string, limit int) ([]AuditLog, error) {
+// InsertShareDownloadAccess 在票据结算事务中记录一次分享下载。
+func InsertShareDownloadAccess(ctx context.Context, q Querier, access ShareDownloadAccess) error {
+	if access.ShareID == "" || access.TicketID == "" || access.BytesPlain < 0 {
+		return fmt.Errorf("记录分享下载明细失败: 分享、票据标识不能为空且字节数不可为负")
+	}
+	if access.OccurredAt == 0 {
+		access.OccurredAt = Now()
+	}
+	_, err := q.ExecContext(ctx, `
+		INSERT INTO share_accesses (
+			share_id, actor_type, user_id, client_ip, action, resource_path, bytes_plain, ticket_id, occurred_at
+		) VALUES (?, ?, ?, ?, 'download', ?, ?, ?, ?)`,
+		access.ShareID, string(access.ActorType), access.UserID, access.ClientIP,
+		access.ResourcePath, access.BytesPlain, access.TicketID, access.OccurredAt)
+	if err != nil {
+		return fmt.Errorf("记录分享下载明细失败: %w", err)
+	}
+	return nil
+}
+
+// ListShareAccesses 列出某分享的访问明细，按时间倒序分页。
+// snapshotID 限定本次浏览会话看到的最大记录 ID，避免新事件插入第一页后
+// 改变后续 OFFSET 页的边界；0 表示从当前最新记录创建快照。
+func ListShareAccesses(ctx context.Context, q Querier, shareID string, limit, offset int, snapshotID int64) ([]ShareAccessRecord, int64, int64, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	if offset < 0 {
+		offset = 0
+	}
+	var maxID int64
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM share_accesses WHERE share_id = ?`, shareID).Scan(&maxID); err != nil {
+		return nil, 0, 0, fmt.Errorf("读取分享访问快照失败: %w", err)
+	}
+	if snapshotID <= 0 || snapshotID > maxID {
+		snapshotID = maxID
+	}
+	var total int64
+	if err := q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM share_accesses WHERE share_id = ? AND id <= ?`, shareID, snapshotID).Scan(&total); err != nil {
+		return nil, 0, 0, fmt.Errorf("统计分享访问明细失败: %w", err)
+	}
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, actor_type, user_id, client_ip, action, occurred_at
-		FROM share_accesses WHERE share_id = ? ORDER BY occurred_at DESC LIMIT ?`, shareID, limit)
+		SELECT id, actor_type, user_id, client_ip, action, resource_path, bytes_plain, occurred_at
+		FROM share_accesses WHERE share_id = ? AND id <= ?
+		ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?`, shareID, snapshotID, limit, offset)
 	if err != nil {
-		return nil, fmt.Errorf("查询分享访问明细失败: %w", err)
+		return nil, 0, 0, fmt.Errorf("查询分享访问明细失败: %w", err)
 	}
 	defer rows.Close()
-	var out []AuditLog
+	var out []ShareAccessRecord
 	for rows.Next() {
-		var l AuditLog
-		if err := rows.Scan(&l.ID, &l.ActorType, &l.ActorID, &l.ClientIP, &l.Action, &l.OccurredAt); err != nil {
-			return nil, fmt.Errorf("扫描分享访问明细失败: %w", err)
+		var record ShareAccessRecord
+		var actor string
+		if err := rows.Scan(&record.ID, &actor, &record.ActorID, &record.ClientIP, &record.Action,
+			&record.Target, &record.BytesPlain, &record.OccurredAt); err != nil {
+			return nil, 0, 0, fmt.Errorf("扫描分享访问明细失败: %w", err)
 		}
-		out = append(out, l)
+		record.ActorType = ActorType(actor)
+		out = append(out, record)
 	}
-	return out, rows.Err()
+	return out, total, snapshotID, rows.Err()
 }
 
 // ---------------------------------------------------------------- 取件码

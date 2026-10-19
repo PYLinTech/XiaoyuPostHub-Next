@@ -22,8 +22,11 @@ const props = withDefaults(
      * "下一页"永远可点，点进去是一页空列表。
      */
     hasMore?: boolean;
+    /** 固定页长的场景可隐藏页长选择器。 */
+    showLimitSelector?: boolean;
+    disabled?: boolean;
   }>(),
-  { exact: true, hasMore: true },
+  { exact: true, hasMore: true, showLimitSelector: true, disabled: false },
 );
 
 const emit = defineEmits<{ "update:limit": [number]; "update:offset": [number] }>();
@@ -49,18 +52,20 @@ function goto(next: number): void {
     </span>
     <div class="row">
       <AppSelect
+        v-if="showLimitSelector"
         :model-value="limit"
         :options="PAGE_SIZES"
         aria-label="每页条数"
         size="sm"
+        :disabled="disabled"
         @update:model-value="emit('update:limit', $event)"
       />
-      <AppButton size="sm" :disabled="offset <= 0" icon="chevronLeft" @click="goto(offset - limit)">
+      <AppButton size="sm" :disabled="disabled || offset <= 0" icon="chevronLeft" @click="goto(offset - limit)">
         上一页
       </AppButton>
       <AppButton
         size="sm"
-        :disabled="exact ? offset + limit >= total : !hasMore"
+        :disabled="disabled || (exact ? offset + limit >= total : !hasMore)"
         @click="goto(offset + limit)"
       >
         下一页
