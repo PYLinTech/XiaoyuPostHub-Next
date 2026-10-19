@@ -58,8 +58,50 @@ function escapeHtml(s: string): string {
   });
 }
 
-// 正文在无脚本、无同源权限的 iframe 中直接加载外部图像、样式、字体和媒体；
-// 浏览器加载失败时不做代理重试，也不读取或报告失败细节。
+// 邮件链接只允许常见导航协议，并统一在新标签打开，避免链接在正文 iframe 内导航。
+// 其他 HTML 原样保留；template 内容在脱离文档时不会加载资源或执行脚本。
+function prepareMailLinks(html: string): string {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  template.content.querySelectorAll("base").forEach((base) => base.remove());
+
+  for (const anchor of template.content.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+    const href = anchor.getAttribute("href")?.trim() ?? "";
+    if (!href) {
+      anchor.removeAttribute("href");
+      anchor.removeAttribute("target");
+      anchor.removeAttribute("rel");
+      continue;
+    }
+    if (href.startsWith("#")) {
+      anchor.target = "_self";
+      continue;
+    }
+
+    let url: URL;
+    try {
+      url = new URL(href, document.baseURI);
+    } catch {
+      anchor.removeAttribute("href");
+      anchor.removeAttribute("target");
+      anchor.removeAttribute("rel");
+      continue;
+    }
+    if (!(["http:", "https:", "mailto:", "tel:"] as string[]).includes(url.protocol)) {
+      anchor.removeAttribute("href");
+      anchor.removeAttribute("target");
+      anchor.removeAttribute("rel");
+      continue;
+    }
+
+    anchor.href = url.href;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+  }
+  return template.innerHTML;
+}
+
+// 外链由浏览器在沙箱 iframe 中直连；加载失败不做代理重试或提示。
 function buildSrcDoc(html: string): string {
   return (
     '<!doctype html><html><head><meta charset="utf-8">' +
@@ -68,7 +110,7 @@ function buildSrcDoc(html: string): string {
     "style-src 'unsafe-inline' blob: http: https:; font-src blob: data: http: https:; " +
     "media-src blob: data: http: https:; connect-src 'none'; object-src 'none'; frame-src 'none'; " +
     "base-uri 'none'; form-action 'none'\">" +
-    '<base target="_blank"></head><body>' +
+    "</head><body>" +
     html +
     "</body></html>"
   );
@@ -145,7 +187,7 @@ async function renderBody(): Promise<void> {
     // 复制一份再清空 mine，之后任何兜底回收都不会 revoke 到 iframe 正在用的 URL。
     blobUrls = [...mine];
     mine.length = 0;
-    el.srcdoc = buildSrcDoc(html);
+    el.srcdoc = buildSrcDoc(prepareMailLinks(html));
   } catch (err) {
     dropMine();
     if (!renderGate.isCurrent(token)) return;
@@ -355,7 +397,7 @@ const spfLabel: Record<string, string> = {
     <iframe
       ref="iframeEl"
       title="邮件正文"
-      sandbox=""
+      sandbox="allow-popups allow-popups-to-escape-sandbox"
       referrerpolicy="no-referrer"
       class="md__frame"
     ></iframe>
