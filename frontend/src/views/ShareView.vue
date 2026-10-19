@@ -47,12 +47,12 @@ const crumbs = computed(() => pathSegments(relPath.value));
 
 const displayName = computed(() => share.value?.rootName ?? "");
 
-const remainingVisits = computed(() => {
+const remainingDeliveries = computed(() => {
   const current = share.value;
-  if (!current || current.maxVisits <= 0) {
+  if (!current || current.maxDeliveries <= 0) {
     return "不限";
   }
-  return String(Math.max(0, current.maxVisits - current.visits));
+  return String(Math.max(0, current.maxDeliveries - current.deliveries));
 });
 
 const expiresLabel = computed(() => {
@@ -68,13 +68,17 @@ function joinRel(base: string, name: string): string {
 
 const canPreviewRoot = computed(() => share.value?.allowPreview === true);
 const canDownloadRoot = computed(() => share.value?.allowDownload === true);
+const deliveryLimitReached = computed(() => {
+  const current = share.value;
+  return !!current && current.maxDeliveries > 0 && current.deliveries >= current.maxDeliveries;
+});
 
 function shareErrorMessage(err: unknown): string {
   if (!(err instanceof ApiError) || err.status !== 403) return describeError(err);
   const detail = err.detail ?? "";
   if (detail.includes("停用")) return "该分享已停用，请联系分享者确认。";
   if (detail.includes("过期") && !detail.includes("或")) return "该分享已过期，请联系分享者重新分享。";
-  if (detail.includes("访问上限") && !detail.includes("或")) return "该分享的访问次数已用完，请联系分享者。";
+  if (detail.includes("交付次数已用尽")) return "该分享的交付次数已用完，请联系分享者。";
   if (detail.includes("需要登录")) return "请登录后查看此分享。";
   if (detail.includes("仅创建者")) return "该分享仅分享者本人可查看。";
   if (detail.includes("提取码不正确")) return "请输入正确的提取码后重试。";
@@ -153,12 +157,23 @@ function enterFolder(node: ListNode): void {
 
 // ---------------------------------------------------------------- 预览与下载
 
+function countedShareDeliverySource(current: GuestShare, rel: string, purpose: "preview" | "download"): ReturnType<typeof shareDeliverySource> {
+  const source = shareDeliverySource(current.id, rel, password.value, purpose);
+  return {
+    async plan(pair) {
+      const plan = await source.plan(pair);
+      if (share.value?.id === current.id) share.value.deliveries += 1;
+      return plan;
+    },
+  };
+}
+
 function openPreview(rel: string, name: string): void {
   const current = share.value;
   if (!current) return;
   openFilePreview({ fileName: name,
-    source: shareDeliverySource(current.id, rel, password.value, "preview"),
-    downloadSource: shareDeliverySource(current.id, rel, password.value, "download"),
+    source: countedShareDeliverySource(current, rel, "preview"),
+    downloadSource: countedShareDeliverySource(current, rel, "download"),
     previewAllowed: current.allowPreview, downloadAllowed: current.allowDownload });
 }
 
@@ -167,12 +182,13 @@ async function download(rel: string): Promise<void> {
   if (!current) {
     return;
   }
-  await runDownload(shareDeliverySource(current.id, rel, password.value, "download"), { fileName: rel.split("/").filter(Boolean).pop() ?? current.rootName });
+  await runDownload(countedShareDeliverySource(current, rel, "download"), { fileName: rel.split("/").filter(Boolean).pop() ?? current.rootName });
 }
 
 /** 文件名统一打开预览弹窗；权限决定内容和下载入口。 */
 function openEntry(node: ListNode): void {
   if (node.isFolder) { enterFolder(node); return; }
+  if (deliveryLimitReached.value) return;
   openPreview(joinRel(relPath.value, node.name), node.name);
 }
 
@@ -249,21 +265,22 @@ watch(
       </Teleport>
       <section class="share-card" :class="{ 'share-card--file': share.kind === 'file' }">
         <header class="share-heading">
-          <h1 class="share-title"><button v-if="share.kind === 'file'" type="button" class="share-file-name" @click="openPreview('', displayName)">{{ displayName }}</button><template v-else>{{ displayName }}</template></h1>
+          <h1 class="share-title"><button v-if="share.kind === 'file'" type="button" class="share-file-name" :disabled="deliveryLimitReached" @click="openPreview('', displayName)">{{ displayName }}</button><template v-else>{{ displayName }}</template></h1>
           <div class="share-meta">
             <span v-if="share.kind === 'file'">{{ formatBytes(share.size) }}</span>
             <span v-if="share.sharerName"><AppIcon name="ri-account-circle-line" :size="15" />{{ share.sharerName }} 分享</span>
             <span><AppIcon name="ri-time-line" :size="15" />{{ expiresLabel }}</span>
-            <span v-if="share.maxVisits > 0">剩余 {{ remainingVisits }} 次访问</span>
+            <span v-if="share.maxDeliveries > 0">剩余 {{ remainingDeliveries }} 次交付</span>
           </div>
         </header>
         <ShareMarkdown v-if="share.customMarkdown" :content="share.customMarkdown" class="share-custom-content" />
         <div v-if="share.kind === 'file'" class="share-file stack">
           <div class="row share-file__actions">
-            <AppButton v-if="canDownloadRoot" variant="primary" icon="download" :loading="downloading" @click="download('')">下载</AppButton>
-            <AppButton v-if="canPreviewRoot" :variant="canDownloadRoot ? 'default' : 'primary'" icon="eye" @click="openPreview('', displayName)">预览</AppButton>
+            <AppButton v-if="canDownloadRoot" variant="primary" icon="download" :loading="downloading" :disabled="deliveryLimitReached" @click="download('')">下载</AppButton>
+            <AppButton v-if="canPreviewRoot" :variant="canDownloadRoot ? 'default' : 'primary'" icon="eye" :disabled="deliveryLimitReached" @click="openPreview('', displayName)">预览</AppButton>
           </div>
-          <p v-if="!canPreviewRoot && !canDownloadRoot" class="notice notice--warn">因分享者设置，此分享不可预览或下载。</p>
+          <p v-if="deliveryLimitReached" class="notice notice--warn">分享交付次数已用完；仍可浏览目录，但无法继续预览或下载。</p>
+          <p v-else-if="!canPreviewRoot && !canDownloadRoot" class="notice notice--warn">因分享者设置，此分享不可预览或下载。</p>
         </div>
         <template v-else>
           <div class="share-browser-head">
@@ -280,6 +297,7 @@ watch(
             </nav>
             <span v-if="!dirLoading && !dirError" class="share-count">{{ entries.length }} 项</span>
           </div>
+          <p v-if="deliveryLimitReached" class="notice notice--warn share-notice">分享交付次数已用完；仍可浏览目录，但无法继续预览或下载。</p>
           <p v-if="dirError" class="notice notice--danger share-notice">{{ dirError }}</p>
           <div v-if="dirLoading" class="share-state row" role="status"><span class="spinner" /><span class="muted">正在加载文件</span></div>
           <div v-else-if="!dirError && !entries.length" class="share-state muted">暂无可访问的文件</div>
@@ -288,15 +306,15 @@ watch(
             <tbody>
               <tr v-for="row in dirRows" :key="row.node.path">
                 <td class="share-table__name">
-                  <button type="button" class="share-entry" @click="openEntry(row.node)">
+                  <button type="button" class="share-entry" :disabled="!row.node.isFolder && deliveryLimitReached" @click="openEntry(row.node)">
                     <FileKindIcon :name="row.node.name" :is-folder="row.node.isFolder" :size="20" /><span>{{ row.node.name }}</span>
                   </button>
                 </td>
                 <td class="share-table__size num">{{ row.sizeLabel }}</td><td class="share-table__time">{{ row.mtimeLabel }}</td>
                 <td class="share-table__actions">
                   <div v-if="!row.node.isFolder" class="actions">
-                    <AppButton v-if="canPreviewRoot" size="sm" icon="eye" @click="openPreview(joinRel(relPath, row.node.name), row.node.name)">预览</AppButton>
-                    <AppButton v-if="canDownloadRoot" size="sm" icon="download" :disabled="downloading" @click="download(joinRel(relPath, row.node.name))">下载</AppButton>
+                    <AppButton v-if="canPreviewRoot" size="sm" icon="eye" :disabled="deliveryLimitReached" @click="openPreview(joinRel(relPath, row.node.name), row.node.name)">预览</AppButton>
+                    <AppButton v-if="canDownloadRoot" size="sm" icon="download" :disabled="downloading || deliveryLimitReached" @click="download(joinRel(relPath, row.node.name))">下载</AppButton>
                     <span v-if="!canPreviewRoot && !canDownloadRoot" class="muted">未开放预览和下载</span>
                   </div>
                 </td>

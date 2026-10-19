@@ -2,6 +2,7 @@ import { createApp } from "vue";
 import App from "./App.vue";
 import { router } from "./router";
 import { installUnauthorizedHandler } from "./stores/session";
+import { startSettlementReplayer } from "./delivery/settlementOutbox";
 import { describeError, logError } from "./lib/async";
 import { useToasts } from "./stores/toast";
 // 图标字体要排在应用样式之前：字形类没有特殊性可言，先加载可让后写的规则
@@ -12,6 +13,7 @@ import "./styles/app.css";
 // 401 的全局处理必须在挂载前装好：身份失效的处理逻辑只此一处，
 // 页面组件不需要各自判断"这个错误是不是会话过期"。
 installUnauthorizedHandler();
+startSettlementReplayer();
 
 const app = createApp(App);
 

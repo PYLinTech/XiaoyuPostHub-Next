@@ -153,7 +153,7 @@ type SharesOverview struct {
 	Alive   int64 `json:"alive"`
 	Visits  int64 `json:"visits"`
 	Pickups int64 `json:"pickups"`
-	// Views/Downloads 是 since 之后的分享访问次数。
+	// Views 统计 since 之后的 open/list（兼容旧 view）；Downloads 统计完整交付记录。
 	Views     int64 `json:"views"`
 	Downloads int64 `json:"downloads"`
 }
@@ -184,7 +184,7 @@ func CountSharesOverview(ctx context.Context, q Querier, now, since int64) (Shar
 
 	if err := q.QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN action = 'view' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN action IN ('view', 'open', 'list') THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN action = 'download' THEN 1 ELSE 0 END), 0)
 		FROM share_accesses
 		WHERE occurred_at >= ?`, since).Scan(&out.Views, &out.Downloads); err != nil {

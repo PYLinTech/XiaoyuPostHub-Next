@@ -121,6 +121,9 @@ const (
 	// KeyArchiveAdminRetention 批次推进为存储删除前的最大留存时间。
 	KeyArchiveAdminRetention Key = "archive.admin_retention"
 
+	// KeyOpsShareAccessRetention 分享访问/下载明细的自动保留期；0 表示关闭自动清理。
+	KeyOpsShareAccessRetention Key = "ops.share_access_retention"
+
 	// ---- 邮件 ----
 
 	// KeyMailReceiveEnabled 收件总开关：关闭后 SMTP 端口仍可监听但一律临时拒收，
@@ -189,11 +192,12 @@ const (
 	defaultUploadSystemMaxTasks            = 8
 	defaultUploadSystemConcurrency         = 16
 	// 上传会话存活期仍为固定平台参数。
-	uploadSessionTTL              = 24 * time.Hour
-	defaultOpsMaintenanceInterval = 15 * time.Minute
-	defaultOpsTrafficRetention    = 90 * 24 * time.Hour
-	defaultOpsAuditRetention      = 365 * 24 * time.Hour
-	defaultOpsVacuumPages         = 2000
+	uploadSessionTTL               = 24 * time.Hour
+	defaultOpsMaintenanceInterval  = 15 * time.Minute
+	defaultOpsTrafficRetention     = 90 * 24 * time.Hour
+	defaultOpsAuditRetention       = 365 * 24 * time.Hour
+	defaultOpsShareAccessRetention = 365 * 24 * time.Hour
+	defaultOpsVacuumPages          = 2000
 )
 
 // registry 是全部配置项的定义。
@@ -426,6 +430,13 @@ var registry = []Descriptor{
 		Key: KeyArchiveAdminRetention, Section: "archive", Title: "归档最大留存时间",
 		Help: "从删除时点起算，到达该时间后真实删除存储侧对象（记录保留）。",
 		Kind: KindDuration, Default: "2160h", Min: 3600, Scope: ScopeHot,
+	},
+
+	// ---- 运维 ----
+	{
+		Key: KeyOpsShareAccessRetention, Section: "ops", Title: "分享访问记录保留期",
+		Help: "访问记录包含客户端 IP 与分享内路径；到期后由维护任务分批清理。设为 0 可关闭自动清理。",
+		Kind: KindDuration, Default: defaultOpsShareAccessRetention.String(), Min: 0, Scope: ScopeHot,
 	},
 
 	// ---- 邮件 ----
@@ -755,10 +766,11 @@ type UploadRuntime struct {
 
 // OpsRuntime 是运维相关配置。
 type OpsRuntime struct {
-	MaintenanceInterval time.Duration
-	TrafficRetention    time.Duration
-	AuditRetention      time.Duration
-	VacuumPages         int
+	MaintenanceInterval  time.Duration
+	TrafficRetention     time.Duration
+	AuditRetention       time.Duration
+	ShareAccessRetention time.Duration
+	VacuumPages          int
 }
 
 // ArchiveRuntime 是归档留存期配置。
@@ -993,10 +1005,11 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			ArchiveRetention: archiveRetention(get(KeyMailArchiveRetention), 720*time.Hour),
 		},
 		Ops: OpsRuntime{
-			MaintenanceInterval: defaultOpsMaintenanceInterval,
-			TrafficRetention:    defaultOpsTrafficRetention,
-			AuditRetention:      defaultOpsAuditRetention,
-			VacuumPages:         defaultOpsVacuumPages,
+			MaintenanceInterval:  defaultOpsMaintenanceInterval,
+			TrafficRetention:     defaultOpsTrafficRetention,
+			AuditRetention:       defaultOpsAuditRetention,
+			ShareAccessRetention: dur(KeyOpsShareAccessRetention),
+			VacuumPages:          defaultOpsVacuumPages,
 		},
 	}
 }

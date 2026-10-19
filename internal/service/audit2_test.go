@@ -137,7 +137,7 @@ func TestUpdateShareConcurrentLostWrite(t *testing.T) {
 	}
 	// 请求 B：基于 A 之前读到的旧快照（updatedAt 旧值）只改无关字段。
 	visits := 100
-	err := run(UpdateShareRequest{MaxVisits: &visits, ExpectUpdatedAt: share.UpdatedAt})
+	err := run(UpdateShareRequest{MaxDeliveries: &visits, ExpectUpdatedAt: share.UpdatedAt})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("陈旧快照的写入必须冲突失败，实得: %v", err)
 	}

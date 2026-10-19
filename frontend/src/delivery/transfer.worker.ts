@@ -9,7 +9,7 @@ const pending = new Map<number, { resolve: (value: unknown) => void; reject: (er
 let nextId = 0;
 let started = false;
 const send = (message: WorkerMessage) => self.postMessage(message);
-function request(method: "plan" | "open" | "write" | "close" | "abort", value?: unknown): Promise<unknown> {
+function request(method: "plan" | "open" | "write" | "close" | "abort" | "settle", value?: unknown): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const id = ++nextId;
     pending.set(id, { resolve, reject });
@@ -62,6 +62,7 @@ async function execute(message: Start) {
         plan: (pair) => request("plan", pair?.publicKeyBase64 ?? null) as Promise<DeliveryPlan>,
       }, {
         signal: controller.signal, onProgress: report, streamToDiskAbove: message.streamToDiskAbove,
+        settle: async (_plan, completed) => { await request("settle", completed); },
         async openDiskSink(fileName) {
           const name = await request("open", fileName) as string | null;
           return name === null ? null : {

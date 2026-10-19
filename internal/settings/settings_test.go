@@ -40,6 +40,26 @@ func TestEveryDefaultPassesItsOwnValidation(t *testing.T) {
 	}
 }
 
+func TestShareAccessRetentionDefaultAndOverride(t *testing.T) {
+	st, _ := newTestStore(t)
+	ctx := context.Background()
+	if got := st.Runtime(ctx).Ops.ShareAccessRetention; got != 365*24*time.Hour {
+		t.Fatalf("share access retention default should be 365 days, got %s", got)
+	}
+	if err := st.SetMany(ctx, map[Key]string{KeyOpsShareAccessRetention: "720h"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Runtime(ctx).Ops.ShareAccessRetention; got != 720*time.Hour {
+		t.Fatalf("share access retention override ignored, got %s", got)
+	}
+	if err := st.SetMany(ctx, map[Key]string{KeyOpsShareAccessRetention: "0s"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Runtime(ctx).Ops.ShareAccessRetention; got != 0 {
+		t.Fatalf("zero retention should disable cleanup, got %s", got)
+	}
+}
+
 func TestUploadStagingAndVolumeDefaults(t *testing.T) {
 	staging, ok := Lookup(KeyUploadMaxStagingBytes)
 	if !ok || staging.Default != "20G" || staging.Section != "storage" {

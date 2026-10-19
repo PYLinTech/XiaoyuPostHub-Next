@@ -16,7 +16,7 @@ export async function prepareMediaPreview(source: DeliverySource, signal: AbortS
     if (released) return;
     released = true;
     descriptor?.key.fill(0);
-    await settleQuietly(plan);
+    await settleQuietly(plan, true);
   };
   try {
     signal.throwIfAborted();

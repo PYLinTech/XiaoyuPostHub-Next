@@ -75,7 +75,7 @@ const ACCESS_OPTIONS = (Object.keys(ACCESS_LABELS) as AccessMode[]).map((value) 
 interface ShareRow {  share: Share;
   statusLabel: string;
   statusClass: string;
-  visitsLabel: string;
+  deliveriesLabel: string;
   expiresLabel: string;
   createdLabel: string;
 }
@@ -127,7 +127,7 @@ function toRow(share: Share): ShareRow {
         ? "badge--warn"
         : "badge--success",
     // 有上限时才显示 "已用 / 上限"：0 是"不限"，写成 0/0 只会让人以为配额是零。
-    visitsLabel: share.maxVisits > 0 ? `${share.visits} / ${share.maxVisits}` : String(share.visits),
+    deliveriesLabel: share.maxDeliveries > 0 ? `${share.deliveries} / ${share.maxDeliveries}` : String(share.deliveries),
     expiresLabel: expiresAt > 0 ? formatTime(expiresAt) : "永久",
     createdLabel: formatTime(share.createdAt),
   };
@@ -165,7 +165,7 @@ const form = reactive({
   customMarkdown: "",
   showSharerName: true,
   expiresAtLocal: "",
-  maxVisits: "0",
+  maxDeliveries: "0",
   disabled: false,
 });
 
@@ -182,7 +182,7 @@ function openCreate(path: string, kind: ShareKind): void {
     customMarkdown: "",
   showSharerName: true,
     expiresAtLocal: "",
-    maxVisits: "0",
+    maxDeliveries: "0",
     disabled: false,
   });
   formError.value = "";
@@ -203,7 +203,7 @@ function openEdit(share: Share): void {
     customMarkdown: share.customMarkdown ?? "",
     showSharerName: share.showSharerName,
     expiresAtLocal: unixToDateTimeLocal(share.expiresAt),
-    maxVisits: String(share.maxVisits),
+    maxDeliveries: String(share.maxDeliveries),
     disabled: share.disabled,
   });
   formError.value = "";
@@ -217,8 +217,8 @@ const expiresInPast = computed(() => {
 });
 
 /** 编辑时只提交真正改动过的字段：后端用指针区分"改"与"不改"，整体回写会把
- *  maxVisits、expiresAt 这类字段用零值覆盖掉。 */
-function buildPatch(original: Share, expiresAt: number, maxVisits: number): UpdateShareInput {
+ *  maxDeliveries、expiresAt 这类字段用零值覆盖掉。 */
+function buildPatch(original: Share, expiresAt: number, maxDeliveries: number): UpdateShareInput {
   const patch: UpdateShareInput = {};
   if (form.customMarkdown !== (original.customMarkdown ?? "")) patch.customMarkdown = form.customMarkdown;
   if (form.path.trim() !== original.rootPath) {
@@ -258,8 +258,8 @@ function buildPatch(original: Share, expiresAt: number, maxVisits: number): Upda
   if (expiresAt !== originalExpiresAt) {
     patch.expiresAt = expiresAt;
   }
-  if (maxVisits !== original.maxVisits) {
-    patch.maxVisits = maxVisits;
+  if (maxDeliveries !== original.maxDeliveries) {
+    patch.maxDeliveries = maxDeliveries;
   }
   if (form.disabled !== original.disabled) {
     patch.disabled = form.disabled;
@@ -275,8 +275,8 @@ async function submit(): Promise<void> {
   if (importingMarkdown.value) return;
   formError.value = "";
   const expiresAt = dateTimeLocalToUnix(form.expiresAtLocal);
-  const parsedVisits = Number.parseInt(form.maxVisits, 10);
-  const maxVisits = Number.isFinite(parsedVisits) && parsedVisits > 0 ? parsedVisits : 0;
+  const parsedDeliveries = Number.parseInt(form.maxDeliveries, 10);
+  const maxDeliveries = Number.isFinite(parsedDeliveries) && parsedDeliveries > 0 ? parsedDeliveries : 0;
   const original = editing.value;
 
   if (form.path.trim() === "") {
@@ -307,11 +307,11 @@ async function submit(): Promise<void> {
         customMarkdown: form.customMarkdown,
         showSharerName: form.showSharerName,
         expiresAt,
-        maxVisits,
+        maxDeliveries,
       });
       toasts.success("已创建分享");
     } else {
-      const patch = buildPatch(original, expiresAt, maxVisits);
+      const patch = buildPatch(original, expiresAt, maxDeliveries);
       if (Object.keys(patch).length > 0) {
         await shareApi.update(original.id, { ...patch, expectUpdatedAt: original.updatedAt });
         toasts.success("已保存修改");
@@ -440,6 +440,13 @@ function actorLabel(log: ShareAccessRecord): string {
 function actionLabel(action: string): string {
   // action 是 string，查不到就是没收录的新动作：原样显示比一个假的占位符有用。
   return ACTION_LABELS[action] ?? action;
+}
+
+function evidenceLabel(source?: ShareAccessRecord["evidenceSource"]): string {
+  if (source === "server_measured") return "服务端实测";
+  if (source === "client_ack") return "客户端回执";
+  if (source === "legacy_unknown") return "历史记录·来源未知";
+  return "";
 }
 
 // ---------------------------------------------------------------- 取件码
@@ -712,8 +719,8 @@ onMounted(() => {
               </dd>
             </div>
             <div class="share-card__fact">
-              <dt>访问次数</dt>
-              <dd class="mono">{{ row.visitsLabel }}</dd>
+              <dt>交付次数</dt>
+              <dd class="mono">{{ row.deliveriesLabel }}</dd>
             </div>
             <div class="share-card__fact">
               <dt>有效期</dt>
@@ -777,8 +784,8 @@ onMounted(() => {
             </div>
           </FormField>
 
-          <FormField label="访问上限" hint="0 表示不限次数。">
-            <input v-model="form.maxVisits" class="input" type="number" min="0" step="1" />
+          <FormField label="交付次数上限" hint="0 表示不限；每次成功准备下载或预览交付时计一次，传输失败也会占用。">
+            <input v-model="form.maxDeliveries" class="input" type="number" min="0" step="1" />
           </FormField>
         </div>
 
@@ -842,7 +849,7 @@ onMounted(() => {
       @close="accessesOpen = false"
     >
       <p class="notice notice--info" style="margin: 0 0 var(--sp-3)">
-        翻页期间固定弹窗打开时的记录快照，新记录需重新打开弹窗查看。“已结算下载”表示交付票据完成结算；直链/加密中转由客户端回执，服务端无法独立确认文件已保存。
+        翻页期间固定弹窗打开时的记录快照，新记录需重新打开弹窗查看。服务端实测仅适用于服务端解密中转；直链/加密中转标为客户端回执，表示客户端确认完成，不证明文件已实际保存。历史记录无法追溯来源。
       </p>
       <AppTable
         :columns="accessColumns"
@@ -855,6 +862,7 @@ onMounted(() => {
         <template #target="{ row }">
           <span class="mono">{{ row.target || "—" }}</span>
           <span v-if="row.action === 'download'" class="faint"> · {{ formatBytes(row.bytesPlain) }}</span>
+          <span v-if="row.action === 'download' && evidenceLabel(row.evidenceSource)" class="badge">{{ evidenceLabel(row.evidenceSource) }}</span>
         </template>
         <template #actor="{ row }">
           <span class="badge">{{ actorLabel(row) }}</span>
@@ -895,7 +903,7 @@ onMounted(() => {
         </div>
 
         <div v-if="canPickup" class="form-grid">
-          <FormField label="使用次数" hint="至少 1 次，独立于分享的访问上限。">
+          <FormField label="取件码核销上限" hint="至少 1 次；每次核销也占用分享的交付次数上限。">
             <input v-model="pickupForm.maxUses" class="input" type="number" min="1" step="1" />
           </FormField>
           <div class="form-grid--full">

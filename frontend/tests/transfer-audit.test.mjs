@@ -34,6 +34,7 @@ test("线程、JSON 和上传 401 走同一个去重出口，重新登录后可�
   assert.equal(count, 2);
 });
 const settlement = encode('export const settled=[]; export const settleQuietly=async plan=>{settled.push(plan);}; export const assertHeaderMatchesMeta=()=>{}; export const cipherSourceUrl=()=>""; export const fetchCipherPlanRange=()=>{throw new Error("取消后仍然取数");};');
+const settlementOutbox = encode('export const rememberPendingSettlement=()=>{};');
 const { preparePreview } = await import(await load("../src/delivery/preview.ts", {
   "./transferClient": encode('export const runDelivery=()=>{throw new Error("不应完整取文件");};'),
   "@/api/client": encode('export const getToken=()=>"";'),
@@ -43,6 +44,7 @@ const { preparePreview } = await import(await load("../src/delivery/preview.ts",
   "@/crypto/clientkey": encode('export const encryptionSupported=()=>false; export const createClientKeyPair=()=>null; export const resolveContentKey=()=>null;'),
   "@/crypto/xph": encode('export const bytesToBase64=()=>""; export const decryptAll=()=>{}; export const importContentKey=()=>{}; export const parseXphHeader=()=>{}; export const HEADER_SIZE=64;'),
   "./download": settlement,
+  "./settlementOutbox": settlementOutbox,
 }));
 test("关闭预览后不会申请新计划；申请期间取消会结算票据而不继续建预览", async () => {
   const before = new AbortController(); before.abort();
@@ -52,7 +54,7 @@ test("关闭预览后不会申请新计划；申请期间取消会结算票据�
   assert.equal((await import(settlement)).settled.at(-1).ticketId, "preview-ticket");
 });
 const mediaKeys=encode('export const encryptionSupported=()=>true;export const createClientKeyPair=async()=>({});export const resolveContentKey=async()=>new Uint8Array(32);');
-const {prepareMediaPreview}=await import(await load('../src/delivery/mediaPreview.ts',{'../crypto/clientkey':mediaKeys,'./download':settlement}));
+const {prepareMediaPreview}=await import(await load('../src/delivery/mediaPreview.ts',{'../crypto/clientkey':mediaKeys,'./download':settlement,'./settlementOutbox':settlementOutbox}));
 test('媒体始终申请密文计划，关闭及异常结算一次，迟到计划不启动网络',async()=>{
   const signal=new AbortController();let plans=0;
   const handle=await prepareMediaPreview({plan:async()=>{plans++;return {ticketId:'media-only',mode:'direct',contentForm:'ciphertext',plainSize:12,encryption:{cipherSize:92}}}},signal.signal);

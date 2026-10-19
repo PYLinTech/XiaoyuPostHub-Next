@@ -538,7 +538,7 @@ func (s *Service) checkTicketIP(_ context.Context, ticket store.Ticket, claimedI
 // 日流量限额），因此这两种票据一律按预扣全额结算（宁多记不少记）。
 // 中转解密票据的用量由服务端在流式输出时实测结算，结算端点直接拒绝，
 // 避免同一条票据出现两个结算口径。
-func (s *Service) SettleDeliveryFromClient(ctx context.Context, actor auth.Principal, ticketID string) error {
+func (s *Service) SettleDeliveryFromClient(ctx context.Context, actor auth.Principal, ticketID string, completed bool) error {
 	ticket, err := store.GetTicket(ctx, s.DB.R(), strings.TrimSpace(ticketID))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -565,7 +565,7 @@ func (s *Service) SettleDeliveryFromClient(ctx context.Context, actor auth.Princ
 		return err
 	}
 	// 按文件的完整明文口径结算：折算出的密文用量恰好等于预扣额，退款为 0。
-	return s.SettleDelivery(ctx, actor, ticketID, file.SizePlain)
+	return s.settleDelivery(ctx, actor, ticketID, file.SizePlain, completed, store.ShareEvidenceClientAck)
 }
 
 // SettleDelivery 按服务端实测的明文产出结算一次交付，回补预扣差额。
@@ -576,6 +576,10 @@ func (s *Service) SettleDeliveryFromClient(ctx context.Context, actor auth.Princ
 // 结算必须带上请求身份：票据本身是数据面的凭据，但不能让拿到票据的第三方
 // 借结算接口改动别人的配额。store.SettleTicket 的条件更新同时保证幂等。
 func (s *Service) SettleDelivery(ctx context.Context, actor auth.Principal, ticketID string, actualPlainBytes int64) error {
+	return s.settleDelivery(ctx, actor, ticketID, actualPlainBytes, true, store.ShareEvidenceServerMeasured)
+}
+
+func (s *Service) settleDelivery(ctx context.Context, actor auth.Principal, ticketID string, actualPlainBytes int64, completed bool, evidenceSource store.ShareDownloadEvidence) error {
 	ticket, err := store.GetTicket(ctx, s.DB.R(), strings.TrimSpace(ticketID))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -608,7 +612,7 @@ func (s *Service) SettleDelivery(ctx context.Context, actor auth.Principal, tick
 	if actualWire > ticket.ReservedBytes {
 		return fmt.Errorf("%w: 实际密文用量超过票据预扣", ErrUnavailable)
 	}
-	settled, err := s.settleTicketAndRefund(ctx, ticket, actualWire, actualPlainBytes, file.SizePlain)
+	settled, err := s.settleTicketAndRefund(ctx, ticket, actualWire, actualPlainBytes, file.SizePlain, completed, evidenceSource)
 	if err != nil {
 		return err
 	}
@@ -922,7 +926,7 @@ func parseByteRange(header string, size int64) (offset, limit int64, ranged bool
 // settleTicketAndRefund 在同一个数据库事务里结算票据、回补预扣，并记录全量结算的分享下载。
 // direct/proxy 密文模式的全量字节数来自客户端完成回执，不代表服务端能证明文件已落盘。
 // 条件更新未命中时表示另一个并发请求已结算，不再重复回补或写下载记录。
-func (s *Service) settleTicketAndRefund(ctx context.Context, ticket store.Ticket, actualWire, actualPlain, fileSize int64) (bool, error) {
+func (s *Service) settleTicketAndRefund(ctx context.Context, ticket store.Ticket, actualWire, actualPlain, fileSize int64, completed bool, evidenceSource store.ShareDownloadEvidence) (bool, error) {
 	if actualWire < 0 || actualWire > ticket.ReservedBytes {
 		return false, fmt.Errorf("%w: 票据实际用量无效", ErrBadRequest)
 	}
@@ -939,11 +943,11 @@ func (s *Service) settleTicketAndRefund(ctx context.Context, ticket store.Ticket
 				return err
 			}
 		}
-		if ticket.ShareID != "" && ticket.Purpose == store.PurposeDownload && actualPlain == fileSize {
+		if completed && ticket.ShareID != "" && ticket.Purpose == store.PurposeDownload && actualPlain == fileSize {
 			return store.InsertShareDownloadAccess(ctx, tx, store.ShareDownloadAccess{
 				TicketID: ticket.ID, ShareID: ticket.ShareID, ActorType: ticket.ActorType,
 				UserID: ticket.UserID, ClientIP: ticket.ClientIP, ResourcePath: ticket.ResourcePath,
-				BytesPlain: actualPlain, OccurredAt: s.Now(),
+				BytesPlain: actualPlain, EvidenceSource: evidenceSource, OccurredAt: s.Now(),
 			})
 		}
 		return nil

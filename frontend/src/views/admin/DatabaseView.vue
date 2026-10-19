@@ -109,6 +109,7 @@ const maintenanceRows = computed<Array<{ label: string; value: number }>>(() => 
     { label: "回收的文件对象", value: report?.archiveFiles ?? 0 },
     { label: "清理的流量明细", value: report?.purgedTrafficLogs ?? 0 },
     { label: "清理的审计记录", value: report?.purgedAuditLogs ?? 0 },
+    { label: "清理的分享访问记录", value: report?.purgedShareAccesses ?? 0 },
     { label: "失败项", value: report?.failures ?? 0 },
   ];
 });

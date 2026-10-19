@@ -24,6 +24,6 @@ export type WorkerMessage =
   | { type: "session"; value: string }
   | { type: "storage"; key: string; value: string | null }
   | { type: "unauthorized"; token: string }
-  | { type: "request"; id: number; method: "plan" | "open" | "write" | "close" | "abort"; value?: unknown }
+  | { type: "request"; id: number; method: "plan" | "open" | "write" | "close" | "abort" | "settle"; value?: unknown }
   | { type: "result"; value: DeliveryResult | UploadOutcome }
   | { type: "error"; error: TransferError };

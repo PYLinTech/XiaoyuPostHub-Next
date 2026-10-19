@@ -240,11 +240,10 @@ func (s *Service) resolvePickupCode(ctx context.Context, code string, p auth.Pri
 	return target, share, nil
 }
 
-// ClaimPickupUseForActor 在一次写事务里同时核销取件码与分享访问次数。
+// ClaimPickupUseForActor 在一次写事务里同时核销取件码与分享交付次数。
 //
 // 取件码“查看”不应消耗任一额度；只有交付准备成功后的最后一步才进入这里。
-// 两个计数必须同事务提交，否则一个成功、另一个失败会出现“下载没发生但
-// 次数被扣掉”或“分享访问上限被绕过”的不一致。
+// 两个计数必须同事务提交，否则一个成功、另一个失败会造成额度不一致。
 func (s *Service) ClaimPickupUseForActor(ctx context.Context, code string, p auth.Principal) error {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if code == "" {
@@ -267,7 +266,10 @@ func (s *Service) ClaimPickupUseForActor(ctx context.Context, code string, p aut
 		if _, err := store.ConsumePickupCode(ctx, tx, code, aliveAfter); err != nil {
 			return err
 		}
-		if err := store.ConsumeShareVisit(ctx, tx, pc.ShareID, now); err != nil {
+		if err := store.ConsumeShareDelivery(ctx, tx, pc.ShareID, now); err != nil {
+			return err
+		}
+		if err := store.RecordShareVisit(ctx, tx, pc.ShareID, now); err != nil {
 			return err
 		}
 		return store.InsertShareAccess(ctx, tx, pc.ShareID, p.Actor, p.UserID(), p.ClientIP.String(), "pickup")

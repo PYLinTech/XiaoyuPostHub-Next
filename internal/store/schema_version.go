@@ -25,8 +25,8 @@ import (
 // 1 是基线：首批建库直起的结构；v2 邮箱解绑申请；v3 上传平台（收尾队列、流式暂存、
 // 密文分卷与用户组资源调度优先级）；v4 并行上传校验摘要；v5 分享名称展示；
 // v6 上传配置改由系统运行参数与用户组配额管理；v7 分享自定义 Markdown；v8 分享提供者流量计费；
-// v9 直链（内容哈希绑定）与交付归属；v10 分享下载历史。
-const currentSchemaVersion = 10
+// v9 直链（内容哈希绑定）与交付归属；v10 分享下载历史；v11 分享交付次数与下载证据来源。
+const currentSchemaVersion = 11
 
 const schemaVersionOpTimeout = 120 * time.Second
 

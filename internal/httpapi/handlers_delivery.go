@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -73,14 +74,15 @@ func (s *Server) prepareDelivery(w http.ResponseWriter, r *http.Request, purpose
 }
 
 type settleRequest struct {
-	TicketID string `json:"ticketId"`
+	TicketID  string `json:"ticketId"`
+	Completed bool   `json:"completed"`
 }
 
 // handleSettle 是直链加密 / 中转加密票据的客户端结算入口。
 //
-// 这两种票据的字节在服务端视野外交付，客户端上报的数字不可信，因此服务层
-// 一律按预扣全额结算，请求体只需要票据标识；中转解密票据由服务端实测结算，
-// 走这个端点会被拒绝。
+// 这两种票据的字节在服务端视野外交付，客户端上报的用量不可信，因此服务层
+// 一律按预扣全额结算。completed 只决定是否记录为客户端确认完成的下载，不能
+// 折减配额，也不能证明文件已实际保存；中转解密票据由服务端实测结算。
 func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request) {
 	// 交付计划也会签发给分享访客；结算必须允许匿名请求，但由服务层
 	// 校验票据的用户/访客归属，不能仅凭 ticketId 修改别人的额度。
@@ -89,7 +91,10 @@ func (s *Server) handleSettle(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := s.Svc.SettleDeliveryFromClient(r.Context(), actor, req.TicketID); err != nil {
+	if err := s.Svc.SettleDeliveryFromClient(r.Context(), actor, req.TicketID, req.Completed); err != nil {
+		if !errors.Is(err, service.ErrForbidden) && !errors.Is(err, service.ErrBadRequest) {
+			log.Printf("client delivery settlement failed: %v", err)
+		}
 		fail(w, err)
 		return
 	}

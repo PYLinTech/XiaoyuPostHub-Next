@@ -230,7 +230,7 @@ const tiles = computed(() => [
     icon: "share",
     label: "分享链接",
     value: String(data.value.shares.total),
-    hint: `生效 ${data.value.shares.alive} · 累计访问 ${data.value.shares.visits}`,
+    hint: `生效 ${data.value.shares.alive} · 累计访问请求 ${data.value.shares.visits}`,
   },
   {
     key: "pickups",
@@ -249,9 +249,9 @@ const tiles = computed(() => [
   {
     key: "views",
     icon: "eye",
-    label: "近 7 天访问",
+    label: "近 7 天分享事件",
     value: String(data.value.shares.views + data.value.shares.downloads),
-    hint: `浏览 ${data.value.shares.views} · 下载 ${data.value.shares.downloads}`,
+    hint: `打开/目录请求 ${data.value.shares.views} · 完整下载 ${data.value.shares.downloads}`,
   },
 ]);
 </script>

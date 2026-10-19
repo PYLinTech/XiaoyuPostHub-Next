@@ -24,17 +24,17 @@ async function execute<T>(start: TransferInput, options: DeliveryOptions | Uploa
         options.signal?.removeEventListener("abort", cancel);
         worker.terminate();
       };
-      const fail = (error: Error, crashed = false) => {
+      const fail = (error: Error) => {
         if (finished) return;
         cleanup();
         void sink?.abort().catch(() => {});
-        if (crashed && activePlan) void settleQuietly(activePlan);
+        if (activePlan) void settleQuietly(activePlan, false);
         reject(error);
       };
       const send = (message: HostMessage) => {
         if (finished) return;
         try { worker.postMessage(message); }
-        catch (error) { fail(error instanceof Error ? error : new Error(String(error)), true); }
+        catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
       };
       const notify = (callback: () => void) => {
         if (observerError) return;
@@ -45,8 +45,8 @@ async function execute<T>(start: TransferInput, options: DeliveryOptions | Uploa
         }
       };
       options.signal?.addEventListener("abort", cancel, { once: true });
-      worker.onerror = (event) => fail(new Error(event.message || "传输线程异常"), true);
-      worker.onmessageerror = () => fail(new Error("传输线程消息无法读取"), true);
+      worker.onerror = (event) => fail(new Error(event.message || "传输线程异常"));
+      worker.onmessageerror = () => fail(new Error("传输线程消息无法读取"));
       worker.onmessage = async (event: MessageEvent<WorkerMessage>) => {
         if (finished) return;
         const message = event.data;
@@ -82,7 +82,7 @@ async function execute<T>(start: TransferInput, options: DeliveryOptions | Uploa
                     publicKeyBase64,
                     async unwrap() { throw new Error("私钥只保留在传输线程"); },
                   });
-                  if (finished) { await settleQuietly(plan); return; }
+                  if (finished) { await settleQuietly(plan, false); return; }
                   activePlan = plan;
                   value = plan;
                   break;
@@ -95,6 +95,11 @@ async function execute<T>(start: TransferInput, options: DeliveryOptions | Uploa
                 case "write": if (!sink) throw new Error("保存通道已关闭"); await sink.write(message.value as Uint8Array); break;
                 case "close": await sink?.close(); sink = null; break;
                 case "abort": await sink?.abort(); sink = null; break;
+                case "settle":
+                  if (!activePlan || typeof message.value !== "boolean") throw new Error("缺少待结算票据或完成状态");
+                  await settleQuietly(activePlan, message.value);
+                  value = true;
+                  break;
               }
               if (!finished) send({ type: "reply", id: message.id, value });
             } catch (error) {

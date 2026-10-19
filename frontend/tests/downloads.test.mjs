@@ -70,16 +70,33 @@ test("开始保存和完成后的任务不再允许取消", () => {
 });
 
 const moduleUrl = code => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
-const apiUrl = moduleUrl(`export const settled = []; export const fsApi = { settle: async id => settled.push(id) }; export const streamUrlWithToken = url => url; export const fetchCipherRange = () => { throw new Error("取消后仍然取数"); };`);
+const apiUrl = moduleUrl(`export const settled = []; export const outcomes = []; export let failuresRemaining = 0; export let nextError = null; export const setFailuresRemaining = value => { failuresRemaining = value; }; export const setNextError = value => { nextError = value; }; export const fsApi = { settle: async (id, completed) => { settled.push(id); outcomes.push([id, completed]); if (nextError) { const error = nextError; nextError = null; throw error; } if (failuresRemaining > 0) { failuresRemaining--; throw new Error("临时结算失败"); } } }; export const streamUrlWithToken = url => url; export const fetchCipherRange = () => { throw new Error("取消后仍然取数"); };`);
+const settlementUrl = await loadSource("../src/delivery/settlementOutbox.ts", { "@/api/endpoints": apiUrl });
 const deliveryUrl = await loadSource("../src/delivery/download.ts", {
   "./cipherParts": await loadSource("../src/delivery/cipherParts.ts", {}),
+  "./settlementOutbox": settlementUrl,
   "@/api/endpoints": apiUrl,
   "@/crypto/clientkey": moduleUrl("export const encryptionSupported = () => false; export const createClientKeyPair = () => null; export const resolveContentKey = () => null;"),
   "@/crypto/xph": moduleUrl("export const decryptAll = () => {}; export const importContentKey = () => {}; export const parseXphHeader = () => {}; export const HEADER_SIZE = 64;"),
   "@/crypto/sha256": moduleUrl("export class Sha256 {} export const bytesToHex = () => '';"),
 });
-const { runDelivery } = await import(deliveryUrl);
-const { settled } = await import(apiUrl);
+const { runDelivery, settleQuietly } = await import(deliveryUrl);
+const { flushPendingSettlements } = await import(settlementUrl);
+const peerOutboxCode = `${Buffer.from(settlementUrl.split(",")[1], "base64").toString()}\n// separate tab module instance`;
+const peerSettlementUrl = `data:text/javascript;base64,${Buffer.from(peerOutboxCode).toString("base64")}`;
+const { settlePendingDelivery: settleFromPeer, flushPendingSettlements: flushPeer } = await import(peerSettlementUrl);
+const { settled, outcomes, setFailuresRemaining, setNextError } = await import(apiUrl);
+const settlementData = new Map();
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    get length() { return settlementData.size; },
+    key: index => [...settlementData.keys()][index] ?? null,
+    getItem: key => settlementData.get(key) ?? null,
+    setItem: (key, value) => settlementData.set(key, value),
+    removeItem: key => settlementData.delete(key),
+  },
+});
 
 test("下载开始前取消不会申请交付计划", async () => {
   const controller = new AbortController();
@@ -96,6 +113,51 @@ test("准备期间取消会结算已申请票据并停止取数", async () => {
     return { ticketId: "canceled-ticket", mode: "proxy", contentForm: "ciphertext" };
   } }, { signal: controller.signal }), { name: "AbortError" });
   assert.deepEqual(settled, ["canceled-ticket"]);
+  assert.deepEqual(outcomes, [["canceled-ticket", false]]);
+});
+
+test("交付结算带完成状态并对临时失败做有界重试", async () => {
+  settled.length = 0;
+  outcomes.length = 0;
+  setFailuresRemaining(2);
+  await settleQuietly({ ticketId: "retry-ticket", mode: "proxy" }, false);
+  assert.deepEqual(settled, ["retry-ticket", "retry-ticket", "retry-ticket"]);
+  assert.deepEqual(outcomes, Array.from({ length: 3 }, () => ["retry-ticket", false]));
+
+  settled.length = 0;
+  outcomes.length = 0;
+  await settleQuietly({ ticketId: "complete-ticket", mode: "proxy" }, true);
+  assert.deepEqual(outcomes, [["complete-ticket", true]]);
+
+  settled.length = 0;
+  outcomes.length = 0;
+  setFailuresRemaining(6);
+  const interruptedPlan = { ticketId: "persistent-ticket", mode: "proxy", expiresAt: 1 };
+  const peerPlan = { ticketId: "peer-ticket", mode: "proxy" };
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    await Promise.all([
+      settleQuietly(interruptedPlan, true),
+      settleFromPeer(peerPlan, false),
+    ]);
+  } finally {
+    console.warn = originalWarn;
+  }
+  const key = "xph.delivery.settlement-outbox:persistent-ticket";
+  const peerKey = "xph.delivery.settlement-outbox:peer-ticket";
+  assert.deepEqual(JSON.parse(settlementData.get(key)), { ticketId: "persistent-ticket", completed: true });
+  assert.deepEqual(JSON.parse(settlementData.get(peerKey)), { ticketId: "peer-ticket", completed: false });
+  setFailuresRemaining(0);
+  await Promise.all([flushPendingSettlements(), flushPeer()]);
+  assert.ok(outcomes.some(([id, completed]) => id === "persistent-ticket" && completed));
+  assert.ok(outcomes.some(([id, completed]) => id === "peer-ticket" && !completed));
+  assert.equal(settlementData.has(key), false);
+  assert.equal(settlementData.has(peerKey), false);
+
+  setNextError({ status: 403, detail: "票据已失效" });
+  await settleQuietly({ ticketId: "server-expired-ticket", mode: "proxy", expiresAt: 1 }, true);
+  assert.equal(settlementData.has("xph.delivery.settlement-outbox:server-expired-ticket"), false);
 });
 
 const aggregateUrl = await loadSource("../src/lib/transferProgress.ts");

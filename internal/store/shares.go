@@ -9,7 +9,7 @@ import (
 )
 
 const shareColumns = `id, owner_id, root_path, kind, access_mode, pwd_hash, pwd_salt,
-	allow_download, allow_preview, allow_subpath, show_sharer_name, custom_markdown, expires_at, max_visits, visits,
+	allow_download, allow_preview, allow_subpath, show_sharer_name, custom_markdown, expires_at, max_deliveries, delivery_count, visits,
 	disabled, created_at, updated_at`
 
 func scanShare(row rowScanner) (Share, error) {
@@ -17,11 +17,13 @@ func scanShare(row rowScanner) (Share, error) {
 	var kind, mode string
 	var allowDown, allowPrev, allowSub, showName, disabled int
 	err := row.Scan(&s.ID, &s.OwnerID, &s.RootPath, &kind, &mode, &s.PwdHash, &s.PwdSalt,
-		&allowDown, &allowPrev, &allowSub, &showName, &s.CustomMarkdown, &s.ExpiresAt, &s.MaxVisits, &s.Visits,
+		&allowDown, &allowPrev, &allowSub, &showName, &s.CustomMarkdown, &s.ExpiresAt, &s.MaxDeliveries, &s.Deliveries, &s.AccessVisits,
 		&disabled, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return Share{}, err
 	}
+	s.MaxVisits = s.MaxDeliveries
+	s.Visits = s.Deliveries
 	s.Kind = ShareKind(kind)
 	s.AccessMode = AccessMode(mode)
 	s.AllowDownload = allowDown != 0
@@ -56,12 +58,12 @@ func CreateShare(ctx context.Context, q Querier, s Share) error {
 	// 一个库里根本不存在的版本号自撞冲突。
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO shares (id, owner_id, root_path, kind, access_mode, pwd_hash, pwd_salt,
-			allow_download, allow_preview, allow_subpath, show_sharer_name, custom_markdown, expires_at, max_visits, visits,
-			disabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+			allow_download, allow_preview, allow_subpath, show_sharer_name, custom_markdown, expires_at,
+			max_deliveries, delivery_count, visits, disabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?)`,
 		s.ID, s.OwnerID, s.RootPath, string(s.Kind), string(s.AccessMode), s.PwdHash, s.PwdSalt,
 		boolToInt(s.AllowDownload), boolToInt(s.AllowPreview), boolToInt(s.AllowSubpath), boolToInt(s.ShowSharerName),
-		s.CustomMarkdown, s.ExpiresAt, s.MaxVisits, Now(), s.UpdatedAt)
+		s.CustomMarkdown, s.ExpiresAt, s.MaxDeliveries, Now(), s.UpdatedAt)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "PRIMARY KEY") {
 			return fmt.Errorf("%w: 分享标识冲突", ErrConflict)
@@ -116,11 +118,11 @@ func UpdateShareIfUnchanged(ctx context.Context, q Querier, s Share, expectUpdat
 	res, err := q.ExecContext(ctx, `
 		UPDATE shares SET root_path = ?, kind = ?, access_mode = ?, pwd_hash = ?, pwd_salt = ?,
 			allow_download = ?, allow_preview = ?, allow_subpath = ?, show_sharer_name = ?, custom_markdown = ?,
-			expires_at = ?, max_visits = ?, disabled = ?, updated_at = updated_at + 1
+			expires_at = ?, max_deliveries = ?, disabled = ?, updated_at = updated_at + 1
 		WHERE id = ? AND updated_at = ?`,
 		s.RootPath, string(s.Kind), string(s.AccessMode), s.PwdHash, s.PwdSalt,
 		boolToInt(s.AllowDownload), boolToInt(s.AllowPreview), boolToInt(s.AllowSubpath), boolToInt(s.ShowSharerName),
-		s.CustomMarkdown, s.ExpiresAt, s.MaxVisits, boolToInt(s.Disabled), s.ID, expectUpdatedAt)
+		s.CustomMarkdown, s.ExpiresAt, s.MaxDeliveries, boolToInt(s.Disabled), s.ID, expectUpdatedAt)
 	if err != nil {
 		return fmt.Errorf("更新分享失败: %w", err)
 	}
@@ -145,16 +147,12 @@ func DeleteShare(ctx context.Context, q Querier, id string) error {
 	return nil
 }
 
-// ConsumeShareVisit 记一次访问。
-//
-// 有效性、过期、访问上限三者与计数递增放在同一条 UPDATE：分开判会并发超限。
-// 命中 0 行即表示拒绝。
-func ConsumeShareVisit(ctx context.Context, q Querier, id string, now int64) error {
+// RecordShareVisit 记录一次成功的访问请求；次数上限单独应用于交付计划。
+func RecordShareVisit(ctx context.Context, q Querier, id string, now int64) error {
 	res, err := q.ExecContext(ctx, `
 		UPDATE shares SET visits = visits + 1
 		WHERE id = ? AND disabled = 0
 		  AND (expires_at = 0 OR expires_at > ?)
-		  AND (max_visits = 0 OR visits < max_visits)
 		  AND EXISTS (
 			SELECT 1 FROM users
 			 WHERE users.id = shares.owner_id
@@ -164,7 +162,28 @@ func ConsumeShareVisit(ctx context.Context, q Querier, id string, now int64) err
 		return fmt.Errorf("记录分享访问失败: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: 分享已失效、已过期或已达访问上限", ErrNoRowsAffected)
+		return fmt.Errorf("%w: 分享已失效或已过期", ErrNoRowsAffected)
+	}
+	return nil
+}
+
+// ConsumeShareDelivery 原子地消耗一个成功签发的分享交付计划。
+func ConsumeShareDelivery(ctx context.Context, q Querier, id string, now int64) error {
+	res, err := q.ExecContext(ctx, `
+		UPDATE shares SET delivery_count = delivery_count + 1
+		WHERE id = ? AND disabled = 0
+		  AND (expires_at = 0 OR expires_at > ?)
+		  AND (max_deliveries = 0 OR delivery_count < max_deliveries)
+		  AND EXISTS (
+			SELECT 1 FROM users
+			 WHERE users.id = shares.owner_id
+			   AND users.status = 1
+		  )`, id, now)
+	if err != nil {
+		return fmt.Errorf("核销分享交付次数失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: 分享已失效、已过期或交付次数已用尽", ErrNoRowsAffected)
 	}
 	return nil
 }
@@ -234,28 +253,38 @@ func MoveSharesRootPrefix(ctx context.Context, q Querier, ownerID int64, oldPath
 	return n, nil
 }
 
+type ShareDownloadEvidence string
+
+const (
+	ShareEvidenceServerMeasured ShareDownloadEvidence = "server_measured"
+	ShareEvidenceClientAck      ShareDownloadEvidence = "client_ack"
+	ShareEvidenceLegacyUnknown  ShareDownloadEvidence = "legacy_unknown"
+)
+
 // ShareAccessRecord 是所有者在单个分享中查看的一条访问/下载记录。
 type ShareAccessRecord struct {
-	ID         int64     `json:"id"`
-	ActorType  ActorType `json:"actorType"`
-	ActorID    int64     `json:"actorId"`
-	ClientIP   string    `json:"clientIp"`
-	Action     string    `json:"action"`
-	Target     string    `json:"target"`
-	BytesPlain int64     `json:"bytesPlain"`
-	OccurredAt int64     `json:"occurredAt"`
+	ID             int64                 `json:"id"`
+	ActorType      ActorType             `json:"actorType"`
+	ActorID        int64                 `json:"actorId"`
+	ClientIP       string                `json:"clientIp"`
+	Action         string                `json:"action"`
+	Target         string                `json:"target"`
+	BytesPlain     int64                 `json:"bytesPlain"`
+	EvidenceSource ShareDownloadEvidence `json:"evidenceSource,omitempty"`
+	OccurredAt     int64                 `json:"occurredAt"`
 }
 
 // ShareDownloadAccess 是一条完成结算的分享下载记录。
 type ShareDownloadAccess struct {
-	TicketID     string
-	ShareID      string
-	ActorType    ActorType
-	UserID       int64
-	ClientIP     string
-	ResourcePath string
-	BytesPlain   int64
-	OccurredAt   int64
+	TicketID       string
+	ShareID        string
+	ActorType      ActorType
+	UserID         int64
+	ClientIP       string
+	ResourcePath   string
+	BytesPlain     int64
+	EvidenceSource ShareDownloadEvidence
+	OccurredAt     int64
 }
 
 // InsertShareAccess 记录一次分享访问。
@@ -271,18 +300,19 @@ func InsertShareAccess(ctx context.Context, q Querier, shareID string, actor Act
 
 // InsertShareDownloadAccess 在票据结算事务中记录一次分享下载。
 func InsertShareDownloadAccess(ctx context.Context, q Querier, access ShareDownloadAccess) error {
-	if access.ShareID == "" || access.TicketID == "" || access.BytesPlain < 0 {
-		return fmt.Errorf("记录分享下载明细失败: 分享、票据标识不能为空且字节数不可为负")
+	if access.ShareID == "" || access.TicketID == "" || access.BytesPlain < 0 ||
+		(access.EvidenceSource != ShareEvidenceServerMeasured && access.EvidenceSource != ShareEvidenceClientAck) {
+		return fmt.Errorf("记录分享下载明细失败: 分享/票据标识、字节数或证据来源无效")
 	}
 	if access.OccurredAt == 0 {
 		access.OccurredAt = Now()
 	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO share_accesses (
-			share_id, actor_type, user_id, client_ip, action, resource_path, bytes_plain, ticket_id, occurred_at
-		) VALUES (?, ?, ?, ?, 'download', ?, ?, ?, ?)`,
+			share_id, actor_type, user_id, client_ip, action, resource_path, bytes_plain, ticket_id, evidence_source, occurred_at
+		) VALUES (?, ?, ?, ?, 'download', ?, ?, ?, ?, ?)`,
 		access.ShareID, string(access.ActorType), access.UserID, access.ClientIP,
-		access.ResourcePath, access.BytesPlain, access.TicketID, access.OccurredAt)
+		access.ResourcePath, access.BytesPlain, access.TicketID, string(access.EvidenceSource), access.OccurredAt)
 	if err != nil {
 		return fmt.Errorf("记录分享下载明细失败: %w", err)
 	}
@@ -292,6 +322,24 @@ func InsertShareDownloadAccess(ctx context.Context, q Querier, access ShareDownl
 // ListShareAccesses 列出某分享的访问明细，按时间倒序分页。
 // snapshotID 限定本次浏览会话看到的最大记录 ID，避免新事件插入第一页后
 // 改变后续 OFFSET 页的边界；0 表示从当前最新记录创建快照。
+
+// DeleteShareAccessesBeforeBatch 分批清理到期分享明细；保留期清理可在分享仍有效时删除 IP/路径数据。
+func DeleteShareAccessesBeforeBatch(ctx context.Context, q Querier, before int64, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	res, err := q.ExecContext(ctx, `
+		DELETE FROM share_accesses
+		WHERE id IN (
+			SELECT id FROM share_accesses WHERE occurred_at < ? ORDER BY occurred_at, id LIMIT ?
+		)`, before, limit)
+	if err != nil {
+		return 0, fmt.Errorf("分批清理分享访问明细失败: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func ListShareAccesses(ctx context.Context, q Querier, shareID string, limit, offset int, snapshotID int64) ([]ShareAccessRecord, int64, int64, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -312,7 +360,7 @@ func ListShareAccesses(ctx context.Context, q Querier, shareID string, limit, of
 		return nil, 0, 0, fmt.Errorf("统计分享访问明细失败: %w", err)
 	}
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, actor_type, user_id, client_ip, action, resource_path, bytes_plain, occurred_at
+		SELECT id, actor_type, user_id, client_ip, action, resource_path, bytes_plain, evidence_source, occurred_at
 		FROM share_accesses WHERE share_id = ? AND id <= ?
 		ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?`, shareID, snapshotID, limit, offset)
 	if err != nil {
@@ -324,7 +372,7 @@ func ListShareAccesses(ctx context.Context, q Querier, shareID string, limit, of
 		var record ShareAccessRecord
 		var actor string
 		if err := rows.Scan(&record.ID, &actor, &record.ActorID, &record.ClientIP, &record.Action,
-			&record.Target, &record.BytesPlain, &record.OccurredAt); err != nil {
+			&record.Target, &record.BytesPlain, &record.EvidenceSource, &record.OccurredAt); err != nil {
 			return nil, 0, 0, fmt.Errorf("扫描分享访问明细失败: %w", err)
 		}
 		record.ActorType = ActorType(actor)

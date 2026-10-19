@@ -65,9 +65,18 @@ func TestShareNameVisibilityEndToEnd(t *testing.T) {
 	for _, endpoint := range []string{"/api/s/" + id + "/resolve", "/api/p/" + code + "/resolve"} {
 		assertGuest(endpoint, "")
 	}
-	status, payload = env.do(t, http.MethodPatch, "/api/share/"+id, map[string]any{"maxVisits": 50}, token)
-	if object(status, payload, "share")["showSharerName"] != false {
+	status, payload = env.do(t, http.MethodPatch, "/api/share/"+id, map[string]any{"maxDeliveries": 50}, token)
+	updated := object(status, payload, "share")
+	if updated["showSharerName"] != false {
 		t.Fatal("无关更新重置名称选项")
+	}
+	if updated["maxDeliveries"] != float64(50) {
+		t.Fatalf("maxDeliveries API field not applied: %v", updated)
+	}
+	status, _ = env.do(t, http.MethodPatch, "/api/share/"+id,
+		map[string]any{"maxDeliveries": 3, "maxVisits": 2}, token)
+	if status != http.StatusBadRequest {
+		t.Fatalf("conflicting legacy/new delivery caps should be rejected, status=%d", status)
 	}
 	status, payload = env.do(t, http.MethodPost, "/api/share", map[string]any{"path": "/d", "kind": "folder", "showSharerName": false}, token)
 	if object(status, payload, "share")["showSharerName"] != false {

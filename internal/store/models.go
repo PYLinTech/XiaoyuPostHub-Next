@@ -502,10 +502,14 @@ type Share struct {
 	AllowSubpath   bool       `json:"allowSubpath"`
 	ShowSharerName bool       `json:"showSharerName"`
 	ExpiresAt      int64      `json:"expiresAt,omitempty"`
-	MaxVisits      int        `json:"maxVisits"`
-	Visits         int        `json:"visits"`
-	Disabled       bool       `json:"disabled"`
-	CreatedAt      int64      `json:"createdAt"`
+	MaxDeliveries  int        `json:"maxDeliveries"`
+	Deliveries     int        `json:"deliveries"`
+	AccessVisits   int        `json:"accessVisits"`
+	// MaxVisits / Visits are compatibility aliases; new clients use delivery terminology.
+	MaxVisits int   `json:"maxVisits"`
+	Visits    int   `json:"visits"`
+	Disabled  bool  `json:"disabled"`
+	CreatedAt int64 `json:"createdAt"`
 	// UpdatedAt 是乐观锁版本，每次更新自增。
 	UpdatedAt int64 `json:"updatedAt,omitempty"`
 	// 解析分享时填充的访客展示字段，不持久化。

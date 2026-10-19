@@ -386,7 +386,7 @@ func TestSettleClientReportUntrusted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.svc.SettleDeliveryFromClient(context.Background(), f.user, direct.TicketID); err != nil {
+	if err := f.svc.SettleDeliveryFromClient(context.Background(), f.user, direct.TicketID, true); err != nil {
 		t.Fatalf("直链结算失败: %v", err)
 	}
 	after, err := store.GetCounter(context.Background(), f.db.R(), store.ScopeTrafficDown, key)
@@ -407,7 +407,7 @@ func TestSettleClientReportUntrusted(t *testing.T) {
 	if proxied.Mode != DeliveryModeProxyDecrypt {
 		t.Fatalf("前置条件：应签发中转解密交付，实得 %+v", proxied)
 	}
-	if err := f.svc.SettleDeliveryFromClient(context.Background(), f.user, proxied.TicketID); !errors.Is(err, ErrForbidden) {
+	if err := f.svc.SettleDeliveryFromClient(context.Background(), f.user, proxied.TicketID, true); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("中转解密票据的客户端结算应被拒绝，实得: %v", err)
 	}
 }
@@ -466,7 +466,7 @@ func TestProxyCipherDelivery(t *testing.T) {
 		t.Fatalf("中转流必须输出完整密文（实得 %d 字节，密文口径 %d）", len(got), stream.CipherSize)
 	}
 	// 客户端结算按预扣全额，不报错。
-	if err := f.svc.SettleDeliveryFromClient(context.Background(), f.user, plan.TicketID); err != nil {
+	if err := f.svc.SettleDeliveryFromClient(context.Background(), f.user, plan.TicketID, true); err != nil {
 		t.Fatalf("中转加密票据应由客户端结算: %v", err)
 	}
 }

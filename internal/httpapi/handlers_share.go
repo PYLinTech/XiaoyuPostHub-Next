@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -23,7 +25,8 @@ type createShareRequest struct {
 	AllowSubpath   *bool  `json:"allowSubpath"`
 	ShowSharerName *bool  `json:"showSharerName"`
 	ExpiresAt      int64  `json:"expiresAt"`
-	MaxVisits      int    `json:"maxVisits"`
+	MaxDeliveries  *int   `json:"maxDeliveries"`
+	MaxVisits      *int   `json:"maxVisits"` // 兼容旧客户端
 }
 
 // handleCreateShare 创建分享。
@@ -38,6 +41,15 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := store.ShareKind(strings.TrimSpace(req.Kind))
 	mode := store.AccessMode(strings.TrimSpace(req.AccessMode))
+	limit, err := resolveShareDeliveryLimit(req.MaxDeliveries, req.MaxVisits)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	maxDeliveries := 0
+	if limit != nil {
+		maxDeliveries = *limit
+	}
 	share, err := s.Svc.CreateShare(r.Context(), p, service.CreateShareRequest{
 		CustomMarkdown: req.CustomMarkdown,
 		Path:           req.Path,
@@ -49,7 +61,7 @@ func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
 		AllowSubpath:   boolOr(req.AllowSubpath, true),
 		ShowSharerName: boolOr(req.ShowSharerName, true),
 		ExpiresAt:      req.ExpiresAt,
-		MaxVisits:      req.MaxVisits,
+		MaxDeliveries:  maxDeliveries,
 	})
 	if err != nil {
 		fail(w, err)
@@ -84,13 +96,14 @@ type updateShareRequest struct {
 	AllowSubpath    *bool   `json:"allowSubpath"`
 	ShowSharerName  *bool   `json:"showSharerName"`
 	ExpiresAt       *int64  `json:"expiresAt"`
-	MaxVisits       *int    `json:"maxVisits"`
+	MaxDeliveries   *int    `json:"maxDeliveries"`
+	MaxVisits       *int    `json:"maxVisits"` // 兼容旧客户端
 	Disabled        *bool   `json:"disabled"`
 	ExpectUpdatedAt int64   `json:"expectUpdatedAt"`
 }
 
 // handleUpdateShare 修改分享。字段用指针表达"是否要改"，避免零值把已有
-// 配置覆盖掉——否则想把 MaxVisits 改成 0 与"不想改"无法区分。
+// 配置覆盖掉——否则想把 MaxDeliveries 改成 0 与"不想改"无法区分。
 func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.requireUser(w, r)
 	if !ok {
@@ -98,6 +111,11 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 	}
 	var req updateShareRequest
 	if !decodeJSONLimit(w, r, &req, int64(s.Settings.Runtime(r.Context()).Share.MarkdownMaxChars)*12+maxJSONBody) {
+		return
+	}
+	limit, err := resolveShareDeliveryLimit(req.MaxDeliveries, req.MaxVisits)
+	if err != nil {
+		fail(w, err)
 		return
 	}
 	update := service.UpdateShareRequest{
@@ -109,7 +127,7 @@ func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
 		AllowSubpath:    req.AllowSubpath,
 		ShowSharerName:  req.ShowSharerName,
 		ExpiresAt:       req.ExpiresAt,
-		MaxVisits:       req.MaxVisits,
+		MaxDeliveries:   limit,
 		Disabled:        req.Disabled,
 		ExpectUpdatedAt: req.ExpectUpdatedAt,
 	}
@@ -232,8 +250,11 @@ type guestShare struct {
 	AllowPreview   bool             `json:"allowPreview"`
 	AllowSubpath   bool             `json:"allowSubpath"`
 	ExpiresAt      int64            `json:"expiresAt,omitempty"`
-	MaxVisits      int              `json:"maxVisits"`
-	Visits         int              `json:"visits"`
+	MaxDeliveries  int              `json:"maxDeliveries"`
+	Deliveries     int              `json:"deliveries"`
+	// Deprecated aliases for old clients.
+	MaxVisits int `json:"maxVisits"`
+	Visits    int `json:"visits"`
 	// RootName 是分享内容的展示名（不含属主路径层级）。
 	RootName string `json:"rootName"`
 	// IsOwner 供受限分享判断"访问者是否就是创建者"，替代暴露 ownerId。
@@ -266,8 +287,10 @@ func guestShareView(share store.Share, p auth.Principal) (guestShare, guestTarge
 		AllowPreview:   share.AllowPreview,
 		AllowSubpath:   share.AllowSubpath,
 		ExpiresAt:      share.ExpiresAt,
-		MaxVisits:      share.MaxVisits,
-		Visits:         share.Visits,
+		MaxDeliveries:  share.MaxDeliveries,
+		Deliveries:     share.Deliveries,
+		MaxVisits:      share.MaxDeliveries,
+		Visits:         share.Deliveries,
 		RootName:       rootName,
 		SharerName:     sharerName,
 		Size:           share.Size,
@@ -342,6 +365,13 @@ func (s *Server) shareDelivery(w http.ResponseWriter, r *http.Request, purpose s
 		fail(w, err)
 		return
 	}
+	if err := s.Svc.ClaimShareDelivery(r.Context(), target.ShareID); err != nil {
+		if cancelErr := s.Svc.CancelDelivery(r.Context(), actor, plan.TicketID); cancelErr != nil {
+			log.Printf("failed to cancel unclaimed share delivery plan: %v", cancelErr)
+		}
+		fail(w, err)
+		return
+	}
 	writeData(w, plan)
 }
 
@@ -394,11 +424,23 @@ func (s *Server) handlePickupDownload(w http.ResponseWriter, r *http.Request) {
 	// 并发下只有一次核销能命中。落空（额度已被别人用掉）时必须把已经准备好的
 	// 交付撤掉：释放预扣的额度，票据本身随有效期自然失效。
 	if err := s.Svc.ClaimPickupUseForActor(r.Context(), code, actor); err != nil {
-		_ = s.Svc.CancelDelivery(r.Context(), actor, plan.TicketID)
+		if cancelErr := s.Svc.CancelDelivery(r.Context(), actor, plan.TicketID); cancelErr != nil {
+			log.Printf("failed to cancel unclaimed pickup delivery plan: %v", cancelErr)
+		}
 		fail(w, err)
 		return
 	}
 	writeData(w, plan)
+}
+
+func resolveShareDeliveryLimit(current, legacy *int) (*int, error) {
+	if current != nil && legacy != nil && *current != *legacy {
+		return nil, fmt.Errorf("%w: maxDeliveries 与兼容字段 maxVisits 不一致", service.ErrBadRequest)
+	}
+	if current != nil {
+		return current, nil
+	}
+	return legacy, nil
 }
 
 func boolOr(v *bool, def bool) bool {

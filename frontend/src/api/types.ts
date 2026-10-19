@@ -178,7 +178,12 @@ export interface Share {
   allowSubpath: boolean;
   showSharerName: boolean;
   expiresAt?: number;
+  maxDeliveries: number;
+  deliveries: number;
+  accessVisits: number;
+  /** @deprecated Use maxDeliveries. */
   maxVisits: number;
+  /** @deprecated Use deliveries. */
   visits: number;
   disabled: boolean;
   createdAt: number;
@@ -186,7 +191,7 @@ export interface Share {
 }
 
 /** 访客解析接口的脱敏视图，不包含属主账号与绝对路径。 */
-export interface GuestShare extends Pick<Share, "customMarkdown" | "id" | "kind" | "accessMode" | "hasPassword" | "allowDownload" | "allowPreview" | "allowSubpath" | "expiresAt" | "maxVisits" | "visits"> {
+export interface GuestShare extends Pick<Share, "customMarkdown" | "id" | "kind" | "accessMode" | "hasPassword" | "allowDownload" | "allowPreview" | "allowSubpath" | "expiresAt" | "maxDeliveries" | "deliveries" | "maxVisits" | "visits"> {
   rootName: string;
   isOwner: boolean;
   sharerName?: string;
@@ -292,6 +297,7 @@ export interface ShareAccessRecord {
   action: string;
   target: string;
   bytesPlain: number;
+  evidenceSource?: "server_measured" | "client_ack" | "legacy_unknown";
   occurredAt: number;
 }
 
@@ -727,6 +733,7 @@ export interface MaintenanceReport {
   archiveFiles: number;
   purgedTrafficLogs: number;
   purgedAuditLogs: number;
+  purgedShareAccesses: number;
   failures: number;
 }
 

@@ -107,6 +107,31 @@ func TestCountUsersByGroup(t *testing.T) {
 	}
 }
 
+func TestCountSharesOverviewRecognizesRecordedActions(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, `INSERT INTO user_groups (name, display_name, created_at) VALUES ('normal', '普通', 1)`)
+	mustExec(t, db, `INSERT INTO users (account, password_hash, group_name, status, created_at, updated_at)
+		VALUES ('share-owner', 'h', 'normal', 1, 1, 1)`)
+	mustExec(t, db, `INSERT INTO shares (id, owner_id, root_path, kind, access_mode, created_at, updated_at)
+		VALUES ('share-1', 1, '/file.bin', 'file', 'public', 1, 1)`)
+	for _, event := range []struct {
+		action string
+		when   int64
+	}{{"view", 100}, {"open", 100}, {"list", 100}, {"pickup", 100}, {"download", 100}, {"open", 99}} {
+		mustExec(t, db, `INSERT INTO share_accesses (share_id, actor_type, action, occurred_at)
+			VALUES ('share-1', 'guest', ?, ?)`, event.action, event.when)
+	}
+
+	got, err := CountSharesOverview(ctx, db.R(), 100, 100)
+	if err != nil {
+		t.Fatalf("统计分享概览失败: %v", err)
+	}
+	if got.Views != 3 || got.Downloads != 1 {
+		t.Fatalf("open/list/view 应计为浏览，且下载独立统计：%+v", got)
+	}
+}
+
 func TestCountActiveUsersSince(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()

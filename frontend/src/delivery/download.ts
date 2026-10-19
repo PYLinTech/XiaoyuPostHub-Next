@@ -1,5 +1,5 @@
 import { readCipherParts } from "./cipherParts";
-import { fetchCipherRange, fsApi, streamUrlWithToken } from "@/api/endpoints";
+import { fetchCipherRange, streamUrlWithToken } from "@/api/endpoints";
 import type { DeliveryPlan } from "@/api/types";
 import {
   createClientKeyPair,
@@ -9,6 +9,7 @@ import {
 } from "@/crypto/clientkey";
 import { decryptAll, importContentKey, parseXphHeader, HEADER_SIZE, type XphHeader } from "@/crypto/xph";
 import { Sha256, bytesToHex } from "@/crypto/sha256";
+import { settlePendingDelivery } from "./settlementOutbox";
 
 // 交付编排：把"取密文 → 解密 → 校验 → 交付"串成一条路径。
 //
@@ -47,6 +48,8 @@ export interface DeliveryOptions {
   /** 超过该大小时优先流式落盘，避免整份文件驻留内存。 */
   streamToDiskAbove?: number;
   openDiskSink?: (fileName: string) => Promise<DiskSink | null>;
+  /** 线程场景将结算交给主线程，以持久化失败重试。 */
+  settle?: (plan: DeliveryPlan, completed: boolean) => Promise<void>;
 }
 
 const DEFAULT_STREAM_THRESHOLD = 256 * 1024 * 1024;
@@ -63,6 +66,10 @@ export async function runDelivery(
 ): Promise<DeliveryResult> {
   const report = options.onProgress ?? (() => {});
   const signal = options.signal;
+  const settle = (plan: DeliveryPlan, completed: boolean) => {
+    if (!plan.ticketId || plan.mode === "proxy_decrypt") return Promise.resolve();
+    return options.settle ? options.settle(plan, completed) : settleQuietly(plan, completed);
+  };
 
   signal?.throwIfAborted();
   report({ phase: "preparing", bytesDone: 0, bytesTotal: 0, message: "正在准备" });
@@ -79,32 +86,23 @@ export async function runDelivery(
         ? await receiveCiphertext(plan, pair, report, signal, options)
         : await receivePlaintext(plan, report, signal, options);
   } catch (err) {
-    await settleQuietly(plan);
+    await settle(plan, false);
     throw err;
   }
 
-  // 密文通道按预扣全额由后端结算，上报字节数没有意义；这里只负责确认结账。
-  await settleQuietly(plan);
+  // 密文通道按预扣全额由后端结算；completed 仅用于区分记录是否代表完整交付。
+  await settle(plan, true);
   report({ phase: "done", bytesDone: result.bytes, bytesTotal: result.bytes, message: "已完成" });
   return result;
 }
 
 /**
- * 结算失败不阻断交付：文件已经交给用户，此时报错只会变成"下完了但界面报错"。
- *
- * 只有密文通道（direct/proxy）需要客户端调用：服务端无法实测用量，后端按
- * 预扣全额结算；proxy_decrypt 在中转流输出时已由服务端实测结算，不再上报。
- * 下载与预览（含 SW/Blob 兜底）共用这一个结账入口。
+ * 结算失败不阻断交付；短暂失败做有界重试，接口具备幂等性。
+ * 密文通道仍按预扣全额结算，completed 只标记客户端是否确认完整接收，
+ * 不作为配额折扣依据；proxy_decrypt 由服务端实测结算。
  */
-export async function settleQuietly(plan: DeliveryPlan): Promise<void> {
-  if (!plan.ticketId || plan.mode === "proxy_decrypt") {
-    return;
-  }
-  try {
-    await fsApi.settle(plan.ticketId);
-  } catch {
-    // 忽略：额度会在维护任务里被对账修正。
-  }
+export async function settleQuietly(plan: DeliveryPlan, completed: boolean): Promise<void> {
+  await settlePendingDelivery(plan, completed);
 }
 
 /**

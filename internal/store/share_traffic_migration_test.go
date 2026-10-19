@@ -5,6 +5,7 @@ import "testing"
 // 将当前结构还原到 v7，供各旧版本迁移夹具共用。
 func rewindTrafficBillingSchema(t *testing.T, db *DB) {
 	t.Helper()
+	mustExec(t, db, `DROP INDEX idx_tickets_share`)
 	mustExec(t, db, `DROP INDEX idx_traffic_billed_user`)
 	for table, columns := range map[string][]string{
 		"download_tickets": {"quota_scope", "quota_key", "billed_user_id", "billed_group_name", "share_id", "pickup_code", "resource_path"},

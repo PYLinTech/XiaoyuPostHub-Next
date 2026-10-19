@@ -35,9 +35,10 @@ type MaintenanceReport struct {
 	// PurgedMail 是本轮到期彻底删除的邮件归属数（含配额与部件引用释放）。
 	PurgedMail int `json:"purgedMail"`
 	// PurgedTrafficLogs / PurgedAuditLogs 是保留期清理删掉的行数。
-	PurgedTrafficLogs int `json:"purgedTrafficLogs"`
-	PurgedAuditLogs   int `json:"purgedAuditLogs"`
-	PrunedUploadJobs  int `json:"prunedUploadJobs"`
+	PurgedTrafficLogs   int `json:"purgedTrafficLogs"`
+	PurgedAuditLogs     int `json:"purgedAuditLogs"`
+	PurgedShareAccesses int `json:"purgedShareAccesses"`
+	PrunedUploadJobs    int `json:"prunedUploadJobs"`
 	// Failures 是各环节的错误计数，用于判断"清理是否真的在推进"。
 	Failures int `json:"failures"`
 	// Skipped 为真表示上一轮清理尚未结束、本次触发被跳过。
@@ -230,9 +231,8 @@ func (s *Service) RunMaintenance(ctx context.Context) MaintenanceReport {
 	//    也不会漏；更早过期的分享，其票据早已被自身 TTL 回收。
 	report.Failures = s.revokeExpiredShareTickets(ctx, int64(now), report.Failures)
 
-	// ⑥⑦ 保留期清理。明细类表只增不减——流量明细记每次传输、审计记每次管理
-	//     动作——不设上限会让库无限膨胀。日聚合与文件记录不受影响，
-	//     对账依赖它们，必须长期保留。
+	// ⑥⑦⑨ 保留期清理。流量、审计和分享访问明细均含敏感或高增长数据，
+	//     按各自保留期分批删除；日聚合与文件记录不受影响。
 	ops := s.Settings.Runtime(ctx).Ops
 	if ops.TrafficRetention > 0 {
 		if n, err := store.DeleteTrafficLogsBeforeBatch(ctx, s.DB.W(), now-int64(ops.TrafficRetention.Seconds()), maintenanceBatch); err != nil {
@@ -248,6 +248,13 @@ func (s *Service) RunMaintenance(ctx context.Context) MaintenanceReport {
 			report.PurgedAuditLogs = int(n)
 		}
 	}
+	if ops.ShareAccessRetention > 0 {
+		if n, err := store.DeleteShareAccessesBeforeBatch(ctx, s.DB.W(), now-int64(ops.ShareAccessRetention.Seconds()), maintenanceBatch); err != nil {
+			report.Failures++
+		} else {
+			report.PurgedShareAccesses = int(n)
+		}
+	}
 	if n, err := store.DeleteOldUploadJobs(ctx, s.DB.W(), now-int64((30*24*time.Hour).Seconds()), maintenanceBatch); err != nil {
 		report.Failures++
 	} else {
@@ -259,10 +266,10 @@ func (s *Service) RunMaintenance(ctx context.Context) MaintenanceReport {
 	_ = store.InsertAuditLog(ctx, s.DB.W(), store.AuditLog{
 		ActorType: "system",
 		Action:    "maintenance.run",
-		Detail: fmt.Sprintf("uploads=%d uploadJobs=%d tickets=%d sessions=%d throttles=%d archived=%d mail=%d traffic=%d audit=%d failures=%d",
+		Detail: fmt.Sprintf("uploads=%d uploadJobs=%d tickets=%d sessions=%d throttles=%d archived=%d mail=%d traffic=%d audit=%d shareAccesses=%d failures=%d",
 			report.ExpiredUploads, report.PrunedUploadJobs, report.ExpiredTickets,
 			report.ExpiredSessions, report.ExpiredThrottles, report.ArchiveFiles, report.PurgedMail,
-			report.PurgedTrafficLogs, report.PurgedAuditLogs, report.Failures),
+			report.PurgedTrafficLogs, report.PurgedAuditLogs, report.PurgedShareAccesses, report.Failures),
 		OccurredAt: now,
 	})
 	return report
@@ -270,8 +277,8 @@ func (s *Service) RunMaintenance(ctx context.Context) MaintenanceReport {
 
 // revokeExpiredShareTickets 吊销窗口内自然过期分享的在途票据。
 //
-// 窗口下界 = 上一次维护时刻（间隔 × 2 取冗余）。票据吊销按分享根的子树
-// 内容定位（票据模型没有分享外键，这是能表达的最窄边界），幂等可重入。
+// 窗口下界 = 上一次维护时刻（间隔 × 2 取冗余）。只吊销该分享签发的票据，
+// 不影响同一文件的其他分享或自有下载；操作幂等可重入。
 func (s *Service) revokeExpiredShareTickets(ctx context.Context, now int64, failures int) int {
 	interval := s.Settings.Runtime(ctx).Ops.MaintenanceInterval
 	if interval <= 0 {
@@ -284,7 +291,7 @@ func (s *Service) revokeExpiredShareTickets(ctx context.Context, now int64, fail
 	}
 	for _, share := range shares {
 		if err := s.DB.InTx(ctx, func(tx store.Querier) error {
-			_, err := store.RevokeTicketsByShareRoot(ctx, tx, share.OwnerID, share.RootPath)
+			_, err := store.RevokeTicketsByShare(ctx, tx, share.ID)
 			return err
 		}); err != nil {
 			failures++

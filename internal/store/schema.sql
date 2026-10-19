@@ -324,6 +324,7 @@ CREATE TABLE IF NOT EXISTS download_tickets (
 CREATE INDEX IF NOT EXISTS idx_tickets_checksum ON download_tickets(file_checksum);
 CREATE INDEX IF NOT EXISTS idx_tickets_expires ON download_tickets(expires_at);
 CREATE INDEX IF NOT EXISTS idx_tickets_user ON download_tickets(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tickets_share ON download_tickets(share_id, revoked);
 
 -- ---------------------------------------------------------------- 流量
 
@@ -467,15 +468,16 @@ CREATE TABLE IF NOT EXISTS shares (
     allow_download INTEGER NOT NULL DEFAULT 1,
     allow_preview  INTEGER NOT NULL DEFAULT 1,
     allow_subpath  INTEGER NOT NULL DEFAULT 1,
-    expires_at     INTEGER NOT NULL DEFAULT 0,
-    max_visits     INTEGER NOT NULL DEFAULT 0,
-    visits         INTEGER NOT NULL DEFAULT 0,
-    disabled       INTEGER NOT NULL DEFAULT 0,
+    expires_at      INTEGER NOT NULL DEFAULT 0,
+    max_deliveries  INTEGER NOT NULL DEFAULT 0,
+    visits          INTEGER NOT NULL DEFAULT 0,
+    disabled        INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
     -- 乐观锁版本：每次更新自增，并发的陈旧写回按此判定冲突。
     updated_at     INTEGER NOT NULL DEFAULT 0,
     show_sharer_name INTEGER NOT NULL DEFAULT 1,
-    custom_markdown TEXT NOT NULL DEFAULT ''
+    custom_markdown TEXT NOT NULL DEFAULT '',
+    delivery_count  INTEGER NOT NULL DEFAULT 0 CHECK (delivery_count >= 0)
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_id, created_at);
@@ -491,7 +493,9 @@ CREATE TABLE IF NOT EXISTS share_accesses (
     occurred_at INTEGER NOT NULL,
     resource_path TEXT NOT NULL DEFAULT '',
     bytes_plain INTEGER NOT NULL DEFAULT 0 CHECK (bytes_plain >= 0),
-    ticket_id   TEXT NOT NULL DEFAULT ''
+    ticket_id   TEXT NOT NULL DEFAULT '',
+    evidence_source TEXT NOT NULL DEFAULT 'legacy_unknown'
+        CHECK (evidence_source IN ('server_measured', 'client_ack', 'legacy_unknown'))
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_share_accesses_share ON share_accesses(share_id, occurred_at);
@@ -548,7 +552,7 @@ CREATE TABLE IF NOT EXISTS direct_links (
     size_plain    INTEGER NOT NULL DEFAULT 0,
     -- 0 表示永久；与分享的 expires_at 口径一致。
     expires_at    INTEGER NOT NULL DEFAULT 0,
-    -- 0 表示不限；与分享的 max_visits 口径一致。
+    -- 0 表示不限；与分享的 max_deliveries 口径一致。
     max_hits      INTEGER NOT NULL DEFAULT 0,
     hits          INTEGER NOT NULL DEFAULT 0,
     disabled      INTEGER NOT NULL DEFAULT 0,

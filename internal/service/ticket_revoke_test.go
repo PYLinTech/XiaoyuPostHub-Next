@@ -108,6 +108,62 @@ func TestUpdateSharePasswordChangeRevokesTickets(t *testing.T) {
 	}
 }
 
+// TestShareAccessModeChangeRevokesOnlyItsTickets：收紧分享访问模式后，旧访客票据
+// 立即失效，但同一内容下其他分享和自有下载票据保持可用。
+func TestShareAccessModeChangeRevokesOnlyItsTickets(t *testing.T) {
+	f := newTrafficFixture(t)
+	ctx := context.Background()
+
+	shareTicket, err := f.prepare(f.guest, store.PurposeDownload)
+	if err != nil {
+		t.Fatalf("prepare share ticket: %v", err)
+	}
+	otherShare, err := f.svc.CreateShare(ctx, f.user, CreateShareRequest{
+		Path: f.target.Path, Kind: store.ShareFile, AccessMode: store.AccessPublic, AllowDownload: true,
+	})
+	if err != nil {
+		t.Fatalf("create sibling share: %v", err)
+	}
+	otherTarget := f.target
+	otherTarget.ShareID = otherShare.ID
+	otherPlan, err := f.svc.PrepareDelivery(ctx, f.guest, otherTarget, DeliveryRequest{
+		Purpose: store.PurposeDownload, ForceProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("prepare sibling share ticket: %v", err)
+	}
+	directTarget := f.target
+	directTarget.ShareID = ""
+	directPlan, err := f.svc.PrepareDelivery(ctx, f.user, directTarget, DeliveryRequest{
+		Purpose: store.PurposeDownload, ForceProxy: true,
+	})
+	if err != nil {
+		t.Fatalf("prepare owner download ticket: %v", err)
+	}
+
+	if _, err := f.svc.AuthorizeCDN(ctx, shareTicket.ID, f.guest.ClientIP.String()); err != nil {
+		t.Fatalf("public share ticket should work before policy change: %v", err)
+	}
+	loginOnly := store.AccessLogin
+	if _, err := f.svc.UpdateShare(ctx, f.user, f.share.ID, UpdateShareRequest{AccessMode: &loginOnly}); err != nil {
+		t.Fatalf("change share to login-only: %v", err)
+	}
+
+	currentShareTicket, err := store.GetTicket(ctx, f.db.R(), shareTicket.ID)
+	if err != nil || !currentShareTicket.Revoked {
+		t.Fatalf("old public guest ticket must be revoked, ticket=%+v err=%v", currentShareTicket, err)
+	}
+	if _, err := f.svc.AuthorizeCDN(ctx, shareTicket.ID, f.guest.ClientIP.String()); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("old public ticket must no longer authorize CDN access, got %v", err)
+	}
+	for _, ticketID := range []string{otherPlan.TicketID, directPlan.TicketID} {
+		ticket, err := store.GetTicket(ctx, f.db.R(), ticketID)
+		if err != nil || ticket.Revoked {
+			t.Fatalf("changing one share must not revoke unrelated ticket %q: ticket=%+v err=%v", ticketID, ticket, err)
+		}
+	}
+}
+
 // TestMaintenanceRevokesExpiredShareTickets：自然过期的分享由维护任务
 // 兜底吊销在途票据——没人访问过期链接时，票据也不能活过分享的时效。
 func TestMaintenanceRevokesExpiredShareTickets(t *testing.T) {

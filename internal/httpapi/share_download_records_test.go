@@ -42,7 +42,7 @@ func TestShareAndPickupDownloadsAppearInOwnerAccessHistory(t *testing.T) {
 	}
 	share := store.Share{
 		ID: shareID, OwnerID: 1, RootPath: path, Kind: store.ShareFile,
-		AccessMode: store.AccessPublic, AllowDownload: true, CreatedAt: store.Now(),
+		AccessMode: store.AccessPublic, AllowDownload: true, MaxDeliveries: 2, CreatedAt: store.Now(),
 	}
 	if err := store.CreateShare(ctx, e.db.W(), share); err != nil {
 		t.Fatalf("create share: %v", err)
@@ -58,6 +58,40 @@ func TestShareAndPickupDownloadsAppearInOwnerAccessHistory(t *testing.T) {
 	}
 	clientPublicKey := base64.StdEncoding.EncodeToString(publicDER)
 
+	for _, testCase := range []struct {
+		name, endpoint string
+		allowDownload  bool
+		allowPreview   bool
+	}{
+		{name: "download disabled", endpoint: "download", allowPreview: true},
+		{name: "preview disabled", endpoint: "preview", allowDownload: true},
+	} {
+		restrictedID, err := store.NewID("sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		restricted := store.Share{
+			ID: restrictedID, OwnerID: 1, RootPath: path, Kind: store.ShareFile,
+			AccessMode: store.AccessPublic, AllowDownload: testCase.allowDownload,
+			AllowPreview: testCase.allowPreview, CreatedAt: store.Now(),
+		}
+		if err := store.CreateShare(ctx, e.db.W(), restricted); err != nil {
+			t.Fatalf("create restricted share (%s): %v", testCase.name, err)
+		}
+		status, payload := e.do(t, http.MethodPost, "/api/s/"+restrictedID+"/"+testCase.endpoint, map[string]any{
+			"password": "", "relPath": "", "clientPublicKey": clientPublicKey,
+		}, "")
+		if status != http.StatusForbidden {
+			t.Fatalf("share endpoint must enforce %s server-side: status=%d body=%v", testCase.name, status, payload)
+		}
+	}
+
+	// Opening a share page (and the additional request before delivery) must not consume
+	// the delivery cap: the limit applies to successfully prepared download/preview plans.
+	status, resolved := e.do(t, http.MethodPost, "/api/s/"+share.ID+"/resolve", map[string]any{"password": ""}, "")
+	if status != http.StatusOK {
+		t.Fatalf("resolve share page: status=%d body=%v", status, resolved)
+	}
 	// Exercise the actual share-download route and the anonymous settlement route.
 	status, payload := e.do(t, http.MethodPost, "/api/s/"+share.ID+"/download", map[string]any{
 		"password": "", "relPath": "", "clientPublicKey": clientPublicKey,
@@ -86,6 +120,17 @@ func TestShareAndPickupDownloadsAppearInOwnerAccessHistory(t *testing.T) {
 	}
 	settleTicket(t, e, pickupDownload)
 
+	status, limited := e.do(t, http.MethodPost, "/api/s/"+share.ID+"/download", map[string]any{
+		"password": "", "relPath": "", "clientPublicKey": clientPublicKey,
+	}, "")
+	if status != http.StatusForbidden {
+		t.Fatalf("third prepared delivery should be blocked by maxDeliveries=2: status=%d body=%v", status, limited)
+	}
+	currentShare, err := store.GetShare(ctx, e.db.R(), share.ID)
+	if err != nil || currentShare.Deliveries != 2 {
+		t.Fatalf("delivery cap should count exactly two plans, share=%+v err=%v", currentShare, err)
+	}
+
 	rows, total, _, err := store.ListShareAccesses(ctx, e.db.R(), share.ID, 100, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +139,7 @@ func TestShareAndPickupDownloadsAppearInOwnerAccessHistory(t *testing.T) {
 	for _, row := range rows {
 		if row.Action == "download" {
 			downloadCount++
-			if row.Target != path || row.BytesPlain != file.SizePlain || row.ActorType != store.ActorGuest {
+			if row.Target != path || row.BytesPlain != file.SizePlain || row.ActorType != store.ActorGuest || row.EvidenceSource != store.ShareEvidenceClientAck {
 				t.Fatalf("download record has wrong ticket metadata: %+v", row)
 			}
 		}
@@ -102,7 +147,7 @@ func TestShareAndPickupDownloadsAppearInOwnerAccessHistory(t *testing.T) {
 			pickupCount++
 		}
 	}
-	if downloadCount != 2 || pickupCount != 1 || total != 4 {
+	if downloadCount != 2 || pickupCount != 1 || total != 6 {
 		t.Fatalf("share and pickup download history missing events: downloads=%d pickups=%d total=%d rows=%+v", downloadCount, pickupCount, total, rows)
 	}
 
@@ -135,7 +180,7 @@ func settleTicket(t *testing.T, e *testEnv, payload map[string]any) {
 	if ticketID == "" || (mode != "direct" && mode != "proxy") {
 		t.Fatalf("client-key delivery plan should use client-settled mode and include a ticket: %v", payload)
 	}
-	status, body := e.do(t, http.MethodPost, "/api/fs/settle", map[string]any{"ticketId": ticketID}, "")
+	status, body := e.do(t, http.MethodPost, "/api/fs/settle", map[string]any{"ticketId": ticketID, "completed": true}, "")
 	if status != http.StatusOK {
 		t.Fatalf("settle share ticket: status=%d body=%v", status, body)
 	}

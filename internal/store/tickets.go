@@ -222,9 +222,19 @@ func RevokeTicketsByOwner(ctx context.Context, q Querier, ownerID int64) (int64,
 	return n, nil
 }
 
-// RevokeTicketsByShareRoot 吊销指向某分享根及其子树内容的票据。
-// 分享没有单独的票据外键时，按分享快照中的节点集合定位票据；这是停用、
-// 删除或移动分享根时唯一能阻断既有 CDN/中转票据的边界。
+// RevokeTicketsByShare 吊销特定分享签发的票据，不影响同内容的其他分享或自有下载。
+func RevokeTicketsByShare(ctx context.Context, q Querier, shareID string) (int64, error) {
+	res, err := q.ExecContext(ctx,
+		`UPDATE download_tickets SET revoked = 1 WHERE share_id = ? AND revoked = 0`, shareID)
+	if err != nil {
+		return 0, fmt.Errorf("吊销分享票据失败: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// RevokeTicketsByShareRoot 吊销指向某内容根及其子树内容的全部票据。
+// 删除文件/目录时需要连同该内容对应的自有下载与所有分享票据一起失效。
 func RevokeTicketsByShareRoot(ctx context.Context, q Querier, ownerID int64, rootPath string) (int64, error) {
 	clause, args := pathSelfOrDescendant("logical_path", rootPath)
 	res, err := q.ExecContext(ctx, `

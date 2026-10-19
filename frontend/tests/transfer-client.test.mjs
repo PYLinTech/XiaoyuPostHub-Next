@@ -15,7 +15,7 @@ const api = encode(`export class ApiError extends Error {
 } export let token='token'; export let notices=0; export const setToken=value=>{token=value;}; export const getToken=()=>token; export const notifyUnauthorized=()=>{notices++;};`);
 const protocol = await load("transferProtocol", { "@/api/client": api });
 const scheduler = await load("transferScheduler");
-const saveModule = encode("export const settled=[]; export const tryOpenDiskSink=async()=>null; export const settleQuietly=async plan=>{settled.push(plan);};");
+const saveModule = encode("export const settled=[]; export const outcomes=[]; export const tryOpenDiskSink=async()=>null; export const settleQuietly=async (plan,completed)=>{settled.push(plan); outcomes.push([plan,completed]);};");
 const client = await load("transferClient", {
   "@/api/client": api, "./transferProtocol": protocol, "./transferScheduler": scheduler,
   "./download": saveModule,
@@ -96,6 +96,18 @@ test("计划返回前线程异常退出，迟到的票据不会留在未结算�
   const { settled } = await import(saveModule);
   assert.equal(settled.at(-1).ticketId, "late-ticket");
   assert.equal(worker.sent.filter(message => message.type === "reply").length, 0);
+});
+test("执行线程通过主线程持久化结算完成结果", async () => {
+  const promise = runDelivery({ plan: async () => ({ ticketId: "completed-ticket", mode: "proxy", expiresAt: 99_999_999_999 }) });
+  await tick();
+  const worker = FakeWorker.instances.at(-1);
+  await worker.emit({ type: "request", method: "plan", value: null, id: 10 });
+  await worker.emit({ type: "request", method: "settle", value: true, id: 11 });
+  await worker.emit({ type: "result", value: { bytes: 1 } });
+  await promise;
+  const { settled, outcomes } = await import(saveModule);
+  assert.equal(settled.at(-1).ticketId, "completed-ticket");
+  assert.equal(outcomes.at(-1)[1], true);
 });
 test("上传等待服务器收尾时让出处理额度，不阻塞下载", async () => {
   const first = uploadFile(new Blob(["a"]), { parentPath: "/" });

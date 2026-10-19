@@ -43,12 +43,12 @@ const isFileShare = computed(() => share.value?.kind === "file");
 /** 已登录时嵌在壳的内容区里打开（侧栏入口）；访客保持整屏版式（登录页/外链入口）。 */
 const embedded = computed(() => session.state.authenticated);
 
-const remainingVisits = computed(() => {
+const remainingDeliveries = computed(() => {
   const current = share.value;
-  if (!current || current.maxVisits <= 0) {
+  if (!current || current.maxDeliveries <= 0) {
     return "不限";
   }
-  return String(Math.max(0, current.maxVisits - current.visits));
+  return String(Math.max(0, current.maxDeliveries - current.deliveries));
 });
 
 const expiresLabel = computed(() => {
@@ -82,14 +82,28 @@ const canPreview = computed(() => {
   }
 });
 
-const canDownload = computed(() => share.value !== null);
+const canDownload = computed(() => share.value?.allowDownload === true);
+const deliveryLimitReached = computed(() => {
+  const current = share.value;
+  return !!current && current.maxDeliveries > 0 && current.deliveries >= current.maxDeliveries;
+});
+
+function countedDeliverySource(current: GuestShare, source: ReturnType<typeof pickupDeliverySource>): ReturnType<typeof pickupDeliverySource> {
+  return {
+    async plan(pair) {
+      const plan = await source.plan(pair);
+      if (share.value?.id === current.id) share.value.deliveries += 1;
+      return plan;
+    },
+  };
+}
 
 function openPreview(): void {
   const current = share.value;
   if (!current) return;
   openFilePreview({ fileName: fileName.value || current.rootName,
-    source: shareDeliverySource(current.id, "", "", "preview"),
-    downloadSource: pickupDeliverySource(code.value),
+    source: countedDeliverySource(current, shareDeliverySource(current.id, "", "", "preview")),
+    downloadSource: countedDeliverySource(current, pickupDeliverySource(code.value)),
     previewAllowed: canPreview.value, downloadAllowed: canDownload.value });
 }
 
@@ -251,7 +265,9 @@ function reset(): void {
 }
 
 async function download(): Promise<void> {
-  await runDownload(pickupDeliverySource(code.value), { fileName: fileName.value || share.value?.rootName });
+  const current = share.value;
+  if (!current) return;
+  await runDownload(countedDeliverySource(current, pickupDeliverySource(code.value)), { fileName: fileName.value || current.rootName });
 }
 
 onMounted(() => {
@@ -323,13 +339,13 @@ onMounted(() => {
           <dd>{{ share.kind === "folder" ? "文件夹" : "文件" }}</dd>
           <dt>有效期</dt>
           <dd>{{ expiresLabel }}</dd>
-          <dt>剩余访问次数</dt>
-          <dd>{{ remainingVisits }}</dd>
+          <dt>剩余交付次数</dt>
+          <dd>{{ remainingDeliveries }}</dd>
         </dl>
 
         <template v-if="isFileShare">
           <div class="row">
-            <AppButton v-if="canPreview" variant="primary" icon="eye" @click="openPreview()">
+            <AppButton v-if="canPreview" variant="primary" icon="eye" :disabled="deliveryLimitReached" @click="openPreview()">
               预览
             </AppButton>
             <AppButton
@@ -337,13 +353,20 @@ onMounted(() => {
               :variant="canPreview ? 'default' : 'primary'"
               icon="download"
               :loading="downloading"
+              :disabled="deliveryLimitReached"
               @click="download()"
             >
               下载
             </AppButton>
           </div>
-          <p class="faint" style="font-size: var(--fs-xs)">
-            预览走的是分享通道，会再消耗一次分享的访问次数，但不消耗取件码的使用次数。
+          <p v-if="deliveryLimitReached" class="notice notice--warn">
+            分享交付次数已用完，无法继续预览或下载。
+          </p>
+          <p v-else-if="!canDownload" class="notice notice--warn">
+            分享者未开放下载；如果允许预览，仍可使用预览功能。
+          </p>
+          <p v-else class="faint" style="font-size: var(--fs-xs)">
+            预览会消耗一次分享的交付次数，但不消耗取件码的核销次数。
           </p>
         </template>
 

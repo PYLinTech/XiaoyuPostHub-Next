@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"unicode/utf8"
 
@@ -36,11 +37,11 @@ type CreateShareRequest struct {
 	ShowSharerName bool
 	AllowSubpath   bool
 	ExpiresAt      int64
-	MaxVisits      int
+	MaxDeliveries  int
 }
 
 // UpdateShareRequest 是分享的部分更新。指针为 nil 表示该字段不变——
-// 用零值表示"不变"就无法把 MaxVisits 改成 0（不限次数）或把 Disabled
+// 用零值表示"不变"就无法把 MaxDeliveries 改成 0（不限次数）或把 Disabled
 // 改成 false（重新启用）。
 type UpdateShareRequest struct {
 	CustomMarkdown *string
@@ -53,7 +54,7 @@ type UpdateShareRequest struct {
 	ShowSharerName *bool
 	AllowSubpath   *bool
 	ExpiresAt      *int64
-	MaxVisits      *int
+	MaxDeliveries  *int
 	Disabled       *bool
 	// ExpectUpdatedAt 是调用方读到的分享版本（store.Share.UpdatedAt）。
 	//
@@ -111,8 +112,8 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 	if !validAccessMode(mode) {
 		return store.Share{}, fmt.Errorf("%w: 未知的访问模式 %q", ErrBadRequest, mode)
 	}
-	if req.ExpiresAt < 0 || req.MaxVisits < 0 {
-		return store.Share{}, fmt.Errorf("%w: 有效期与访问上限不得为负", ErrBadRequest)
+	if req.ExpiresAt < 0 || req.MaxDeliveries < 0 {
+		return store.Share{}, fmt.Errorf("%w: 有效期与交付次数上限不得为负", ErrBadRequest)
 	}
 
 	var pwdHash string
@@ -153,7 +154,8 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 		AllowSubpath:   kind == store.ShareFolder && req.AllowSubpath,
 		ShowSharerName: req.ShowSharerName,
 		ExpiresAt:      req.ExpiresAt,
-		MaxVisits:      req.MaxVisits,
+		MaxDeliveries:  req.MaxDeliveries,
+		MaxVisits:      req.MaxDeliveries,
 		CreatedAt:      s.Now(),
 		// 乐观锁版本从非零起版：零是"调用方未声明版本"的哨兵值，创建时就落零
 		// 会让它无法与"未声明"区分。
@@ -211,6 +213,7 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 		return store.Share{}, err
 	}
 	wasDisabled := share.Disabled
+	wasAccessMode := share.AccessMode
 	wasPwdHash := share.PwdHash
 	wasExpiresAt := share.ExpiresAt
 	wasAllowDownload := share.AllowDownload
@@ -300,11 +303,12 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 		}
 		share.ExpiresAt = *req.ExpiresAt
 	}
-	if req.MaxVisits != nil {
-		if *req.MaxVisits < 0 {
-			return store.Share{}, fmt.Errorf("%w: 访问上限不得为负", ErrBadRequest)
+	if req.MaxDeliveries != nil {
+		if *req.MaxDeliveries < 0 {
+			return store.Share{}, fmt.Errorf("%w: 交付次数上限不得为负", ErrBadRequest)
 		}
-		share.MaxVisits = *req.MaxVisits
+		share.MaxDeliveries = *req.MaxDeliveries
+		share.MaxVisits = *req.MaxDeliveries
 	}
 	if req.Disabled != nil {
 		share.Disabled = *req.Disabled
@@ -329,8 +333,8 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
 		if req.Path != nil || req.Kind != nil {
 			if share.RootPath != oldRootPath {
-				// 目标迁移后撤销旧根路径签发的票据，避免旧目标仍可通过直链访问。
-				if _, err := store.RevokeTicketsByShareRoot(ctx, tx, share.OwnerID, oldRootPath); err != nil {
+				// 目标迁移后只撤销该分享的旧票据，避免旧目标仍可通过直链访问。
+				if _, err := store.RevokeTicketsByShare(ctx, tx, share.ID); err != nil {
 					return err
 				}
 			}
@@ -347,7 +351,7 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 		}
 		// 分享的凭据/授权状态发生变化时，必须吊销已经签发的 CDN/中转票据；
 		// 否则票据数据面不会再次经过分享解析，变更形同虚设：
-		//   - 停用：链接整体失效；
+		//   - 停用、访问模式变化：旧访问策略签出的票据立即失效；
 		//   - 提取码更改：旧提取码签出的票据不能活到新提取码生效之后；
 		//   - 有效期被改短到已过期：同"过期即失效"。
 		credChanged := share.PwdHash != wasPwdHash
@@ -359,8 +363,9 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 		// 就是"我明明关掉了却还在下载"。
 		permTightened := (wasAllowDownload && !share.AllowDownload) ||
 			(wasAllowPreview && !share.AllowPreview)
-		if (!wasDisabled && share.Disabled) || credChanged || expiredNow || permTightened {
-			_, err := store.RevokeTicketsByShareRoot(ctx, tx, share.OwnerID, share.RootPath)
+		accessModeChanged := share.AccessMode != wasAccessMode
+		if (!wasDisabled && share.Disabled) || credChanged || expiredNow || permTightened || accessModeChanged {
+			_, err := store.RevokeTicketsByShare(ctx, tx, share.ID)
 			return err
 		}
 		return nil
@@ -387,7 +392,7 @@ func (s *Service) DeleteShare(ctx context.Context, p auth.Principal, id string) 
 		return err
 	}
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
-		if _, err := store.RevokeTicketsByShareRoot(ctx, tx, share.OwnerID, share.RootPath); err != nil {
+		if _, err := store.RevokeTicketsByShare(ctx, tx, share.ID); err != nil {
 			return err
 		}
 		return store.DeleteShare(ctx, tx, share.ID)
@@ -399,6 +404,18 @@ func (s *Service) DeleteShare(ctx context.Context, p auth.Principal, id string) 
 	}
 	s.audit(ctx, p, "share.delete", share.ID, share.RootPath)
 	return nil
+}
+
+// ClaimShareDelivery 原子地计入一个已成功准备的分享交付计划。
+func (s *Service) ClaimShareDelivery(ctx context.Context, id string) error {
+	if id == "" {
+		return nil
+	}
+	err := store.ConsumeShareDelivery(ctx, s.DB.W(), id, s.Now())
+	if errors.Is(err, store.ErrNoRowsAffected) {
+		return fmt.Errorf("%w: 分享已失效、已过期或交付次数已用尽", ErrForbidden)
+	}
+	return err
 }
 
 // ListShareAccesses 列出自己的分享的访问/下载明细。
@@ -419,7 +436,7 @@ func (s *Service) ListShareAccesses(ctx context.Context, p auth.Principal, id st
 //  1. 分享存在——后面每一步都需要它的字段；
 //  2. 创建者账号仍启用——账号一旦停用，他创建的公开分享必须同时失效，
 //     否则封禁只挡住了登录，挡不住分享链接；
-//  3. 未停用、未过期、未达访问上限——这三者是"分享本身"的时效；
+//  3. 未停用、未过期——交付次数上限只约束交付计划，不阻断页面/目录浏览；
 //  4. 访问模式——只有前三步都过了，才有必要去付一次提取码 HMAC 的代价；
 //  5. 根节点仍存在——根路径是快照，删除/移动后不会自动跟随。
 //
@@ -430,9 +447,8 @@ func (s *Service) ResolveShare(ctx context.Context, id, password string, p auth.
 
 // resolveShare 是 ResolveShare 与取件码共用的实现。viaPickup 为真表示
 // 调用方已经用取件码完成了凭据校验，因此不再要求提取码。countVisit 控制
-// 是否把这次解析计入分享访问次数；取件码的“查看”不能消耗分享访问额度，
-// 真正取数时再由核销事务统一计数。recordAccess 控制是否写访问明细；取件码
-// 真正取数时由核销事务写入，避免失败的核销留下误导性的审计记录。
+// 是否计入访问请求统计；取件码“查看”不计入。交付次数在下载/预览计划准备成功后
+// 核销；取件码下载在核销事务中计入。recordAccess 控制是否写访问明细。
 func (s *Service) resolveShare(ctx context.Context, id, password string, p auth.Principal, viaPickup, countVisit bool, action string, recordAccess bool) (DeliveryTarget, store.Share, error) {
 	forbid := func(why string) error { return fmt.Errorf("%w: %s", ErrForbidden, why) }
 
@@ -466,10 +482,6 @@ func (s *Service) resolveShare(ctx context.Context, id, password string, p auth.
 	if share.ExpiresAt != 0 && share.ExpiresAt <= now {
 		return DeliveryTarget{}, store.Share{}, forbid("分享已过期")
 	}
-	if share.MaxVisits > 0 && share.Visits >= share.MaxVisits {
-		return DeliveryTarget{}, store.Share{}, forbid("分享已达访问上限")
-	}
-
 	switch share.AccessMode {
 	case store.AccessPublic:
 		// 公开分享：拿到链接即可访问。
@@ -507,21 +519,23 @@ func (s *Service) resolveShare(ctx context.Context, id, password string, p auth.
 	}
 
 	if countVisit {
-		// 有效性判定与计数递增在同一条 UPDATE 里（见
-		// store.ConsumeShareVisit）：分开判会在并发下超发，而“访问上限”
-		// 正是靠这条来兜住的。
-		if err := store.ConsumeShareVisit(ctx, s.DB.W(), share.ID, now); err != nil {
+		// 访问计数由数据库原子更新（见
+		// store.RecordShareVisit），避免并发下漏记访问次数。
+
+		if err := store.RecordShareVisit(ctx, s.DB.W(), share.ID, now); err != nil {
 			if errors.Is(err, store.ErrNoRowsAffected) {
-				return DeliveryTarget{}, store.Share{}, forbid("分享已失效、已过期或已达访问上限")
+				return DeliveryTarget{}, store.Share{}, forbid("分享已失效或已过期")
 			}
 			return DeliveryTarget{}, store.Share{}, err
 		}
-		share.Visits++
+		share.AccessVisits++
 	}
-	// 访问明细是审计附属数据，写失败不回滚已完成的访问计数；这类失败由运维
-	// 报表发现，不应把可用的分享链接变成不可用。
+	// 访问明细是审计附属数据，写失败不回滚已完成的访问请求；日志保留故障信号，
+	// 不应把可用的分享链接变成不可用。
 	if recordAccess {
-		_ = store.InsertShareAccess(ctx, s.DB.W(), share.ID, p.Actor, p.UserID(), p.ClientIP.String(), action)
+		if err := store.InsertShareAccess(ctx, s.DB.W(), share.ID, p.Actor, p.UserID(), p.ClientIP.String(), action); err != nil {
+			log.Printf("share access record write failed (action=%s): %v", action, err)
+		}
 	}
 
 	// 展示字段仅在访问授权通过后填充；不以账号或邮箱作为名称回退。
@@ -571,7 +585,13 @@ func (s *Service) ResolveSharePath(ctx context.Context, id, password, relPath st
 // 只允许文件夹分享：单文件分享没有目录语义，让它"列出一层"会把文件自身
 // 当成目录内容返回。
 func (s *Service) ListShareDir(ctx context.Context, id, password, relPath string, p auth.Principal) ([]ListNode, error) {
-	target, share, abs, err := s.ResolveSharePath(ctx, id, password, relPath, p)
+	// 目录请求记为一次 list，而不是先记 open 再重复记 list；页面 resolve
+	// 已独立记录 open，避免一次浏览在概览里被算成两次。
+	target, share, err := s.resolveShare(ctx, id, password, p, false, true, "list", false)
+	if err != nil {
+		return nil, err
+	}
+	abs, err := resolveSubPath(share, relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -587,6 +607,9 @@ func (s *Service) ListShareDir(ctx context.Context, id, password, relPath string
 	}
 	if !node.IsFolder() {
 		return nil, fmt.Errorf("%w: %s 不是目录", ErrBadRequest, abs)
+	}
+	if !share.AllowSubpath && abs != share.RootPath {
+		return nil, fmt.Errorf("%w: 因分享者设置，无法浏览子目录", ErrForbidden)
 	}
 
 	nodes, err := store.ListChildren(ctx, s.DB.R(), target.OwnerUserID, abs)
@@ -623,7 +646,9 @@ func (s *Service) ListShareDir(ctx context.Context, id, password, relPath string
 		items[i].Checksum = ""
 		accessible = append(accessible, items[i])
 	}
-	_ = store.InsertShareAccess(ctx, s.DB.W(), share.ID, p.Actor, p.UserID(), p.ClientIP.String(), "list")
+	if err := store.InsertShareAccess(ctx, s.DB.W(), share.ID, p.Actor, p.UserID(), p.ClientIP.String(), "list"); err != nil {
+		log.Printf("share access record write failed (action=list): %v", err)
+	}
 	return accessible, nil
 }
 

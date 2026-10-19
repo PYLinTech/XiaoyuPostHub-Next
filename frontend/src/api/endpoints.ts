@@ -117,12 +117,12 @@ export const fsApi = {
     request<DeliveryPlan>("/api/fs/download", { method: "POST", body: input }),
   preview: (input: DeliveryRequestInput) =>
     request<DeliveryPlan>("/api/fs/preview", { method: "POST", body: input }),
-  // 直链/中转加密票据按预扣全额结算，客户端上报的字节数不被信任，因此
-  // 结算请求只需票据标识；中转解密票据由服务端实测结算，调它会被拒绝。
-  settle: (ticketId: string) =>
+  // 客户端确认是否完成只影响历史记录，不影响按预扣全额结算的额度；
+  // 服务端无法独立证明加密交付文件已保存。
+  settle: (ticketId: string, completed: boolean) =>
     request<{ ok: boolean }>("/api/fs/settle", {
       method: "POST",
-      body: { ticketId },
+      body: { ticketId, completed },
     }),
 };
 
@@ -190,7 +190,7 @@ interface CreateShareInput {
   showSharerName?: boolean;
   customMarkdown?: string;
   expiresAt?: number;
-  maxVisits?: number;
+  maxDeliveries?: number;
 }
 
 export interface UpdateShareInput {
@@ -205,7 +205,7 @@ export interface UpdateShareInput {
   showSharerName?: boolean;
   customMarkdown?: string;
   expiresAt?: number;
-  maxVisits?: number;
+  maxDeliveries?: number;
   disabled?: boolean;
 }
 

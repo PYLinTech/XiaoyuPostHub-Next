@@ -96,7 +96,7 @@ export async function preparePreview(
     options.signal?.throwIfAborted();
     return await buildHandle(plan, pair, options);
   } catch (err) {
-    await settleQuietly(plan);
+    await settleQuietly(plan, false);
     throw err;
   }
 }
@@ -182,7 +182,7 @@ async function buildHandle(
     plan,
     async release() {
       URL.revokeObjectURL(url);
-      await settleQuietly(plan);
+      await settleQuietly(plan, true);
     },
   };
 }
@@ -195,7 +195,7 @@ function makeSwHandle(plan: DeliveryPlan, id: string, registration: ServiceWorke
     async release() {
       registration.active?.postMessage({ type: "xph:revoke", id });
       // 密文通道的用量按预扣全额结算，SW 实际交付了多少字节不参与记账。
-      await settleQuietly(plan);
+      await settleQuietly(plan, true);
     },
   };
 }

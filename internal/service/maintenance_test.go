@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
 
@@ -39,6 +40,14 @@ func TestMaintenancePurgesExpiredDetailRows(t *testing.T) {
 			t.Fatalf("写入审计失败: %v", err)
 		}
 	}
+	share := f.share("/a", store.ShareFolder, store.AccessPublic, "", true)
+	for _, at := range []int64{auditOld, auditFresh} {
+		if _, err := f.db.W().ExecContext(ctx, `
+			INSERT INTO share_accesses (share_id, actor_type, client_ip, action, occurred_at)
+			VALUES (?, 'guest', '203.0.113.3', 'open', ?)`, share.ID, at); err != nil {
+			t.Fatalf("写入分享访问明细失败: %v", err)
+		}
+	}
 
 	// 维护自身在结尾也会写一条审计（maintenance.run），因此断言用"标记行"计数，
 	// 而不是全表行数。
@@ -49,6 +58,9 @@ func TestMaintenancePurgesExpiredDetailRows(t *testing.T) {
 	}
 	if report.PurgedAuditLogs != 1 {
 		t.Fatalf("应清理 1 条过期审计，实得 %d（report=%+v）", report.PurgedAuditLogs, report)
+	}
+	if report.PurgedShareAccesses != 1 {
+		t.Fatalf("应清理 1 条 365 天前的分享访问明细，实得 %d（report=%+v）", report.PurgedShareAccesses, report)
 	}
 	if report.Failures != 0 {
 		t.Fatalf("维护不应有失败环节: %+v", report)
@@ -69,6 +81,13 @@ func TestMaintenancePurgesExpiredDetailRows(t *testing.T) {
 	if auditMarkerLeft != 1 {
 		t.Fatalf("保留期内的审计不应被删，实得 %d 条", auditMarkerLeft)
 	}
+	var shareAccessesLeft int
+	if err := f.db.R().QueryRowContext(ctx, `SELECT COUNT(*) FROM share_accesses WHERE share_id = ?`, share.ID).Scan(&shareAccessesLeft); err != nil {
+		t.Fatalf("统计剩余分享访问明细失败: %v", err)
+	}
+	if shareAccessesLeft != 1 {
+		t.Fatalf("365 天内的分享访问明细不应被删，实得 %d 条", shareAccessesLeft)
+	}
 }
 
 // TestMaintenanceIsIdempotent 重复执行不应报错，也不应重复计量。
@@ -82,7 +101,32 @@ func TestMaintenanceIsIdempotent(t *testing.T) {
 	}
 	// 第二轮没有可清理的东西，因此各项计数应为 0。
 	if second.ExpiredUploads+second.ExpiredTickets+second.ExpiredSessions+
-		second.ArchiveFiles+second.PurgedTrafficLogs+second.PurgedAuditLogs != 0 {
+		second.ArchiveFiles+second.PurgedTrafficLogs+second.PurgedAuditLogs+second.PurgedShareAccesses != 0 {
 		t.Fatalf("第二轮维护应无事可做，实得 %+v", second)
+	}
+}
+
+func TestMaintenanceCanDisableShareAccessRetention(t *testing.T) {
+	f := newShareFixture(t)
+	ctx := context.Background()
+	share := f.share("/a", store.ShareFolder, store.AccessPublic, "", true)
+	if _, err := f.db.W().ExecContext(ctx, `
+		INSERT INTO share_accesses (share_id, actor_type, client_ip, action, occurred_at)
+		VALUES (?, 'guest', '203.0.113.4', 'open', ?)`, share.ID, store.Now()-400*24*3600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.Settings.SetMany(ctx, map[settings.Key]string{settings.KeyOpsShareAccessRetention: "0s"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	report := f.svc.RunMaintenance(ctx)
+	if report.PurgedShareAccesses != 0 || report.Failures != 0 {
+		t.Fatalf("zero retention should disable automatic share access cleanup: %+v", report)
+	}
+	var remaining int
+	if err := f.db.R().QueryRowContext(ctx, `SELECT COUNT(*) FROM share_accesses WHERE share_id = ?`, share.ID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("record should remain while retention cleanup is disabled: %d", remaining)
 	}
 }
