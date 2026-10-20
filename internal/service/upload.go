@@ -20,7 +20,6 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/backend"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
-	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/vpath"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/xph"
