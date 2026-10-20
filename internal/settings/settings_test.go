@@ -244,7 +244,6 @@ func TestValidationRejectsBadValues(t *testing.T) {
 		{KeyCryptokeys, "YWJj", "解码后不是 32 字节"},
 		{KeyCryptokeys, "带 空白", "base64 中含空白"},
 		{KeySiteName, "", "非空项被清空"},
-		{KeyDedupScope, "everyone", "枚举外的取值"},
 	}
 	for _, tc := range cases {
 		if err := st.Set(ctx, tc.key, tc.value, 1); err == nil {

@@ -396,9 +396,6 @@ function enumLabel(entry: SettingsEntry, option: string): string {
   if (entry.key === "auth.register_mode") {
     return { open: "开放注册", invite: "仅邀请码", closed: "关闭注册" }[option] ?? option;
   }
-  if (entry.key === "storage.dedup_scope") {
-    return { group: "同组共享", global: "全站共享", off: "关闭秒传" }[option] ?? option;
-  }
   return option;
 }
 

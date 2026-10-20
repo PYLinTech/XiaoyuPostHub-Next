@@ -197,26 +197,6 @@ func GetDedupCandidate(ctx context.Context, q Querier, checksum string, sizePlai
 	return f, nil
 }
 
-// ChecksumReferencedByGroup 判断该对象是否已被指定组的某个用户引用过。
-//
-// 秒传的作用域判定：跨组命中意味着"知道明文哈希即可获得可下载的引用"，
-// 对私有部署没有必要承担这个泄露面。
-func ChecksumReferencedByGroup(ctx context.Context, q Querier, checksum, groupName string) (bool, error) {
-	var one int
-	err := q.QueryRowContext(ctx, `
-		SELECT 1 FROM user_nodes n
-		JOIN users u ON u.id = n.user_id
-		WHERE n.file_checksum = ? AND u.group_name = ?
-		LIMIT 1`, checksum, groupName).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("判定秒传作用域失败: %w", err)
-	}
-	return true, nil
-}
-
 // ReviveArchivedFile 把引用归零后进入待回收状态的内容池记录恢复为可用。
 // 用于相同明文重新入池（重复邮件附件、草稿正文重写）：物理对象尚未被
 // 清理任务删除，复活比重走加密上传省一次后端往返。ref_count 不在此变更，

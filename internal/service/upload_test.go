@@ -306,9 +306,6 @@ func TestParallelDedupIsRecoverable(t *testing.T) {
 	f.enableStorage()
 	ctx := context.Background()
 	completeUpload(t, f, contentA, "existing.bin")
-	if err := f.svc.Settings.SetMany(ctx, map[settings.Key]string{settings.KeyDedupScope: "global"}, 0); err != nil {
-		t.Fatal(err)
-	}
 	for _, name := range []string{"existing.bin", "copy.bin"} {
 		result, err := f.svc.InitUpload(ctx, f.user, InitUploadRequest{
 			SizePlain: int64(len(contentA)), ParentPath: "/a", Name: name, ConflictAction: ConflictReject,

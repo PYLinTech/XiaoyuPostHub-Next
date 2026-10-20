@@ -57,11 +57,6 @@ const (
 	// KeyTrustedProxies 可信反向代理网段（逗号分隔 CIDR）。
 	KeyTrustedProxies Key = "auth.trusted_proxies"
 
-	// ---- 存储 ----
-
-	// KeyDedupScope 秒传作用域：group 仅同组、global 全局、off 关闭。
-	KeyDedupScope Key = "storage.dedup_scope"
-
 	// ---- 123 云盘 ----
 
 	// KeyPan123ClientID 开放平台 ClientID。
@@ -161,10 +156,6 @@ const (
 	SystemModeBoth      = "both"       // 文件与邮件：默认，两侧齐全
 	SystemModeFilesOnly = "files_only" // 仅文件：隐藏邮件入口且后端拒绝全部邮件路由
 
-	DedupGroup  = "group"
-	DedupGlobal = "global"
-	DedupOff    = "off"
-
 	// SPF 策略。
 	SPFOff  = "off"
 	SPFMark = "mark"
@@ -201,9 +192,7 @@ const (
 )
 
 // registry 是全部配置项的定义。
-//
-// 默认值刻意取"保守但可用"：不泄露数据的选项优先（例如秒传默认只在组内生效），
-// 但也不过严导致零配置跑不起来。
+// 默认值刻意取"保守但可用"，也不过严导致零配置跑不起来。
 var registry = []Descriptor{
 	// ---- 站点 ----
 	{
@@ -290,13 +279,6 @@ var registry = []Descriptor{
 	},
 
 	// ---- 存储 ----
-	{
-		Key: KeyDedupScope, Section: "storage", Title: "秒传作用域",
-		Help: "group 仅同组用户之间可秒传；global 全体用户共享；off 关闭秒传。",
-		Kind: KindEnum, Default: DedupGroup, Scope: ScopeHot,
-		Enum: []string{DedupGroup, DedupGlobal, DedupOff},
-		Warn: "global 意味着任何登录用户只要知道某个文件的明文 SHA-256，无需持有文件即可获得可下载的引用。",
-	},
 	{
 		Key: KeyUploadMaxStagingBytes, Section: "storage", Title: "全站上传暂存上限",
 		Help: "所有未完成上传及收尾临时文件实际占用的总量上限，应不超过 XPH_TEMP_DIR 所在磁盘可用空间。",
@@ -628,7 +610,6 @@ type Runtime struct {
 	CORS     CORSRuntime
 	Share    ShareRuntime
 	Auth     AuthRuntime
-	Storage  StorageRuntime
 	Pan123   Pan123Runtime
 	Crypto   CryptoRuntime
 	Delivery DeliveryRuntime
@@ -686,11 +667,6 @@ type AuthRuntime struct {
 	IPFailDelay       time.Duration
 	MaxFailDelay      time.Duration
 	TrustedProxiesRaw string
-}
-
-// StorageRuntime 是存储相关配置。
-type StorageRuntime struct {
-	DedupScope string
 }
 
 // Pan123Runtime 是 123 云盘相关配置。
@@ -957,9 +933,6 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			IPFailDelay:       defaultIPFailDelay,
 			MaxFailDelay:      defaultMaxFailDelay,
 			TrustedProxiesRaw: get(KeyTrustedProxies),
-		},
-		Storage: StorageRuntime{
-			DedupScope: get(KeyDedupScope),
 		},
 		Pan123: Pan123Runtime{
 			ClientID:     get(KeyPan123ClientID),

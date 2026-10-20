@@ -131,29 +131,16 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		return InitUploadResult{}, fmt.Errorf("%w: 未知的同名冲突处理方式 %q", ErrBadRequest, action)
 	}
 
-	// ① 秒传探测。作用域默认仅同组：全局秒传等于"知道明文哈希即可拿到可
-	// 下载的引用"，对私有部署没有必要承担这个泄露面。
-	scope, err := s.dedupScope(ctx)
-	if err != nil {
-		return InitUploadResult{}, err
-	}
-	if checksumKnown && scope != settings.DedupOff {
+	// ① 秒传探测。内容池以明文 SHA-256 为全局唯一键，因此秒传也固定为
+	// 全站共享；否则相同内容跨组上传会撞上已有内容池记录，无法重新入池。
+	if checksumKnown {
 		file, err := store.GetDedupCandidate(ctx, s.DB.R(), checksum, req.SizePlain)
 		if err == nil {
-			visible := true
-			if scope == settings.DedupGroup {
-				visible, err = store.ChecksumReferencedByGroup(ctx, s.DB.R(), checksum, p.GroupName())
-				if err != nil {
-					return InitUploadResult{}, err
-				}
+			node, err := s.placeFileNode(ctx, p, parent, name, action, file)
+			if err != nil {
+				return InitUploadResult{}, err
 			}
-			if visible {
-				node, err := s.placeFileNode(ctx, p, parent, name, action, file)
-				if err != nil {
-					return InitUploadResult{}, err
-				}
-				return InitUploadResult{Dedup: true, Node: &node}, nil
-			}
+			return InitUploadResult{Dedup: true, Node: &node}, nil
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return InitUploadResult{}, err
 		}
@@ -372,24 +359,13 @@ func (s *Service) ResolveUploadChecksum(ctx context.Context, p auth.Principal, s
 		return nil, nil
 	}
 
-	if scope, err := s.dedupScope(ctx); err != nil {
-		return nil, err
-	} else if scope != settings.DedupOff {
-		file, getErr := store.GetDedupCandidate(ctx, s.DB.R(), checksum, task.SizePlain)
-		if getErr == nil {
-			visible := true
-			if scope == settings.DedupGroup {
-				visible, err = store.ChecksumReferencedByGroup(ctx, s.DB.R(), checksum, p.GroupName())
-				if err != nil {
-					return nil, err
-				}
-			}
-			if visible {
-				return s.resolveDedupUpload(ctx, p, task, file)
-			}
-		} else if !errors.Is(getErr, store.ErrNotFound) {
-			return nil, getErr
-		}
+	// 哈希计算完成后再次查全站内容池；并行上传期间若其它请求刚完成，
+	// 也可在这里复用对象并取消剩余分片。
+	file, getErr := store.GetDedupCandidate(ctx, s.DB.R(), checksum, task.SizePlain)
+	if getErr == nil {
+		return s.resolveDedupUpload(ctx, p, task, file)
+	} else if !errors.Is(getErr, store.ErrNotFound) {
+		return nil, getErr
 	}
 
 	// 用相同的加密材料预留真实摘要对应的内容池主键。超大文件的流式 worker
@@ -590,8 +566,8 @@ func (s *Service) planContentPlaceholderTx(ctx context.Context, tx store.Querier
 		// 本轮 abort 清理，下一轮 init 用全新参数重新占位。
 		return plan, ErrBusy
 	case store.FileNormal:
-		// 秒传探测已经处理过正常对象；走到这里说明明文长度不一致或秒传作用域
-		// 判定不同，两者都属于数据异常，按占用处理。
+		// 秒传探测已经处理过正常对象；走到这里说明明文长度不一致，属于
+		// 数据异常，按占用处理。
 		return plan, ErrBusy
 	case store.FileDisabled:
 		return plan, fmt.Errorf("%w: 该内容已被拉黑，无法上传", ErrForbidden)
@@ -1411,16 +1387,6 @@ func (s *Service) ownUploadTask(ctx context.Context, p auth.Principal, sessionID
 		}
 	}
 	return task, nil
-}
-
-func (s *Service) dedupScope(ctx context.Context) (string, error) {
-	scope := s.Settings.Runtime(ctx).Storage.DedupScope
-	switch scope {
-	case settings.DedupGroup, settings.DedupGlobal, settings.DedupOff:
-		return scope, nil
-	default:
-		return "", fmt.Errorf("%w: 秒传作用域配置无效", ErrUnavailable)
-	}
 }
 
 // groupQuotaMap 返回该身份所在组的配额快照；BypassQuota 的身份返回 bypass=true。
