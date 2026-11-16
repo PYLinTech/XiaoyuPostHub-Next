@@ -49,6 +49,10 @@ type Principal struct {
 	// 二者不参与权限判定，仅用于界面展示与审计归因。
 	APIKeyID   string
 	APIKeyName string
+	// APIKeyWorkspace 是这枚 Key 绑定的绝对目录；"/" 表示账号根目录。
+	// 绑定非根目录时，服务层把调用方路径按工作区相对路径解析，并在响应里
+	// 还原成相对路径。
+	APIKeyWorkspace string
 	// InvalidToken 为真表示请求带了令牌但它无效。上层据此区分"访客"与
 	// "会话已失效"：前者对访客开放的接口照常处理，后者应返回 401 提示重新登录。
 	InvalidToken bool

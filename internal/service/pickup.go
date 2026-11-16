@@ -60,7 +60,7 @@ func (s *Service) CreatePickupCode(ctx context.Context, p auth.Principal, shareI
 	if err := auth.RequirePermission(p, perm.Pickup); err != nil {
 		return store.PickupCode{}, err
 	}
-	share, err := s.ownShare(ctx, p.UserID(), shareID)
+	share, err := s.ownShare(ctx, p, shareID)
 	if err != nil {
 		return store.PickupCode{}, err
 	}
@@ -123,7 +123,7 @@ func (s *Service) ListPickupCodes(ctx context.Context, p auth.Principal, shareID
 	if err := auth.RequireUser(p); err != nil {
 		return nil, err
 	}
-	share, err := s.ownShare(ctx, p.UserID(), shareID)
+	share, err := s.ownShare(ctx, p, shareID)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ func (s *Service) DeletePickupCode(ctx context.Context, p auth.Principal, code s
 	if err := auth.RequireUser(p); err != nil {
 		return err
 	}
-	pc, err := s.ownPickupCode(ctx, p.UserID(), code)
+	pc, err := s.ownPickupCode(ctx, p, code)
 	if err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func (s *Service) SetPickupDisabled(ctx context.Context, p auth.Principal, code 
 	if err := auth.RequireUser(p); err != nil {
 		return err
 	}
-	pc, err := s.ownPickupCode(ctx, p.UserID(), code)
+	pc, err := s.ownPickupCode(ctx, p, code)
 	if err != nil {
 		return err
 	}
@@ -306,7 +306,7 @@ func (s *Service) ensurePickupShareActiveTx(ctx context.Context, tx store.Querie
 
 // ownPickupCode 取自己分享下的取件码。码是不区分大小写的短凭据，
 // 因此这里先统一成大写再查，避免"用户抄的是同一个码却查不到"。
-func (s *Service) ownPickupCode(ctx context.Context, userID int64, code string) (store.PickupCode, error) {
+func (s *Service) ownPickupCode(ctx context.Context, p auth.Principal, code string) (store.PickupCode, error) {
 	pc, err := store.GetPickupCode(ctx, s.DB.R(), strings.ToUpper(strings.TrimSpace(code)))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -314,7 +314,7 @@ func (s *Service) ownPickupCode(ctx context.Context, userID int64, code string) 
 		}
 		return store.PickupCode{}, err
 	}
-	if _, err := s.ownShare(ctx, userID, pc.ShareID); err != nil {
+	if _, err := s.ownShare(ctx, p, pc.ShareID); err != nil {
 		return store.PickupCode{}, err
 	}
 	return pc, nil

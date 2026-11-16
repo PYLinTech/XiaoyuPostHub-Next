@@ -51,7 +51,8 @@ type migration struct {
 // v3 → v4 为并行上传校验持久化最终摘要；v5 → v6 清除已迁移的旧上传配置项；
 // v6 → v7 分享自定义 Markdown；v7 → v8 分享提供者流量计费；
 // v8 → v9 直链（内容哈希绑定）与交付归属；v9 → v10 分享下载历史；
-// v10 → v11 分享交付次数与下载证据来源；v11 → v12 用户自建 API Key。
+// v10 → v11 分享交付次数与下载证据来源；v11 → v12 用户自建 API Key；
+// v12 → v13 为每枚 API Key 绑定工作区目录。
 var migrations = []migration{
 	{Version: 2, Name: "mail_unbind_requests", File: "0001_mail_unbind.sql"},
 	{Version: 3, Name: "upload_platform", File: "0002_upload_platform.sql"},
@@ -64,6 +65,7 @@ var migrations = []migration{
 	{Version: 10, Name: "share_download_records", File: "0009_share_download_records.sql"},
 	{Version: 11, Name: "share_delivery_limits", File: "0010_share_delivery_limits.sql"},
 	{Version: 12, Name: "api_keys", File: "0011_api_keys.sql"},
+	{Version: 13, Name: "api_key_workspace", File: "0012_api_key_workspace.sql"},
 }
 
 // loadMigrations 按注册表读取每个迁移的 SQL 并做完整性校验。

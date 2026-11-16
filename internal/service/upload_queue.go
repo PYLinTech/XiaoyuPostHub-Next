@@ -41,7 +41,13 @@ func (s *Service) ActiveUploadJobsForUser(ctx context.Context, p auth.Principal)
 	}
 	statuses := make([]UploadJobStatus, 0, len(jobs))
 	for _, job := range jobs {
-		status, err := s.uploadJobStatus(job)
+		if err := s.requireUploadJobScope(ctx, p, job); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		status, err := s.uploadJobStatusFor(job, p)
 		if err != nil {
 			return nil, err
 		}
@@ -49,6 +55,34 @@ func (s *Service) ActiveUploadJobsForUser(ctx context.Context, p auth.Principal)
 		statuses = append(statuses, status)
 	}
 	return statuses, nil
+}
+
+// requireUploadJobScope 确认上传任务的目标目录落在 Key 的工作区内。
+//
+// 活动任务的目标目录在 upload_tasks 里；已收尾的任务行可能已被清理，
+// 此时退回结果节点里的最终路径。两条都拿不到就按不存在处理。
+func (s *Service) requireUploadJobScope(ctx context.Context, p auth.Principal, job store.UploadJob) error {
+	ws := workspaceOf(p)
+	if !ws.scoped() {
+		return nil
+	}
+	task, err := store.GetUploadTask(ctx, s.DB.R(), job.SessionID)
+	if err == nil {
+		if !ws.allows(task.TargetParentPath) {
+			return ErrNotFound
+		}
+		return nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if job.State == "done" {
+		var node store.Node
+		if json.Unmarshal([]byte(job.ResultJSON), &node) == nil && ws.allows(node.LogicalPath) {
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 // QueueUploadCompletion 将已收齐的分片放入持久化收尾队列，HTTP 请求不再等待云盘。
@@ -59,6 +93,9 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 	if job, err := store.GetUploadJob(ctx, s.DB.R(), sessionID); err == nil {
 		if job.UserID != p.UserID() {
 			return UploadJobStatus{}, ErrNotFound
+		}
+		if err := s.requireUploadJobScope(ctx, p, job); err != nil {
+			return UploadJobStatus{}, err
 		}
 		if job.State == "receiving" {
 			task, taskErr := s.ownUploadTask(ctx, p, sessionID)
@@ -80,7 +117,7 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 				return UploadJobStatus{}, err
 			}
 		}
-		return s.uploadJobStatus(job)
+		return s.uploadJobStatusFor(job, p)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return UploadJobStatus{}, err
 	}
@@ -110,7 +147,7 @@ func (s *Service) QueueUploadCompletion(ctx context.Context, p auth.Principal, s
 		return UploadJobStatus{}, ErrNotFound
 	}
 	s.ingressGate.Release(sessionID)
-	return s.uploadJobStatus(job)
+	return s.uploadJobStatusFor(job, p)
 }
 
 // UploadJobStatusForUser 查询本人任务；job 状态优先于仍然存在的分片会话。
@@ -124,6 +161,9 @@ func (s *Service) UploadJobStatusForUser(ctx context.Context, p auth.Principal, 
 	}
 	if job.UserID != p.UserID() {
 		return UploadJobStatus{}, false, ErrNotFound
+	}
+	if err := s.requireUploadJobScope(ctx, p, job); err != nil {
+		return UploadJobStatus{}, false, err
 	}
 	if job.State == "receiving" {
 		if task, taskErr := store.GetUploadTask(ctx, s.DB.R(), sessionID); taskErr == nil && task.Streaming &&
@@ -147,8 +187,21 @@ func (s *Service) UploadJobStatusForUser(ctx context.Context, p auth.Principal, 
 	} else if taskErr != nil && !errors.Is(taskErr, store.ErrNotFound) {
 		return UploadJobStatus{}, false, taskErr
 	}
-	status, err := s.uploadJobStatus(job)
+	status, err := s.uploadJobStatusFor(job, p)
 	return status, true, err
+}
+
+// uploadJobStatusFor 在通用状态上套用调用方的工作区视角。
+func (s *Service) uploadJobStatusFor(job store.UploadJob, p auth.Principal) (UploadJobStatus, error) {
+	status, err := s.uploadJobStatus(job)
+	if err != nil {
+		return UploadJobStatus{}, err
+	}
+	if status.Node != nil {
+		node := workspaceOf(p).mapNode(*status.Node)
+		status.Node = &node
+	}
+	return status, nil
 }
 
 func (s *Service) uploadJobStatus(job store.UploadJob) (UploadJobStatus, error) {

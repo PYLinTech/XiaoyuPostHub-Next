@@ -48,12 +48,12 @@ func TestDirectLinkMigrationAllowsIndependentContent(t *testing.T) {
 	if err := ForceDeleteFileRow(ctx, db.W(), before.FileChecksum); err != nil {
 		t.Fatalf("直链不应阻止删除内容池记录: %v", err)
 	}
-	links, err := ListDirectLinksByOwner(ctx, db.R(), owner, 100, 0)
+	links, err := ListDirectLinksByOwner(ctx, db.R(), owner, "", 100, 0)
 	if err != nil || len(links) != 1 || links[0].TargetAvailable {
 		t.Fatalf("内容缺失时应保留不可用的直链: %+v %v", links, err)
 	}
 	seedContent(t, db, before.FileChecksum, FileNormal)
-	links, err = ListDirectLinksByOwner(ctx, db.R(), owner, 100, 0)
+	links, err = ListDirectLinksByOwner(ctx, db.R(), owner, "", 100, 0)
 	if err != nil || len(links) != 1 || !links[0].TargetAvailable || !links[0].Disabled {
 		t.Fatalf("重建内容后应保持旧直链停用: %+v %v", links, err)
 	}

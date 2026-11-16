@@ -110,11 +110,12 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 		return InitUploadResult{}, fmt.Errorf("%w: 当前用户组禁止上传文件", ErrTooLarge)
 	}
 
-	parent, err := vpath.Normalize(req.ParentPath)
+	ws := workspaceOf(p)
+	parent, err := ws.resolve(req.ParentPath)
 	if err != nil {
-		return InitUploadResult{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return InitUploadResult{}, err
 	}
-	if err := s.requireFolder(ctx, p.UserID(), parent); err != nil {
+	if err := s.requireFolderFor(ctx, s.DB.R(), p, parent); err != nil {
 		return InitUploadResult{}, err
 	}
 	name, err := vpath.ValidateName(req.Name)
@@ -139,6 +140,7 @@ func (s *Service) InitUpload(ctx context.Context, p auth.Principal, req InitUplo
 			if err != nil {
 				return InitUploadResult{}, err
 			}
+			node = ws.mapNode(node)
 			return InitUploadResult{Dedup: true, Node: &node}, nil
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return InitUploadResult{}, err
@@ -917,7 +919,7 @@ func (s *Service) CompleteUpload(ctx context.Context, p auth.Principal, sessionI
 		err = s.DB.InTx(ctx, func(tx store.Querier) error {
 			// 上传初始化时的父目录检查只是早期反馈；收尾必须在同一写事务
 			// 内再次确认，避免目录在上传过程中被删除后仍登记出孤儿节点。
-			if err := s.requireFolderTx(ctx, tx, p.UserID(), task.TargetParentPath); err != nil {
+			if err := s.requireFolderFor(ctx, tx, p, task.TargetParentPath); err != nil {
 				return err
 			}
 			if err := store.FinalizeFile(ctx, tx, expectedChecksum, put.ObjectRef, put.objectPath, put.sizeWire); err != nil {
@@ -998,7 +1000,7 @@ func (s *Service) CompleteUpload(ctx context.Context, p auth.Principal, sessionI
 		log.Printf("service: 上传 %s 已完成，但清理临时目录失败: %v", task.ID, err)
 	}
 	s.recordUpload(ctx, p, task, put.sizeWire)
-	return node, nil
+	return workspaceOf(p).mapNode(node), nil
 }
 
 // buildCiphertext 把分片合并并流式加密到临时文件，同时得到明文 SHA-256 与密文 MD5。
@@ -1124,7 +1126,7 @@ func (s *Service) placeFileNode(ctx context.Context, p auth.Principal, parent, n
 func (s *Service) placeFileNodeTx(ctx context.Context, tx store.Querier, p auth.Principal, parent, name, action string, file store.File) (store.Node, error) {
 	// 该函数同时用于秒传和上传收尾；两条路径都必须在写事务内确认
 	// 目标目录仍然存在，不能依赖调用方更早的只读检查。
-	if err := s.requireFolderTx(ctx, tx, p.UserID(), parent); err != nil {
+	if err := s.requireFolderFor(ctx, tx, p, parent); err != nil {
 		return store.Node{}, err
 	}
 	resolved := name
@@ -1139,10 +1141,10 @@ func (s *Service) placeFileNodeTx(ctx context.Context, tx store.Querier, p auth.
 			return store.Node{}, err
 		}
 		if exists {
-			return store.Node{}, fmt.Errorf("%w: %s 已存在", ErrConflict, target)
+			return store.Node{}, fmt.Errorf("%w: %s 已存在", ErrConflict, workspaceOf(p).relative(target))
 		}
 	case ConflictOverwrite:
-		if err := s.overwriteExisting(ctx, tx, p.UserID(), parent, name); err != nil {
+		if err := s.overwriteExisting(ctx, tx, p, parent, name); err != nil {
 			return store.Node{}, err
 		}
 	case ConflictRename:
@@ -1172,7 +1174,7 @@ func (s *Service) placeFileNodeTx(ctx context.Context, tx store.Querier, p auth.
 	}
 	if err := store.InsertNode(ctx, tx, node); err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			return store.Node{}, fmt.Errorf("%w: %s 已存在", ErrConflict, full)
+			return store.Node{}, fmt.Errorf("%w: %s 已存在", ErrConflict, workspaceOf(p).relative(full))
 		}
 		return store.Node{}, err
 	}
@@ -1180,7 +1182,8 @@ func (s *Service) placeFileNodeTx(ctx context.Context, tx store.Querier, p auth.
 }
 
 // overwriteExisting 覆盖同名节点：先释放旧引用，再删除旧节点。
-func (s *Service) overwriteExisting(ctx context.Context, tx store.Querier, userID int64, parent, name string) error {
+func (s *Service) overwriteExisting(ctx context.Context, tx store.Querier, p auth.Principal, parent, name string) error {
+	userID := p.UserID()
 	full, err := vpath.Join(parent, name)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrBadRequest, err)
@@ -1193,7 +1196,7 @@ func (s *Service) overwriteExisting(ctx context.Context, tx store.Querier, userI
 		return err
 	}
 	if node.IsFolder() {
-		return fmt.Errorf("%w: %s 是目录，不能覆盖", ErrConflict, full)
+		return fmt.Errorf("%w: %s 是目录，不能覆盖", ErrConflict, workspaceOf(p).relative(full))
 	}
 	refs, err := store.SubtreeRefCounts(ctx, tx, userID, full)
 	if err != nil {
@@ -1233,6 +1236,9 @@ func (s *Service) CancelUpload(ctx context.Context, p auth.Principal, sessionID 
 	if job, err := store.GetUploadJob(ctx, s.DB.R(), sessionID); err == nil {
 		if job.UserID != p.UserID() {
 			return ErrNotFound
+		}
+		if err := s.requireUploadJobScope(ctx, p, job); err != nil {
+			return err
 		}
 		if job.State == "processing" {
 			return fmt.Errorf("%w: 服务器已开始处理，暂时不能取消", ErrConflict)
@@ -1375,6 +1381,11 @@ func (s *Service) ownUploadTask(ctx context.Context, p auth.Principal, sessionID
 	}
 	if task.UserID != p.UserID() {
 		// 不暴露"该会话存在但不属于你"，统一按不存在处理。
+		return store.UploadTask{}, ErrNotFound
+	}
+	// 工作区外的上传会话对 Key 等同于不存在：即使猜到会话 id，也不能继续
+	// 传分片或取消。
+	if !workspaceOf(p).allows(task.TargetParentPath) {
 		return store.UploadTask{}, ErrNotFound
 	}
 	if time.Now().UTC().After(task.ExpiresAt) {

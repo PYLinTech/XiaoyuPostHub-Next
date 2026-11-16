@@ -29,7 +29,7 @@ func TestStaleBatchSnapshotDoesNotDoubleRelease(t *testing.T) {
 	if err := f.svc.DeleteNode(ctx, f.user, node.LogicalPath); err != nil {
 		t.Fatalf("删除节点失败: %v", err)
 	}
-	batches, _, err := store.ListArchiveBatchesByUser(ctx, f.db.R(), f.user.User.ID, 10, 0)
+	batches, _, err := store.ListArchiveBatchesByUser(ctx, f.db.R(), f.user.User.ID, "", 10, 0)
 	if err != nil || len(batches) == 0 {
 		t.Fatalf("读取归档批次失败: %v", err)
 	}

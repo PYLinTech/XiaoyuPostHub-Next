@@ -74,13 +74,14 @@ func (s *Service) resolveAPIKey(ctx context.Context, token string, ip netip.Addr
 	}
 	s.maybeTouchAPIKey(ctx, key.ID)
 	return Principal{
-		Actor:      store.ActorUser,
-		User:       user,
-		Group:      group,
-		ClientIP:   ip,
-		IPPrefix:   ipPrefix,
-		APIKeyID:   key.ID,
-		APIKeyName: key.Name,
+		Actor:           store.ActorUser,
+		User:            user,
+		Group:           group,
+		ClientIP:        ip,
+		IPPrefix:        ipPrefix,
+		APIKeyID:        key.ID,
+		APIKeyName:      key.Name,
+		APIKeyWorkspace: key.WorkspacePath,
 	}, nil
 }
 

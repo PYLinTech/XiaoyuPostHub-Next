@@ -75,8 +75,13 @@ func (s *Server) handleAPIKeySDK(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="XiaoyuPostHub-Next_SDK_v1.zip"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+sdkasset.ZipFileName()+`"`)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// handleSDKVersion 公开当前示例 SDK 版本，供已分发的脚本自查是否需要更新。
+func (s *Server) handleSDKVersion(w http.ResponseWriter, r *http.Request) {
+	writeData(w, map[string]any{"version": sdkasset.Version})
 }

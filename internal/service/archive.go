@@ -31,7 +31,15 @@ func (s *Service) ListUserArchive(ctx context.Context, p auth.Principal, limit, 
 	if err := auth.RequirePermission(p, perm.ManageOwnNodes); err != nil {
 		return nil, 0, err
 	}
-	return store.ListArchiveBatchesByUser(ctx, s.DB.R(), p.UserID(), limit, offset)
+	ws := workspaceOf(p)
+	items, total, err := store.ListArchiveBatchesByUser(ctx, s.DB.R(), p.UserID(), ws.root, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		items[i] = ws.mapArchiveBatch(items[i])
+	}
+	return items, total, nil
 }
 
 // RestoreArchiveBatch 把一个暂存中的批次整树恢复回原路径。
@@ -50,6 +58,9 @@ func (s *Service) RestoreArchiveBatch(ctx context.Context, p auth.Principal, bat
 		}
 		if batch.UserID != p.UserID() {
 			return ErrForbidden
+		}
+		if !workspaceOf(p).allows(batch.RootPath) {
+			return ErrNotFound
 		}
 		if batch.State != store.ArchiveStaged {
 			return fmt.Errorf("%w: 只有暂存中的条目可以恢复", ErrBadRequest)
@@ -164,6 +175,9 @@ func (s *Service) ClearArchiveBatch(ctx context.Context, p auth.Principal, batch
 		if batch.UserID != p.UserID() {
 			return ErrForbidden
 		}
+		if !workspaceOf(p).allows(batch.RootPath) {
+			return ErrNotFound
+		}
 		return s.transitionBatchToArchiveDeleted(ctx, tx, batch, rt.Archive.AdminRetention)
 	}); err != nil {
 		return err
@@ -180,7 +194,7 @@ func (s *Service) ClearAllArchive(ctx context.Context, p auth.Principal) (int, e
 	rt := s.Settings.Runtime(ctx)
 	cleared := 0
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
-		batches, err := store.ListStagedBatchesByUser(ctx, tx, p.UserID(), maintenanceBatch)
+		batches, err := store.ListStagedBatchesByUser(ctx, tx, p.UserID(), workspaceOf(p).root, maintenanceBatch)
 		if err != nil {
 			return err
 		}

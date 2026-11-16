@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // XiaoyuPostHub-Next Node.js SDK 示例。
 // 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+// 所有路径参数都相对于 Key 的工作区，"/" 就是工作区根目录。
 
 import {
   createDecipheriv, createHash, constants,
@@ -88,6 +89,11 @@ export class Client {
       throw new APIError(res.status, message, text.slice(0, 300));
     }
     await pipeline(Readable.fromWeb(res.body), createWriteStream(dest, { flags: append ? "a" : "w" }));
+  }
+
+  // ---------------------------------------------------------------- 版本
+  async sdkVersion() {
+    return String((await this.request("GET", "/api/sdk/version")).version || "");
   }
 
   // ---------------------------------------------------------------- 文件树

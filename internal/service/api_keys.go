@@ -10,12 +10,14 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/vpath"
 )
 
 // CreateAPIKeyRequest 是新建 Key 的输入。
 type CreateAPIKeyRequest struct {
-	Name      string `json:"name"`
-	ExpiresAt int64  `json:"expiresAt"`
+	Name          string `json:"name"`
+	WorkspacePath string `json:"workspacePath"`
+	ExpiresAt     int64  `json:"expiresAt"`
 }
 
 // CreatedAPIKey 是创建结果。Token 只在这里出现一次，之后无法再取回。
@@ -36,6 +38,14 @@ func (s *Service) CreateAPIKey(ctx context.Context, p auth.Principal, req Create
 	if utf8.RuneCountInString(name) > 64 {
 		return CreatedAPIKey{}, fmt.Errorf("%w: Key 名称最多 64 个字符", ErrBadRequest)
 	}
+	workspaceRaw := strings.TrimSpace(req.WorkspacePath)
+	if workspaceRaw == "" {
+		return CreatedAPIKey{}, fmt.Errorf("%w: 请选择 Key 的工作区文件夹", ErrBadRequest)
+	}
+	workspace, err := vpath.Normalize(workspaceRaw)
+	if err != nil {
+		return CreatedAPIKey{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+	}
 	now := s.Now()
 	if req.ExpiresAt != 0 && req.ExpiresAt <= now {
 		return CreatedAPIKey{}, fmt.Errorf("%w: 有效期必须晚于当前时间", ErrBadRequest)
@@ -49,18 +59,26 @@ func (s *Service) CreateAPIKey(ctx context.Context, p auth.Principal, req Create
 		return CreatedAPIKey{}, err
 	}
 	key := store.APIKey{
-		ID:        id,
-		UserID:    p.UserID(),
-		Name:      name,
-		Prefix:    prefix,
-		KeyHash:   keyHash,
-		ExpiresAt: req.ExpiresAt,
-		CreatedAt: now,
+		ID:            id,
+		UserID:        p.UserID(),
+		Name:          name,
+		Prefix:        prefix,
+		KeyHash:       keyHash,
+		WorkspacePath: workspace,
+		ExpiresAt:     req.ExpiresAt,
+		CreatedAt:     now,
 	}
-	if err := store.CreateAPIKey(ctx, s.DB.W(), key); err != nil {
+	// 工作区必须是一个仍然存在的文件夹，且与 Key 写入同事务，避免刚选完
+	// 目录就被并发删掉，留下一枚指向不存在路径的 Key。
+	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
+		if err := s.requireFolderTx(ctx, tx, p.UserID(), workspace); err != nil {
+			return err
+		}
+		return store.CreateAPIKey(ctx, tx, key)
+	}); err != nil {
 		return CreatedAPIKey{}, err
 	}
-	s.audit(ctx, p, "api_key.create", id, name)
+	s.audit(ctx, p, "api_key.create", id, fmt.Sprintf("name=%s workspace=%s", name, workspace))
 	return CreatedAPIKey{Key: key, Token: token}, nil
 }
 

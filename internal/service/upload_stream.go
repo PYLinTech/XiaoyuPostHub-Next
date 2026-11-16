@@ -278,7 +278,7 @@ func (s *Service) processStreamingUploadWindow(ctx context.Context, p auth.Princ
 			if err != nil {
 				return err
 			}
-			if err := s.requireFolderTx(ctx, tx, p.UserID(), task.TargetParentPath); err != nil {
+			if err := s.requireFolderFor(ctx, tx, p, task.TargetParentPath); err != nil {
 				return err
 			}
 			if err := store.FinalizeFile(ctx, tx, expectedChecksum, ref, panDir+"/"+panName, totalWire); err != nil {

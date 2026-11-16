@@ -26,8 +26,8 @@ import (
 // 密文分卷与用户组资源调度优先级）；v4 并行上传校验摘要；v5 分享名称展示；
 // v6 上传配置改由系统运行参数与用户组配额管理；v7 分享自定义 Markdown；v8 分享提供者流量计费；
 // v9 直链（内容哈希绑定）与交付归属；v10 分享下载历史；v11 分享交付次数与下载证据来源；
-// v12 用户自建 API Key。
-const currentSchemaVersion = 12
+// v12 用户自建 API Key；v13 API Key 工作区。
+const currentSchemaVersion = 13
 
 const schemaVersionOpTimeout = 120 * time.Second
 

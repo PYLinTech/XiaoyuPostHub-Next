@@ -94,18 +94,28 @@ func GetArchiveBatch(ctx context.Context, q Querier, id string) (ArchiveBatch, e
 	return b, nil
 }
 
-// ListArchiveBatchesByUser 分页列出某用户**暂存中**的归档批次。
+// ListArchiveBatchesByUser 分页列出某用户**暂存中**且根路径在 root 下的归档批次。
 //
 // 固定只取暂存态，不接受调用方指定状态：清除之后条目已不属于用户，
 // 它既不可恢复、后续处置也不再由用户决定，留下只会让人以为还能操作。
 // 归档删除及之后的批次只在管理端可见（见 ListArchiveBatches）。
-func ListArchiveBatchesByUser(ctx context.Context, q Querier, userID int64, limit, offset int) ([]ArchiveBatch, int64, error) {
+//
+// root 非空时按批次根路径过滤，让 API Key 只看到自己工作区内的删除记录；
+// 列表与总数必须共用同一谓词，否则分页会出现"越翻越少、总数虚高"。
+func ListArchiveBatchesByUser(ctx context.Context, q Querier, userID int64, root string, limit, offset int) ([]ArchiveBatch, int64, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	where := ` WHERE user_id = ? AND state = ?`
+	args := []any{userID, int(ArchiveStaged)}
+	if root != "" {
+		scope, scopeArgs := pathSelfOrDescendant("root_path", root)
+		where += ` AND ` + scope
+		args = append(args, scopeArgs...)
+	}
 	rows, err := q.QueryContext(ctx, `SELECT `+archiveBatchColumns+`
-		FROM archive_batches WHERE user_id = ? AND state = ? ORDER BY deleted_at DESC LIMIT ? OFFSET ?`,
-		userID, int(ArchiveStaged), limit, offset)
+		FROM archive_batches`+where+` ORDER BY deleted_at DESC LIMIT ? OFFSET ?`,
+		append(append([]any{}, args...), limit, offset)...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("列出归档批次失败: %w", err)
 	}
@@ -123,8 +133,7 @@ func ListArchiveBatchesByUser(ctx context.Context, q Querier, userID int64, limi
 	}
 	var total int64
 	if err := q.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM archive_batches WHERE user_id = ? AND state = ?`,
-		userID, int(ArchiveStaged)).Scan(&total); err != nil {
+		`SELECT COUNT(*) FROM archive_batches`+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("统计归档批次失败: %w", err)
 	}
 	return out, total, nil
@@ -194,6 +203,34 @@ func ListArchiveNodes(ctx context.Context, q Querier, batchID string) ([]Archive
 	return out, rows.Err()
 }
 
+// MoveArchiveRootsPrefix 让暂存归档跟随目录改名或移动。
+//
+// 归档记录的 original_path 是恢复时的落点；目录改名后不迁移，工作区 Key
+// 会看不到自己的归档，恢复也会落回已经改名的旧路径。只迁移移动目录之下
+// 的批次：与移动节点同路径的归档属于更早一次删除，不应被后来重建的同名
+// 节点带着改名。
+func MoveArchiveRootsPrefix(ctx context.Context, q Querier, userID int64, oldPath, newPath string) error {
+	clause, args := pathDescendant("root_path", oldPath)
+	moveArgs := append([]any{newPath, len([]rune(oldPath)) + 1, userID}, args...)
+	if _, err := q.ExecContext(ctx, `
+		UPDATE archive_nodes
+		SET original_path = ? || substr(original_path, ?)
+		WHERE batch_id IN (
+			SELECT id FROM archive_batches
+			WHERE user_id = ? AND `+clause+`
+		)`, moveArgs...); err != nil {
+		return fmt.Errorf("迁移归档节点路径失败: %w", err)
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE archive_batches
+		SET root_path = ? || substr(root_path, ?)
+		WHERE user_id = ? AND `+clause,
+		moveArgs...); err != nil {
+		return fmt.Errorf("迁移归档批次路径失败: %w", err)
+	}
+	return nil
+}
+
 // CountArchiveFileRefs 统计批次内每个文件校验码被引用了几次（文件夹不计）。
 func CountArchiveFileRefs(ctx context.Context, q Querier, batchID string) (map[string]int64, error) {
 	rows, err := q.QueryContext(ctx, `
@@ -217,13 +254,21 @@ func CountArchiveFileRefs(ctx context.Context, q Querier, batchID string) (map[s
 }
 
 // ListStagedBatchesByUser 列出某用户全部暂存中的批次（清空归档用）。
-func ListStagedBatchesByUser(ctx context.Context, q Querier, userID int64, limit int) ([]ArchiveBatch, error) {
+func ListStagedBatchesByUser(ctx context.Context, q Querier, userID int64, root string, limit int) ([]ArchiveBatch, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := q.QueryContext(ctx, `SELECT `+archiveBatchColumns+`
-		FROM archive_batches WHERE user_id = ? AND state = ? ORDER BY deleted_at LIMIT ?`,
-		userID, int(ArchiveStaged), limit)
+	query := `SELECT ` + archiveBatchColumns + `
+		FROM archive_batches WHERE user_id = ? AND state = ?`
+	args := []any{userID, int(ArchiveStaged)}
+	if root != "" {
+		scope, scopeArgs := pathSelfOrDescendant("root_path", root)
+		query += ` AND ` + scope
+		args = append(args, scopeArgs...)
+	}
+	query += ` ORDER BY deleted_at LIMIT ?`
+	args = append(args, limit)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("列出暂存批次失败: %w", err)
 	}

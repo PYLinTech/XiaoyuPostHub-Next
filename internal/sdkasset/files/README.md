@@ -1,4 +1,4 @@
-# XiaoyuPostHub-Next API SDK 示例
+# XiaoyuPostHub-Next API SDK 示例（v2）
 
 三种语言共用同一个站点地址配置：**只改根目录的 `config.json`**，Python / Node.js / Go
 示例都会读取它。请勿在各语言目录里再写一份地址。
@@ -23,6 +23,17 @@ export XIAOYU_API_KEY="xph_..."
 API Key 只能调用用户侧接口；管理端、初始化、登录注册、改密与 Key 管理本身
 必须使用登录会话。下载采用客户端本地解密，服务端不额外输出明文。
 
+## 工作区
+
+每枚 Key 在创建时绑定一个工作区文件夹，SDK 里的所有路径都相对于它：
+
+- `/` 是 Key 的工作区根目录；绑定根目录时，它就是账号根目录；
+- `/docs/a.pdf` 表示「工作区/docs/a.pdf」；
+- 工作区之外的路径一律按不存在处理，不能浏览、上传、分享或建直链；
+- 工作区根目录不能重命名、移动或删除。
+
+需要访问更多范围时，请在「API」页面新建一枚绑定其他文件夹的 Key。
+
 ## Python
 
 需要 Python 3.10+ 与 `cryptography`：
@@ -37,6 +48,7 @@ python xiaoyu.py /path/to/file.pdf /
 from xiaoyu import Client
 
 client = Client()  # 读取 XIAOYU_API_KEY 与 ../config.json
+print(client.sdk_version())  # 站点当前的示例 SDK 版本
 client.list("/")
 client.upload("./report.pdf", parent="/docs")
 plan = client.download("/docs/report.pdf", "./report.out.pdf")
@@ -60,6 +72,7 @@ node xiaoyu.mjs /path/to/file.pdf /
 import { Client } from "./xiaoyu.mjs";
 
 const client = new Client();
+console.log(await client.sdkVersion()); // 站点当前的示例 SDK 版本
 await client.list("/");
 await client.upload("./report.pdf", "/docs");
 await client.download("/docs/report.pdf", "./report.out.pdf");
@@ -81,6 +94,7 @@ go run . /path/to/file.pdf /
 
 ```go
 client, err := NewClient("", "")
+version, err := client.SDKVersion(context.Background())
 plan, err := client.Download("/docs/report.pdf", "./report.out.pdf", false)
 share, err := client.CreateShare("/docs/report.pdf", "file", "public", "", 0)
 fmt.Println(share.ID, client.ShareURL(share.ID))
@@ -96,6 +110,7 @@ fmt.Println(link.ID, client.DirectLinkURL(link.ID))
 - 分享：创建、列表、删除
 - 直链：创建、列表、删除（站点与用户组需先开启直链）
 - 账号：读取当前身份与配额
+- 版本：查询站点当前示例 SDK 版本（`GET /api/sdk/version`，公开接口）
 
 所有接口沿用站点现有的 `/api/*` 用户侧接口。响应统一为
 `{"data": ...}` / `{"error": {"message": "...", "detail": "..."}}`。

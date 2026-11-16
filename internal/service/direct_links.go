@@ -12,7 +12,6 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
-	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/vpath"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/xph"
 )
 
@@ -68,9 +67,10 @@ func (s *Service) CreateDirectLink(ctx context.Context, p auth.Principal, req Cr
 	if req.ExpiresAt < 0 || req.MaxHits < 0 {
 		return store.DirectLink{}, fmt.Errorf("%w: 有效期与次数上限不得为负", ErrBadRequest)
 	}
-	norm, err := vpath.Normalize(req.Path)
+	ws := workspaceOf(p)
+	norm, err := ws.resolve(req.Path)
 	if err != nil {
-		return store.DirectLink{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return store.DirectLink{}, err
 	}
 	node, err := s.requireOwnNode(ctx, p.UserID(), norm)
 	if err != nil {
@@ -116,6 +116,7 @@ func (s *Service) CreateDirectLink(ctx context.Context, p auth.Principal, req Cr
 	}
 	link.TargetAvailable = true
 	s.audit(ctx, p, "directlink.create", link.ID, norm)
+	link = ws.mapDirectLink(link)
 	return link, nil
 }
 
@@ -133,7 +134,13 @@ func (s *Service) ListDirectLinks(ctx context.Context, p auth.Principal, limit, 
 	if offset < 0 {
 		offset = 0
 	}
-	return store.ListDirectLinksByOwner(ctx, s.DB.R(), p.UserID(), limit, offset)
+	ws := workspaceOf(p)
+	items, err := store.ListDirectLinksByOwner(ctx, s.DB.R(), p.UserID(), ws.root, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	ws.mapDirectLinks(items)
+	return items, nil
 }
 
 // ListNodeDirectLinks 列出某用户在一批内容上的直链，服务「文件 → 直链」的
@@ -145,7 +152,13 @@ func (s *Service) ListNodeDirectLinks(ctx context.Context, p auth.Principal, che
 	if err := auth.RequireUser(p); err != nil {
 		return nil, err
 	}
-	return store.ListDirectLinksByOwnerAndChecksums(ctx, s.DB.R(), p.UserID(), checksums)
+	ws := workspaceOf(p)
+	items, err := store.ListDirectLinksByOwnerAndChecksums(ctx, s.DB.R(), p.UserID(), checksums, ws.root)
+	if err != nil {
+		return nil, err
+	}
+	ws.mapDirectLinks(items)
+	return items, nil
 }
 
 // UpdateDirectLinkRequest 只更新非 nil 字段；显式的 0 和 false 仍会写入。
@@ -164,10 +177,11 @@ func (s *Service) UpdateDirectLink(ctx context.Context, p auth.Principal, id str
 	if err := auth.RequireUser(p); err != nil {
 		return store.DirectLink{}, err
 	}
-	link, err := s.requireOwnDirectLink(ctx, p.UserID(), id)
+	link, err := s.requireOwnDirectLink(ctx, p, id)
 	if err != nil {
 		return store.DirectLink{}, err
 	}
+	ws := workspaceOf(p)
 	next := link
 	if req.ExpiresAt != nil {
 		next.ExpiresAt = *req.ExpiresAt
@@ -199,7 +213,7 @@ func (s *Service) UpdateDirectLink(ctx context.Context, p auth.Principal, id str
 		s.cancelDirectLinkStreams(updated.ID)
 	}
 	s.audit(ctx, p, "directlink.update", updated.ID, fmt.Sprintf("expires=%d max=%d disabled=%t", next.ExpiresAt, next.MaxHits, next.Disabled))
-	return updated, nil
+	return ws.mapDirectLink(updated), nil
 }
 
 // DeleteDirectLink 删除直链。
@@ -212,7 +226,7 @@ func (s *Service) DeleteDirectLink(ctx context.Context, p auth.Principal, id str
 	if err := auth.RequireUser(p); err != nil {
 		return err
 	}
-	link, err := s.requireOwnDirectLink(ctx, p.UserID(), id)
+	link, err := s.requireOwnDirectLink(ctx, p, id)
 	if err != nil {
 		return err
 	}
@@ -224,7 +238,7 @@ func (s *Service) DeleteDirectLink(ctx context.Context, p auth.Principal, id str
 	return nil
 }
 
-func (s *Service) requireOwnDirectLink(ctx context.Context, ownerID int64, id string) (store.DirectLink, error) {
+func (s *Service) requireOwnDirectLink(ctx context.Context, p auth.Principal, id string) (store.DirectLink, error) {
 	link, err := store.GetDirectLink(ctx, s.DB.R(), strings.TrimSpace(id))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -232,9 +246,14 @@ func (s *Service) requireOwnDirectLink(ctx context.Context, ownerID int64, id st
 		}
 		return store.DirectLink{}, err
 	}
-	if link.OwnerID != ownerID {
+	if link.OwnerID != p.UserID() {
 		// 他人的直链一律按不存在处理：区分"存在但不是你的"等于提供一个
 		// 枚举直链是否存在的探针。
+		return store.DirectLink{}, ErrNotFound
+	}
+	// SourcePath 是创建时快照，代表这条直链与哪份文件绑定；工作区外的
+	// 直链对 Key 不可见，也不能改停用状态。
+	if !workspaceOf(p).allows(link.SourcePath) {
 		return store.DirectLink{}, ErrNotFound
 	}
 	return link, nil
@@ -480,13 +499,14 @@ func (s *Service) DirectLinkTarget(ctx context.Context, actor auth.Principal, id
 	if err := auth.RequireUser(actor); err != nil {
 		return "", err
 	}
-	link, err := s.requireOwnDirectLink(ctx, actor.UserID(), id)
+	link, err := s.requireOwnDirectLink(ctx, actor, id)
 	if err != nil {
 		return "", err
 	}
-	node, err := store.FindOwnedNodeByChecksum(ctx, s.DB.R(), actor.UserID(), link.FileChecksum)
+	ws := workspaceOf(actor)
+	node, err := store.FindOwnedNodeByChecksum(ctx, s.DB.R(), actor.UserID(), link.FileChecksum, ws.root)
 	if err != nil {
 		return "", err
 	}
-	return node.LogicalPath, nil
+	return ws.relative(node.LogicalPath), nil
 }

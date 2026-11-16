@@ -84,7 +84,7 @@ func stagedThenArchiveDeleted(t *testing.T, f *shareFixture, path string) store.
 	if err := f.svc.DeleteNode(context.Background(), f.user, path); err != nil {
 		t.Fatalf("删除节点失败: %v", err)
 	}
-	batches, _, err := store.ListArchiveBatchesByUser(context.Background(), f.db.R(), f.user.User.ID, 10, 0)
+	batches, _, err := store.ListArchiveBatchesByUser(context.Background(), f.db.R(), f.user.User.ID, "", 10, 0)
 	if err != nil || len(batches) == 0 {
 		t.Fatalf("读取归档批次失败: %v", err)
 	}

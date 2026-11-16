@@ -265,7 +265,7 @@ func TestListDirectLinksByOwnerReportsTargetAvailability(t *testing.T) {
 	seedLink(t, db, "dl-a", owner, "dl-live", DirectLink{})
 	seedLink(t, db, "dl-b", owner, "dl-dead", DirectLink{})
 
-	links, err := ListDirectLinksByOwner(ctx, db.R(), owner, 100, 0)
+	links, err := ListDirectLinksByOwner(ctx, db.R(), owner, "", 100, 0)
 	if err != nil {
 		t.Fatalf("列出直链失败: %v", err)
 	}
@@ -294,14 +294,14 @@ func TestListDirectLinksByOwnerAndChecksums(t *testing.T) {
 	seedLink(t, db, "dl-y1", owner, "dl-y", DirectLink{})
 
 	// 「文件 → 直链」的反向查询：一份内容上可能挂着多条直链。
-	got, err := ListDirectLinksByOwnerAndChecksums(ctx, db.R(), owner, []string{"dl-x"})
+	got, err := ListDirectLinksByOwnerAndChecksums(ctx, db.R(), owner, []string{"dl-x"}, "")
 	if err != nil {
 		t.Fatalf("按内容反查直链失败: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("应反查到 2 条直链，实得 %d", len(got))
 	}
-	if none, err := ListDirectLinksByOwnerAndChecksums(ctx, db.R(), owner, nil); err != nil || none != nil {
+	if none, err := ListDirectLinksByOwnerAndChecksums(ctx, db.R(), owner, nil, ""); err != nil || none != nil {
 		t.Fatalf("空哈希列表应返回空结果而不报错，实得 %v / %v", none, err)
 	}
 }

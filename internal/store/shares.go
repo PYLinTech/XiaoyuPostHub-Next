@@ -86,14 +86,22 @@ func GetShare(ctx context.Context, q Querier, id string) (Share, error) {
 	return s, nil
 }
 
-// ListSharesByOwner 列出某用户创建的分享。
-func ListSharesByOwner(ctx context.Context, q Querier, ownerID int64, limit, offset int) ([]Share, error) {
+// ListSharesByOwner 列出某用户创建的分享；root 非空时只返回根路径落在该
+// 子树内的分享，服务 API Key 的工作区视角。
+func ListSharesByOwner(ctx context.Context, q Querier, ownerID int64, root string, limit, offset int) ([]Share, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := q.QueryContext(ctx, `SELECT `+shareColumns+`
-		FROM shares WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-		ownerID, limit, offset)
+	query := `SELECT ` + shareColumns + ` FROM shares WHERE owner_id = ?`
+	args := []any{ownerID}
+	if root != "" {
+		scope, scopeArgs := pathSelfOrDescendant("root_path", root)
+		query += ` AND ` + scope
+		args = append(args, scopeArgs...)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("列出分享失败: %w", err)
 	}

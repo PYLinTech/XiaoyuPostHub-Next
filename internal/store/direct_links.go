@@ -79,12 +79,23 @@ func GetDirectLink(ctx context.Context, q Querier, id string) (DirectLink, error
 // 一并带上绑定内容的可用状态：内容被删除或拉黑后直链记录仍然存在（可查可删），
 // 但已经交付不出字节。列表页必须把两者区分开，否则用户会反复复制一条
 // 必然失败的链接。
-func ListDirectLinksByOwner(ctx context.Context, q Querier, ownerID int64, limit, offset int) ([]DirectLink, error) {
+//
+// root 非空时只返回绑定文件位于该目录内的直链：API Key 的工作区隔离必须在
+// 查询源头生效，否则分页结果里会混入工作区外记录，越翻越少。
+func ListDirectLinksByOwner(ctx context.Context, q Querier, ownerID int64, root string, limit, offset int) ([]DirectLink, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := q.QueryContext(ctx, directLinkSelect+`
-  WHERE owner_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`, ownerID, limit, offset)
+	query := directLinkSelect + ` WHERE owner_id = ?`
+	args := []any{ownerID}
+	if root != "" {
+		scope, scopeArgs := pathSelfOrDescendant("source_path", root)
+		query += ` AND ` + scope
+		args = append(args, scopeArgs...)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("列出直链失败: %w", err)
 	}
@@ -94,14 +105,20 @@ func ListDirectLinksByOwner(ctx context.Context, q Querier, ownerID int64, limit
 
 // ListDirectLinksByOwnerAndChecksums 按内容哈希反查某用户的直链，服务
 // 「文件 → 直链」的双向绑定：文件详情里要能列出这份内容上的全部直链。
-func ListDirectLinksByOwnerAndChecksums(ctx context.Context, q Querier, ownerID int64, checksums []string) ([]DirectLink, error) {
+func ListDirectLinksByOwnerAndChecksums(ctx context.Context, q Querier, ownerID int64, checksums []string, root string) ([]DirectLink, error) {
 	if len(checksums) == 0 {
 		return nil, nil
 	}
 	clause, args := inPlaceholders(checksums)
-	rows, err := q.QueryContext(ctx, directLinkSelect+`
-		WHERE owner_id = ? AND file_checksum IN (`+clause+`) ORDER BY created_at DESC`,
-		append([]any{ownerID}, args...)...)
+	query := directLinkSelect + ` WHERE owner_id = ? AND file_checksum IN (` + clause + `)`
+	args = append([]any{ownerID}, args...)
+	if root != "" {
+		scope, scopeArgs := pathSelfOrDescendant("source_path", root)
+		query += ` AND ` + scope
+		args = append(args, scopeArgs...)
+	}
+	query += ` ORDER BY created_at DESC`
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("按内容反查直链失败: %w", err)
 	}
@@ -174,6 +191,23 @@ func ConsumeDirectLinkHit(ctx context.Context, q Querier, id string, now int64) 
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: 直链已失效、已过期、已达次数上限或绑定内容不可用", ErrNoRowsAffected)
+	}
+	return nil
+}
+
+// MoveDirectLinkSourcesPrefix 更新直链的来源路径前缀。
+//
+// 直链仍绑定内容哈希，source_path 只用于展示与工作区归属；目录改名或移动后
+// 若不跟随，绑定了该目录的 Key 会看不到自己创建、仍然有效的直链。
+func MoveDirectLinkSourcesPrefix(ctx context.Context, q Querier, ownerID int64, oldPath, newPath string) error {
+	clause, args := pathSelfOrDescendant("source_path", oldPath)
+	_, err := q.ExecContext(ctx, `
+		UPDATE direct_links
+		SET source_path = ? || substr(source_path, ?), updated_at = updated_at + 1
+		WHERE owner_id = ? AND `+clause,
+		append([]any{newPath, len([]rune(oldPath)) + 1, ownerID}, args...)...)
+	if err != nil {
+		return fmt.Errorf("迁移直链来源路径失败: %w", err)
 	}
 	return nil
 }

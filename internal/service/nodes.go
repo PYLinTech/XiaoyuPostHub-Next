@@ -29,9 +29,10 @@ func (s *Service) ListDir(ctx context.Context, p auth.Principal, dirPath string)
 	if err := auth.RequireUser(p); err != nil {
 		return nil, err
 	}
-	path, err := vpath.Normalize(dirPath)
+	ws := workspaceOf(p)
+	path, err := ws.resolve(dirPath)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return nil, err
 	}
 	if path != vpath.Root {
 		node, err := store.GetNode(ctx, s.DB.R(), p.UserID(), path)
@@ -42,7 +43,7 @@ func (s *Service) ListDir(ctx context.Context, p auth.Principal, dirPath string)
 			return nil, err
 		}
 		if !node.IsFolder() {
-			return nil, fmt.Errorf("%w: %s 不是目录", ErrBadRequest, path)
+			return nil, fmt.Errorf("%w: %s 不是目录", ErrBadRequest, ws.relative(path))
 		}
 	}
 
@@ -50,7 +51,14 @@ func (s *Service) ListDir(ctx context.Context, p auth.Principal, dirPath string)
 	if err != nil {
 		return nil, err
 	}
-	return s.listNodesWithStatus(ctx, nodes)
+	items, err := s.listNodesWithStatus(ctx, nodes)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		items[i] = ws.mapListNode(items[i])
+	}
+	return items, nil
 }
 
 // listNodesWithStatus 把节点映射成面向前端的目录项，并附上内容池状态。
@@ -106,9 +114,10 @@ func (s *Service) StatNode(ctx context.Context, p auth.Principal, path string) (
 	if err := auth.RequireUser(p); err != nil {
 		return store.Node{}, err
 	}
-	norm, err := vpath.Normalize(path)
+	ws := workspaceOf(p)
+	norm, err := ws.resolve(path)
 	if err != nil {
-		return store.Node{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return store.Node{}, err
 	}
 	if norm == vpath.Root {
 		return store.Node{
@@ -126,7 +135,7 @@ func (s *Service) StatNode(ctx context.Context, p auth.Principal, path string) (
 		}
 		return store.Node{}, err
 	}
-	return node, nil
+	return ws.mapNode(node), nil
 }
 
 // MakeDir 新建目录。
@@ -134,9 +143,10 @@ func (s *Service) MakeDir(ctx context.Context, p auth.Principal, parentPath, nam
 	if err := auth.RequirePermission(p, perm.ManageOwnNodes); err != nil {
 		return store.Node{}, err
 	}
-	parent, err := vpath.Normalize(parentPath)
+	ws := workspaceOf(p)
+	parent, err := ws.resolve(parentPath)
 	if err != nil {
-		return store.Node{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return store.Node{}, err
 	}
 	full, err := vpath.Join(parent, name)
 	if err != nil {
@@ -154,17 +164,17 @@ func (s *Service) MakeDir(ctx context.Context, p auth.Principal, parentPath, nam
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
 		// 父目录检查与插入必须在同一写事务内；否则并发删除父目录会
 		// 留下无法访问的孤儿节点。
-		if err := s.requireFolderTx(ctx, tx, p.UserID(), parent); err != nil {
+		if err := s.requireFolderFor(ctx, tx, p, parent); err != nil {
 			return err
 		}
 		return store.InsertNode(ctx, tx, node)
 	}); err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			return store.Node{}, fmt.Errorf("%w: %s 已存在", ErrConflict, full)
+			return store.Node{}, fmt.Errorf("%w: %s 已存在", ErrConflict, ws.relative(full))
 		}
 		return store.Node{}, err
 	}
-	return node, nil
+	return ws.mapNode(node), nil
 }
 
 // RenameNode 重命名节点（保持父目录不变）。
@@ -172,11 +182,23 @@ func (s *Service) RenameNode(ctx context.Context, p auth.Principal, path, newNam
 	if err := auth.RequirePermission(p, perm.ManageOwnNodes); err != nil {
 		return "", err
 	}
-	node, err := s.requireOwnNode(ctx, p.UserID(), path)
+	ws := workspaceOf(p)
+	abs, err := ws.resolve(path)
 	if err != nil {
 		return "", err
 	}
-	return s.moveNode(ctx, p, node, node.ParentPath, newName, true)
+	if ws.isRoot(abs) {
+		return "", ws.rejectRoot("重命名")
+	}
+	node, err := s.requireOwnNode(ctx, p.UserID(), abs)
+	if err != nil {
+		return "", err
+	}
+	newPath, err := s.moveNode(ctx, p, node, node.ParentPath, newName, true)
+	if err != nil {
+		return "", err
+	}
+	return ws.relative(newPath), nil
 }
 
 // MoveNode 把节点移动到另一个目录。
@@ -184,15 +206,27 @@ func (s *Service) MoveNode(ctx context.Context, p auth.Principal, path, destPare
 	if err := auth.RequirePermission(p, perm.ManageOwnNodes); err != nil {
 		return "", err
 	}
-	node, err := s.requireOwnNode(ctx, p.UserID(), path)
+	ws := workspaceOf(p)
+	abs, err := ws.resolve(path)
 	if err != nil {
 		return "", err
 	}
-	dest, err := vpath.Normalize(destParent)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrBadRequest, err)
+	if ws.isRoot(abs) {
+		return "", ws.rejectRoot("移动")
 	}
-	return s.moveNode(ctx, p, node, dest, node.Name, false)
+	node, err := s.requireOwnNode(ctx, p.UserID(), abs)
+	if err != nil {
+		return "", err
+	}
+	dest, err := ws.resolve(destParent)
+	if err != nil {
+		return "", err
+	}
+	newPath, err := s.moveNode(ctx, p, node, dest, node.Name, false)
+	if err != nil {
+		return "", err
+	}
+	return ws.relative(newPath), nil
 }
 
 func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Node, destParent, newName string, rename bool) (string, error) {
@@ -219,7 +253,7 @@ func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Nod
 	// 路径改写与关联分享失效必须在同一写事务内完成。否则第二步失败时，
 	// 已移动的内容仍可能被旧分享访问，形成“链接看似有效但目标已变”的状态。
 	if err := s.DB.InTx(ctx, func(tx store.Querier) error {
-		if err := s.requireFolderTx(ctx, tx, p.UserID(), destParent); err != nil {
+		if err := s.requireFolderFor(ctx, tx, p, destParent); err != nil {
 			return err
 		}
 		// 先按旧快照定位并吊销票据，再改写节点路径；移动后旧分享根
@@ -228,6 +262,19 @@ func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Nod
 			return err
 		}
 		if err := store.MoveSubtree(ctx, tx, p.UserID(), node.LogicalPath, newPath, destParent, name); err != nil {
+			return err
+		}
+		// Key 的工作区是路径快照：目录移动或改名时，落在子树里的 Key 必须
+		// 跟着改写，否则下一次调用会突然指向不存在的目录。
+		if err := store.MoveAPIKeyWorkspaces(ctx, tx, p.UserID(), node.LogicalPath, newPath); err != nil {
+			return err
+		}
+		// 直链不随移动失效（内容哈希仍匹配），但来源路径要跟着走，
+		// 否则绑定旧目录工作区的 Key 会失去对自己直链的可见性。
+		if err := store.MoveDirectLinkSourcesPrefix(ctx, tx, p.UserID(), node.LogicalPath, newPath); err != nil {
+			return err
+		}
+		if err := store.MoveArchiveRootsPrefix(ctx, tx, p.UserID(), node.LogicalPath, newPath); err != nil {
 			return err
 		}
 		if rename {
@@ -241,7 +288,7 @@ func (s *Service) moveNode(ctx context.Context, p auth.Principal, node store.Nod
 		return err
 	}); err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			return "", fmt.Errorf("%w: %s 已存在", ErrConflict, newPath)
+			return "", fmt.Errorf("%w: %s 已存在", ErrConflict, workspaceOf(p).relative(newPath))
 		}
 		if errors.Is(err, store.ErrNotFound) {
 			return "", ErrNotFound
@@ -261,9 +308,13 @@ func (s *Service) DeleteNode(ctx context.Context, p auth.Principal, path string)
 	if err := auth.RequirePermission(p, perm.ManageOwnNodes); err != nil {
 		return err
 	}
-	norm, err := vpath.Normalize(path)
+	ws := workspaceOf(p)
+	norm, err := ws.resolve(path)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return err
+	}
+	if ws.isRoot(norm) {
+		return ws.rejectRoot("删除")
 	}
 	if norm == vpath.Root {
 		return fmt.Errorf("%w: 不能删除根目录", ErrBadRequest)
@@ -313,6 +364,11 @@ func (s *Service) DeleteNode(ctx context.Context, p auth.Principal, path string)
 			return err
 		}
 		if err := store.InsertArchiveNodes(ctx, tx, batchID, snapshot); err != nil {
+			return err
+		}
+		// 工作区被删除后，同一路径可能被重新创建；旧 Key 不能因此变成新
+		// 目录的凭据，所以落在子树里的 Key 随节点一起失效。
+		if err := store.DeleteAPIKeysUnder(ctx, tx, p.UserID(), norm); err != nil {
 			return err
 		}
 		if _, err := store.DeleteSubtree(ctx, tx, p.UserID(), norm); err != nil {
@@ -365,9 +421,9 @@ func (s *Service) NodeStats(ctx context.Context, p auth.Principal, path string) 
 	if err := auth.RequireUser(p); err != nil {
 		return 0, 0, 0, err
 	}
-	norm, err := vpath.Normalize(path)
+	norm, err := workspaceOf(p).resolve(path)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return 0, 0, 0, err
 	}
 	return store.CountSubtree(ctx, s.DB.R(), p.UserID(), norm)
 }
@@ -379,12 +435,6 @@ func (s *Service) NodeStats(ctx context.Context, p auth.Principal, path string) 
 // ErrNotFound）只有一处定义，不会各自漂移。
 func (s *Service) requireOwnNode(ctx context.Context, userID int64, path string) (store.Node, error) {
 	return s.requireOwnNodeTx(ctx, s.DB.R(), userID, path)
-}
-
-// requireFolder 确认目录存在（根目录视为恒存在）。
-// requireFolder 是 requireFolderTx 的读池版本，语义完全相同。
-func (s *Service) requireFolder(ctx context.Context, userID int64, path string) error {
-	return s.requireFolderTx(ctx, s.DB.R(), userID, path)
 }
 
 func (s *Service) requireFolderTx(ctx context.Context, q store.Querier, userID int64, path string) error {

@@ -76,6 +76,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/direct-link/nodes", s.directLinksOnly(s.handleNodeDirectLinks))
 	mux.HandleFunc("GET /api/direct-link/{id}/target", s.directLinksOnly(s.handleDirectLinkTarget))
 
+	// ---- SDK ----
+	// 版本查询公开：已分发的脚本不需要有效凭据也能判断自己是否过期。
+	mux.HandleFunc("GET /api/sdk/version", s.handleSDKVersion)
+
 	// ---- API Key（仅登录会话可管理） ----
 	mux.HandleFunc("GET /api/api-keys", s.apiKeysOnly(s.handleListAPIKeys))
 	mux.HandleFunc("POST /api/api-keys", s.apiKeysOnly(s.handleCreateAPIKey))

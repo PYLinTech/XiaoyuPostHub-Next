@@ -1,6 +1,7 @@
 // XiaoyuPostHub-Next Go SDK 示例。
 //
 // 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+// 所有 path 参数都相对于 Key 的工作区，"/" 就是工作区根目录。
 // 下载在本地完成 XPH 解密与 SHA-256 校验。
 package main
 
@@ -153,6 +154,15 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body any, out 
 		}
 	}
 	return nil
+}
+
+// SDKVersion 返回站点当前的示例 SDK 版本，例如 v2。
+func (c *Client) SDKVersion(ctx context.Context) (string, error) {
+	var out struct {
+		Version string `json:"version"`
+	}
+	err := c.do(ctx, http.MethodGet, "/api/sdk/version", nil, &out)
+	return out.Version, err
 }
 
 // ---------------------------------------------------------------- 文件树

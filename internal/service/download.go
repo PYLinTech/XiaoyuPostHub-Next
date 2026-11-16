@@ -159,9 +159,26 @@ func (s *Service) PrepareDelivery(ctx context.Context, actor auth.Principal, tar
 		}
 	}
 
-	norm, err := vpath.Normalize(target.Path)
-	if err != nil {
-		return DeliveryPlan{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+	guestTarget := target.ShareID != "" || target.PickupCode != "" || target.DirectLinkID != ""
+	if actor.APIKeyID != "" && guestTarget {
+		// 分享/提取码/直链属于访客数据面，API Key 只能操作自己工作区内的文件。
+		return DeliveryPlan{}, ErrNotFound
+	}
+
+	var norm string
+	var err error
+	if guestTarget {
+		norm, err = vpath.Normalize(target.Path)
+		if err != nil {
+			return DeliveryPlan{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		}
+	} else {
+		if target.OwnerUserID != actor.UserID() {
+			return DeliveryPlan{}, ErrNotFound
+		}
+		if norm, err = workspaceOf(actor).resolve(target.Path); err != nil {
+			return DeliveryPlan{}, err
+		}
 	}
 
 	// 分享自带的权限位在这里强制执行，而不是只依赖调用方：交付是唯一的
@@ -988,6 +1005,11 @@ func (s *Service) authorizeTicketActor(ctx context.Context, ticket store.Ticket,
 		if actor.IPPrefix == "" || ticket.IPPrefix != actor.IPPrefix {
 			return fmt.Errorf("%w: 请求来源与票据不一致", ErrForbidden)
 		}
+	}
+	// 票据是数据面凭据，必须和签发它的工作区绑定：否则越权拿到的票据
+	// 可以在工作区外结算或开流。无路径票据不属于任何非根工作区。
+	if ws := workspaceOf(actor); ws.scoped() && !ws.allows(ticket.ResourcePath) {
+		return fmt.Errorf("%w: 票据不属于当前工作区", ErrForbidden)
 	}
 	return nil
 }

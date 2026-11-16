@@ -2,6 +2,7 @@
 """XiaoyuPostHub-Next Python SDK 示例。
 
 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+所有 path 参数都相对于 Key 的工作区，"/" 就是工作区根目录。
 下载走客户端本地 XPH 解密，明文不会经过服务端额外出口。
 """
 from __future__ import annotations
@@ -55,6 +56,11 @@ class Client:
         self.base_url = (base_url or load_base_url()).rstrip("/")
         if urllib.parse.urlsplit(self.base_url).scheme.lower() not in ("http", "https"):
             raise ValueError("站点地址必须以 http:// 或 https:// 开头")
+
+    # ---------------------------------------------------------------- 版本
+    def sdk_version(self) -> str:
+        """返回站点当前的示例 SDK 版本，例如 v2。"""
+        return str(self.request("GET", "/api/sdk/version").get("version", ""))
 
     # ---------------------------------------------------------------- HTTP
     def _open(self, method: str, path: str, data: bytes | None = None,

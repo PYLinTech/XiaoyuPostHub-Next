@@ -565,14 +565,15 @@ type DirectLink struct {
 // 明文令牌只在创建时返回一次，库里只保存 SHA-256；Prefix 是供界面辨认的
 // 前几位，不能用于认证。
 type APIKey struct {
-	ID         string `json:"id"`
-	UserID     int64  `json:"userId,omitempty"`
-	Name       string `json:"name"`
-	Prefix     string `json:"prefix"`
-	KeyHash    string `json:"-"`
-	ExpiresAt  int64  `json:"expiresAt"`
-	LastUsedAt int64  `json:"lastUsedAt"`
-	CreatedAt  int64  `json:"createdAt"`
+	ID            string `json:"id"`
+	UserID        int64  `json:"userId,omitempty"`
+	Name          string `json:"name"`
+	Prefix        string `json:"prefix"`
+	KeyHash       string `json:"-"`
+	WorkspacePath string `json:"workspacePath"`
+	ExpiresAt     int64  `json:"expiresAt"`
+	LastUsedAt    int64  `json:"lastUsedAt"`
+	CreatedAt     int64  `json:"createdAt"`
 }
 
 // AuditLog 是一条管理动作审计。

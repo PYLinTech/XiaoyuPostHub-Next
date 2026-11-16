@@ -76,9 +76,10 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 	if err := s.validateShareMarkdown(ctx, req.CustomMarkdown); err != nil {
 		return store.Share{}, err
 	}
-	norm, err := vpath.Normalize(req.Path)
+	ws := workspaceOf(p)
+	norm, err := ws.resolve(req.Path)
 	if err != nil {
-		return store.Share{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		return store.Share{}, err
 	}
 	node, err := s.requireOwnNode(ctx, p.UserID(), norm)
 	if err != nil {
@@ -99,10 +100,10 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 		return store.Share{}, fmt.Errorf("%w: 未知的分享类型 %q", ErrBadRequest, kind)
 	}
 	if kind == store.ShareFolder && !node.IsFolder() {
-		return store.Share{}, fmt.Errorf("%w: %s 不是目录", ErrBadRequest, norm)
+		return store.Share{}, fmt.Errorf("%w: %s 不是目录", ErrBadRequest, ws.relative(norm))
 	}
 	if kind == store.ShareFile && node.IsFolder() {
-		return store.Share{}, fmt.Errorf("%w: %s 是目录，不能作为文件分享", ErrBadRequest, norm)
+		return store.Share{}, fmt.Errorf("%w: %s 是目录，不能作为文件分享", ErrBadRequest, ws.relative(norm))
 	}
 
 	mode := req.AccessMode
@@ -182,6 +183,7 @@ func (s *Service) CreateShare(ctx context.Context, p auth.Principal, req CreateS
 		return store.Share{}, err
 	}
 	s.audit(ctx, p, "share.create", share.ID, fmt.Sprintf("%s mode=%s", norm, mode))
+	share.RootPath = ws.relative(share.RootPath)
 	return share, nil
 }
 
@@ -196,7 +198,13 @@ func (s *Service) ListShares(ctx context.Context, p auth.Principal, limit, offse
 	if offset < 0 {
 		offset = 0
 	}
-	return store.ListSharesByOwner(ctx, s.DB.R(), p.UserID(), limit, offset)
+	ws := workspaceOf(p)
+	items, err := store.ListSharesByOwner(ctx, s.DB.R(), p.UserID(), ws.root, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	ws.mapShares(items)
+	return items, nil
 }
 
 // UpdateShare 修改分享的可变字段。
@@ -208,10 +216,11 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 	if err := auth.RequireUser(p); err != nil {
 		return store.Share{}, err
 	}
-	share, err := s.ownShare(ctx, p.UserID(), id)
+	share, err := s.ownShare(ctx, p, id)
 	if err != nil {
 		return store.Share{}, err
 	}
+	ws := workspaceOf(p)
 	wasDisabled := share.Disabled
 	wasAccessMode := share.AccessMode
 	wasPwdHash := share.PwdHash
@@ -228,9 +237,9 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 	if req.Path != nil || req.Kind != nil {
 		rootPath := share.RootPath
 		if req.Path != nil {
-			rootPath, err = vpath.Normalize(*req.Path)
+			rootPath, err = ws.resolve(*req.Path)
 			if err != nil {
-				return store.Share{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
+				return store.Share{}, err
 			}
 		}
 		kind := share.Kind
@@ -379,6 +388,7 @@ func (s *Service) UpdateShare(ctx context.Context, p auth.Principal, id string, 
 		return store.Share{}, err
 	}
 	s.audit(ctx, p, "share.update", share.ID, fmt.Sprintf("root=%s kind=%s disabled=%v", share.RootPath, share.Kind, share.Disabled))
+	share.RootPath = ws.relative(share.RootPath)
 	return share, nil
 }
 
@@ -387,7 +397,7 @@ func (s *Service) DeleteShare(ctx context.Context, p auth.Principal, id string) 
 	if err := auth.RequireUser(p); err != nil {
 		return err
 	}
-	share, err := s.ownShare(ctx, p.UserID(), id)
+	share, err := s.ownShare(ctx, p, id)
 	if err != nil {
 		return err
 	}
@@ -423,11 +433,16 @@ func (s *Service) ListShareAccesses(ctx context.Context, p auth.Principal, id st
 	if err := auth.RequireUser(p); err != nil {
 		return nil, 0, 0, err
 	}
-	share, err := s.ownShare(ctx, p.UserID(), id)
+	share, err := s.ownShare(ctx, p, id)
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	return store.ListShareAccesses(ctx, s.DB.R(), share.ID, limit, offset, snapshotID)
+	items, total, snapshot, err := store.ListShareAccesses(ctx, s.DB.R(), share.ID, limit, offset, snapshotID)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	workspaceOf(p).mapShareAccesses(items)
+	return items, total, snapshot, nil
 }
 
 // ResolveShare 解析分享并返回交付目标。
@@ -462,6 +477,11 @@ func (s *Service) resolveShare(ctx context.Context, id, password string, p auth.
 			return DeliveryTarget{}, store.Share{}, forbid("分享不存在或已失效")
 		}
 		return DeliveryTarget{}, store.Share{}, err
+	}
+	if ws := workspaceOf(p); ws.scoped() {
+		if share.OwnerID != p.UserID() || !ws.allows(share.RootPath) {
+			return DeliveryTarget{}, store.Share{}, forbid("分享不存在或已失效")
+		}
 	}
 
 	owner, err := store.GetUserByID(ctx, s.DB.R(), share.OwnerID)
@@ -657,7 +677,7 @@ func (s *Service) ListShareDir(ctx context.Context, id, password, relPath string
 // ownShare 取自己的分享。他人的分享返回 ErrNotFound 而不是 ErrForbidden：
 // 分享 id 是随机 token，但把"存在但无权"与"不存在"区分开，仍然给出了一个
 // 可以逐个验证 id 是否有效的探测面。
-func (s *Service) ownShare(ctx context.Context, userID int64, id string) (store.Share, error) {
+func (s *Service) ownShare(ctx context.Context, p auth.Principal, id string) (store.Share, error) {
 	share, err := store.GetShare(ctx, s.DB.R(), strings.TrimSpace(id))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -665,7 +685,12 @@ func (s *Service) ownShare(ctx context.Context, userID int64, id string) (store.
 		}
 		return store.Share{}, err
 	}
-	if share.OwnerID != userID {
+	if share.OwnerID != p.UserID() {
+		return store.Share{}, ErrNotFound
+	}
+	// API Key 只能管理根路径落在其工作区内的分享；工作区外的分享按不存在
+	// 处理，避免通过分享 id 探测或操作账号另一侧的目录。
+	if !workspaceOf(p).allows(share.RootPath) {
 		return store.Share{}, ErrNotFound
 	}
 	return share, nil

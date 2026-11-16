@@ -90,3 +90,26 @@ func TestMoveNodeRewritesParentPaths(t *testing.T) {
 		t.Fatal("旧路径下不应保留子目录")
 	}
 }
+
+// 归档是删除时的历史快照：同一路径后来重建的文件再改名，不能把更早的
+// 归档记录也带着改走。
+func TestMoveNodeKeepsArchivedHistoryAtSamePath(t *testing.T) {
+	f := newShareFixture(t)
+	ctx := context.Background()
+	f.putFile("/a/history.bin", "archive-history-old")
+	if err := f.svc.DeleteNode(ctx, f.user, "/a/history.bin"); err != nil {
+		t.Fatalf("删除旧文件失败: %v", err)
+	}
+	f.putFile("/a/history.bin", "archive-history-new")
+	if _, err := f.svc.RenameNode(ctx, f.user, "/a/history.bin", "renamed.bin"); err != nil {
+		t.Fatalf("重命名重建文件失败: %v", err)
+	}
+
+	batches, total, err := f.svc.ListUserArchive(ctx, f.user, 10, 0)
+	if err != nil || total != 1 {
+		t.Fatalf("读取归档失败: total=%d err=%v", total, err)
+	}
+	if batches[0].RootPath != "/a/history.bin" || batches[0].RootName != "history.bin" {
+		t.Fatalf("归档历史不应跟随同名新文件改名，实际 %+v", batches[0])
+	}
+}

@@ -236,6 +236,8 @@ export interface APIKey {
   name: string;
   /** 令牌前缀，用于列表里辨认是哪一枚。 */
   prefix: string;
+  /** Key 的可访问文件夹；`/` 表示根目录，即整个账号。 */
+  workspacePath: string;
   /** 0 表示永不过期。 */
   expiresAt: number;
   /** 0 表示从未使用。 */

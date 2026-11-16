@@ -250,11 +250,18 @@ func (s *Server) withIdentity(next http.Handler) http.Handler {
 // 凭据管理与身份管理必须留在登录会话里：一枚泄露的 Key 若能创建新 Key
 // 或删除旧 Key，回收动作就会失效；若它能改密码，攻击者可以顺势接管账号。
 // 管理端整体拒绝，是因为 API 只承诺用户侧能力。
+//
+// 访客分享/取件码入口与邮件、CDN 回源也必须拒绝：它们的授权凭据是分享口令
+// 或上游票据，不属于「Key 的工作区」这套模型，放开等于绕过文件夹边界。
 func apiKeyRequestDenied(path string) bool {
 	switch {
 	case strings.HasPrefix(path, "/api/admin/"),
 		strings.HasPrefix(path, "/api/setup/"),
-		strings.HasPrefix(path, "/api/api-keys"):
+		strings.HasPrefix(path, "/api/api-keys"),
+		strings.HasPrefix(path, "/api/mail/"),
+		strings.HasPrefix(path, "/api/s/"),
+		strings.HasPrefix(path, "/api/p/"),
+		strings.HasPrefix(path, "/api/cdn/"):
 		return true
 	}
 	switch path {

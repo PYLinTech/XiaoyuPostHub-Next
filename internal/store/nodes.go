@@ -282,9 +282,18 @@ func FreeName(ctx context.Context, q Querier, userID int64, parentPath, name str
 }
 
 // FindOwnedNodeByChecksum 返回指定用户仍持有的文件节点，不暴露其他用户的路径。
-func FindOwnedNodeByChecksum(ctx context.Context, q Querier, userID int64, checksum string) (Node, error) {
-	node, err := scanNode(q.QueryRowContext(ctx, `SELECT `+nodeColumns+` FROM user_nodes
-  WHERE user_id = ? AND file_checksum = ? AND node_type = ? ORDER BY logical_path LIMIT 1`, userID, checksum, int(NodeFile)))
+// scopeRoot 非空时只在该子树内查找，避免同内容的其他副本遮住调用方可见的文件。
+func FindOwnedNodeByChecksum(ctx context.Context, q Querier, userID int64, checksum, scopeRoot string) (Node, error) {
+	query := `SELECT ` + nodeColumns + ` FROM user_nodes
+  WHERE user_id = ? AND file_checksum = ? AND node_type = ?`
+	args := []any{userID, checksum, int(NodeFile)}
+	if scopeRoot != "" {
+		clause, clauseArgs := pathSelfOrDescendant("logical_path", scopeRoot)
+		query += " AND " + clause
+		args = append(args, clauseArgs...)
+	}
+	query += ` ORDER BY logical_path LIMIT 1`
+	node, err := scanNode(q.QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNotFound
 	}

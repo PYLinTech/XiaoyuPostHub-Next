@@ -319,8 +319,11 @@ export const archiveApi = {
 
 export const apiKeyApi = {
   list: () => request<{ items: APIKey[] }>("/api/api-keys"),
-  create: (name: string, expiresAt = 0) =>
-    request<CreatedAPIKey>("/api/api-keys", { method: "POST", body: { name, expiresAt } }),
+  create: (name: string, workspacePath: string, expiresAt = 0) =>
+    request<CreatedAPIKey>("/api/api-keys", {
+      method: "POST",
+      body: { name, workspacePath, expiresAt },
+    }),
   remove: (id: string) =>
     request<{ ok: boolean }>(`/api/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" }),
 };
@@ -330,7 +333,7 @@ export const apiKeyApi = {
  *
  * 不能复用 request()：它按 JSON 解包，而这里的响应体是一段 ZIP 字节。
  */
-export async function downloadAPIKeySDK(): Promise<Blob> {
+export async function downloadAPIKeySDK(): Promise<{ blob: Blob; filename: string }> {
   const token = getToken();
   let response: Response;
   try {
@@ -352,7 +355,9 @@ export async function downloadAPIKeySDK(): Promise<Blob> {
     }
     throw new ApiError(response.status, message);
   }
-  return response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "XiaoyuPostHub-Next_SDK.zip";
+  return { blob: await response.blob(), filename };
 }
 
 // ---------------------------------------------------------------- 邮件

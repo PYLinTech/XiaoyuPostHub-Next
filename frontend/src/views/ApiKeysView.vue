@@ -6,6 +6,7 @@ import AppEmpty from "@/components/ui/AppEmpty.vue";
 import AppModal from "@/components/ui/AppModal.vue";
 import AppTable, { type Column } from "@/components/ui/AppTable.vue";
 import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
+import FolderPicker from "@/components/FolderPicker.vue";
 import FormField from "@/components/ui/FormField.vue";
 import { apiKeyApi, downloadAPIKeySDK } from "@/api/endpoints";
 import type { APIKey } from "@/api/types";
@@ -39,6 +40,7 @@ onMounted(() => {
 
 interface KeyRow {
   key: APIKey;
+  workspaceLabel: string;
   statusLabel: string;
   statusClass: string;
   lastUsedLabel: string;
@@ -52,6 +54,7 @@ const rows = computed<KeyRow[]>(() => {
     const expired = key.expiresAt > 0 && key.expiresAt <= now;
     return {
       key,
+      workspaceLabel: workspaceLabel(key.workspacePath),
       statusLabel: expired ? "已过期" : "有效",
       statusClass: expired ? "badge--warn" : "badge--success",
       lastUsedLabel: key.lastUsedAt > 0 ? formatTime(key.lastUsedAt) : "从未使用",
@@ -61,8 +64,13 @@ const rows = computed<KeyRow[]>(() => {
   });
 });
 
+function workspaceLabel(path: string): string {
+  return path && path !== "/" ? path : "整个账号";
+}
+
 const columns: Column[] = [
   { key: "name", label: "名称", mobile: "title" },
+  { key: "workspaceLabel", label: "工作区", width: "14rem" },
   { key: "prefix", label: "前缀", width: "9rem" },
   { key: "statusLabel", label: "状态", width: "6rem" },
   { key: "lastUsedLabel", label: "最近使用", width: "9.5rem" },
@@ -74,17 +82,22 @@ const columns: Column[] = [
 // ---------------------------------------------------------------- 新建
 
 const createOpen = ref(false);
+const pickerOpen = ref(false);
 const saving = ref(false);
 const formError = ref("");
-const form = reactive({ name: "", expiresAtLocal: "" });
+const form = reactive({ name: "", workspacePath: "", expiresAtLocal: "" });
 /** 创建成功后的明文令牌；非空时弹窗切换到"只显示一次"的交付面板。 */
 const createdToken = ref("");
+const createdWorkspace = ref("");
 
 function openCreate(): void {
   form.name = "";
+  form.workspacePath = "";
   form.expiresAtLocal = "";
   formError.value = "";
   createdToken.value = "";
+  createdWorkspace.value = "";
+  pickerOpen.value = false;
   createOpen.value = true;
 }
 
@@ -92,21 +105,38 @@ function closeCreate(): void {
   if (saving.value) {
     return;
   }
+  pickerOpen.value = false;
   createOpen.value = false;
   createdToken.value = "";
 }
 
+function selectWorkspace(path: string): void {
+  form.workspacePath = path;
+  pickerOpen.value = false;
+  formError.value = "";
+}
+
 async function submit(): Promise<void> {
   const name = form.name.trim();
+  const workspace = form.workspacePath.trim();
   if (!name) {
     formError.value = "请填写 Key 名称";
+    return;
+  }
+  if (!workspace) {
+    formError.value = "请选择 Key 的工作区";
     return;
   }
   saving.value = true;
   formError.value = "";
   try {
-    const created = await apiKeyApi.create(name, dateTimeLocalToUnix(form.expiresAtLocal));
+    const created = await apiKeyApi.create(
+      name,
+      workspace,
+      dateTimeLocalToUnix(form.expiresAtLocal),
+    );
     createdToken.value = created.token;
+    createdWorkspace.value = created.key.workspacePath;
     toasts.success("API Key 已创建");
     await loadKeys();
   } catch (err) {
@@ -158,11 +188,11 @@ const sdkBusy = ref(false);
 async function downloadSdk(): Promise<void> {
   sdkBusy.value = true;
   try {
-    const blob = await downloadAPIKeySDK();
+    const { blob, filename } = await downloadAPIKeySDK();
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "XiaoyuPostHub-Next_SDK_v1.zip";
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -200,6 +230,9 @@ async function downloadSdk(): Promise<void> {
           <span class="cell-name" :title="row.key.name">{{ row.key.name }}</span>
         </div>
       </template>
+      <template #workspaceLabel="{ row }">
+        <span class="workspace-cell mono" :title="row.workspaceLabel">{{ row.workspaceLabel }}</span>
+      </template>
       <template #prefix="{ row }">
         <span class="mono">{{ row.key.prefix }}…</span>
       </template>
@@ -230,7 +263,12 @@ async function downloadSdk(): Promise<void> {
           <AppButton icon="copy" @click="copyToken">复制</AppButton>
         </div>
         <p class="faint">
-          SDK 从环境变量 <span class="mono">XIAOYU_API_KEY</span> 读取令牌，不要把令牌写进代码或配置仓库。
+          <template v-if="createdWorkspace === '/'">这枚 Key 可以访问整个账号。</template>
+          <template v-else>
+            这枚 Key 只能访问 <code class="mono">{{ createdWorkspace }}</code> 及其子目录。
+          </template>
+          SDK 从环境变量 <span class="mono">XIAOYU_API_KEY</span> 读取令牌，
+          不要把令牌写进代码或配置仓库。
         </p>
       </div>
       <form v-else id="api-key-form" class="stack" @submit.prevent="submit">
@@ -242,6 +280,21 @@ async function downloadSdk(): Promise<void> {
             maxlength="64"
             placeholder="自动备份"
           />
+        </FormField>
+        <FormField
+          label="工作区"
+          required
+          hint="Key 只能访问所选目录及其子目录；选择根目录表示整个账号，创建后不可更改"
+        >
+          <div class="workspace-pick">
+            <span class="workspace-pick__path" :title="form.workspacePath">
+              <code v-if="form.workspacePath" class="mono">{{ form.workspacePath }}</code>
+              <span v-else class="faint">尚未选择文件夹</span>
+            </span>
+            <AppButton size="sm" icon="folder" @click="pickerOpen = true">
+              {{ form.workspacePath ? "更改" : "选择文件夹" }}
+            </AppButton>
+          </div>
         </FormField>
         <FormField label="有效期" hint="留空表示永久有效；到期后 Key 自动失效">
           <AppDateTimePicker v-model="form.expiresAtLocal" />
@@ -259,6 +312,14 @@ async function downloadSdk(): Promise<void> {
         </template>
       </template>
     </AppModal>
+
+    <FolderPicker
+      :open="pickerOpen"
+      title="选择工作区"
+      initial-path="/"
+      @select="selectWorkspace"
+      @close="pickerOpen = false"
+    />
 
     <ConfirmDialog
       :open="!!removing"
@@ -291,6 +352,37 @@ async function downloadSdk(): Promise<void> {
   text-overflow: ellipsis;
 }
 
+.workspace-cell {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-pick {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.workspace-pick__path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-sm);
+  background: var(--c-surface);
+  font-size: var(--fs-sm);
+}
+
+.workspace-pick__path code {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .actions {
   display: flex;
   gap: 0.4rem;
@@ -317,5 +409,6 @@ async function downloadSdk(): Promise<void> {
 @media (max-width: 720px) {
   .cell-main { width: 100%; }
   .token-row { flex-direction: column; align-items: stretch; }
+  .workspace-pick { flex-direction: column; align-items: stretch; }
 }
 </style>
