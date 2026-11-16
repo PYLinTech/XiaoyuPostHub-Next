@@ -45,6 +45,9 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 	if res.StatusCode != http.StatusOK || !bytes.HasPrefix(raw, []byte("PK")) {
 		t.Fatalf("SDK 下载应返回 ZIP，实际 %d（%d 字节）", res.StatusCode, len(raw))
 	}
+	if got := res.Header.Get("Content-Disposition"); got != `attachment; filename="XiaoyuPostHub-Next_SDK_v1.zip"` {
+		t.Fatalf("SDK 下载文件名不符: %q", got)
+	}
 
 	status, payload := env.do(t, http.MethodPost, "/api/api-keys", map[string]any{
 		"name": "自动化备份",

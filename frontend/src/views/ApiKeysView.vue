@@ -162,7 +162,7 @@ async function downloadSdk(): Promise<void> {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "xiaoyu-sdk.zip";
+    link.download = "XiaoyuPostHub-Next_SDK_v1.zip";
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -186,23 +186,13 @@ async function downloadSdk(): Promise<void> {
       <AppButton size="sm" variant="primary" icon="plus" @click="openCreate">新建 Key</AppButton>
     </Teleport>
 
-    <p class="notice notice--info">
-      API Key 能以你的身份调用文件、上传、分享、直链等用户侧接口，权限边界与当前用户组完全一致。
-      站点关闭 API 调用或用户组收回权限后，所有 Key 立即失效。令牌只在创建时显示一次，请妥善保存。
-    </p>
-
     <p v-if="listError" class="notice notice--danger">{{ listError }}</p>
 
     <div v-if="listLoading" class="card">
       <span class="spinner" /> 正在加载
     </div>
     <div v-else-if="rows.length === 0 && !listError" class="card">
-      <AppEmpty
-        title="还没有 API Key"
-        hint="新建一枚 Key，再用示例 SDK 或任意 HTTP 客户端调用。每枚 Key 最多保留 10 个，删除后立即失效。"
-      >
-        <AppButton variant="primary" icon="plus" @click="openCreate">新建 Key</AppButton>
-      </AppEmpty>
+      <AppEmpty title="暂无 API Key" />
     </div>
     <AppTable v-else :columns="columns" :rows="rows" :loading="listLoading">
       <template #name="{ row }">

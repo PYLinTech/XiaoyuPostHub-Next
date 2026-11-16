@@ -75,7 +75,7 @@ func (s *Server) handleAPIKeySDK(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", `attachment; filename="xiaoyu-sdk.zip"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="XiaoyuPostHub-Next_SDK_v1.zip"`)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)

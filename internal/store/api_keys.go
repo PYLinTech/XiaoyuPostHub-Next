@@ -38,7 +38,7 @@ func ListAPIKeys(ctx context.Context, q Querier, userID int64) ([]APIKey, error)
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, user_id, name, key_hash, prefix, expires_at, last_used_at, created_at
 		FROM api_keys WHERE user_id = ?
-		ORDER BY created_at DESC, id DESC LIMIT 200`, userID)
+		ORDER BY created_at DESC, id DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("store: 列出 API Key 失败: %w", err)
 	}
@@ -55,17 +55,6 @@ func ListAPIKeys(ctx context.Context, q Querier, userID int64) ([]APIKey, error)
 		return nil, fmt.Errorf("store: 遍历 API Key 失败: %w", err)
 	}
 	return out, nil
-}
-
-// CountActiveAPIKeys 统计未过期的 Key 数量。
-func CountActiveAPIKeys(ctx context.Context, q Querier, userID, now int64) (int, error) {
-	var count int
-	if err := q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM api_keys
-		WHERE user_id = ? AND (expires_at = 0 OR expires_at > ?)`, userID, now).Scan(&count); err != nil {
-		return 0, fmt.Errorf("store: 统计 API Key 失败: %w", err)
-	}
-	return count, nil
 }
 
 // DeleteAPIKey 删除用户自己的 Key。条件更新未命中表示不存在或不属于该用户。

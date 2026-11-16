@@ -12,10 +12,6 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
 
-// MaxAPIKeysPerUser 限制单个用户同时持有的有效 Key 数量。
-// 它约束的是泄露面与列表可读性，不是配额。
-const MaxAPIKeysPerUser = 10
-
 // CreateAPIKeyRequest 是新建 Key 的输入。
 type CreateAPIKeyRequest struct {
 	Name      string `json:"name"`
@@ -43,13 +39,6 @@ func (s *Service) CreateAPIKey(ctx context.Context, p auth.Principal, req Create
 	now := s.Now()
 	if req.ExpiresAt != 0 && req.ExpiresAt <= now {
 		return CreatedAPIKey{}, fmt.Errorf("%w: 有效期必须晚于当前时间", ErrBadRequest)
-	}
-	count, err := store.CountActiveAPIKeys(ctx, s.DB.R(), p.UserID(), now)
-	if err != nil {
-		return CreatedAPIKey{}, err
-	}
-	if count >= MaxAPIKeysPerUser {
-		return CreatedAPIKey{}, fmt.Errorf("%w: 最多保留 %d 个有效 API Key", ErrConflict, MaxAPIKeysPerUser)
 	}
 	id, err := store.NewID("key")
 	if err != nil {
