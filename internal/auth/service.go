@@ -45,6 +45,10 @@ type Principal struct {
 	Session  store.Session
 	ClientIP netip.Addr
 	IPPrefix string
+	// APIKeyID / APIKeyName 非空表示本次身份由 API Key 认证。
+	// 二者不参与权限判定，仅用于界面展示与审计归因。
+	APIKeyID   string
+	APIKeyName string
 	// InvalidToken 为真表示请求带了令牌但它无效。上层据此区分"访客"与
 	// "会话已失效"：前者对访客开放的接口照常处理，后者应返回 401 提示重新登录。
 	InvalidToken bool
@@ -278,6 +282,11 @@ func (s *Service) Resolve(ctx context.Context, token string, ip netip.Addr, user
 	ipPrefix := s.IPPrefix(ctx, ip)
 	if token == "" {
 		return s.guestPrincipal(ctx, ip, ipPrefix)
+	}
+	// API Key 与会话令牌共享同一个 Authorization 头，靠固定前缀分流。
+	// 前缀不匹配就按会话处理，不会把普通令牌误当成 Key。
+	if strings.HasPrefix(token, APIKeyTokenPrefix) {
+		return s.resolveAPIKey(ctx, token, ip, ipPrefix)
 	}
 
 	tokenHash := HashSessionToken(token)

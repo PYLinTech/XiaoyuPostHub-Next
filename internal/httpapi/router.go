@@ -76,6 +76,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/direct-link/nodes", s.directLinksOnly(s.handleNodeDirectLinks))
 	mux.HandleFunc("GET /api/direct-link/{id}/target", s.directLinksOnly(s.handleDirectLinkTarget))
 
+	// ---- API Key（仅登录会话可管理） ----
+	mux.HandleFunc("GET /api/api-keys", s.apiKeysOnly(s.handleListAPIKeys))
+	mux.HandleFunc("POST /api/api-keys", s.apiKeysOnly(s.handleCreateAPIKey))
+	mux.HandleFunc("GET /api/api-keys/sdk", s.apiKeysOnly(s.handleAPIKeySDK))
+	mux.HandleFunc("DELETE /api/api-keys/{id}", s.apiKeysOnly(s.handleDeleteAPIKey))
+
 	// 直链交付入口。与 /s/{id} 不同：它直接返回文件字节而不是页面，
 	// 因为请求方是 wget、播放器、第三方脚本这类不跑本站前端的裸 HTTP 客户端。
 	//

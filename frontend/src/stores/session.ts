@@ -236,6 +236,8 @@ export function useSession() {
     can: (bit: number) => hasPerm(state.permissions, bit),
     isAdmin: computed(() => hasPerm(state.permissions, Perm.AdminAudit) || hasPerm(state.permissions, Perm.AdminUsers)),
     directLinksEnabled: computed(() => state.setup?.directLinkEnabled === true),
+    /** 站点级 API 总开关；用户组权限位另行判断（见 Perm.API）。 */
+    apiEnabled: computed(() => state.setup?.apiEnabled === true),
     /**
      * 用户侧邮件是否可用——必须与后端 Runtime.MailAvailable 同口径：
      * 模式为「文件与邮件」**且**开启了收件。

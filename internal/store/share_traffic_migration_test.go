@@ -19,6 +19,7 @@ func rewindTrafficBillingSchema(t *testing.T, db *DB) {
 
 func TestShareTrafficMigrationKeepsLegacyTicketBilling(t *testing.T) {
 	db := openTestDB(t)
+	rewindAPIKeySchema(t, db)
 	rewindShareDownloadSchema(t, db)
 	rewindTrafficBillingSchema(t, db)
 	rewindDirectLinkSchema(t, db)

@@ -57,6 +57,7 @@ const userItems: NavItem[] = [
   },
   { label: "我的分享", to: "/shares", icon: "share", auth: true, perm: Perm.Share },
   { label: "直链", to: "/direct-links", icon: "link", auth: true },
+  { label: "API", to: "/api-keys", icon: "ri-code-s-slash-line", auth: true, perm: Perm.API },
   { label: "取件码", to: "/pickup", icon: "key" },
   { label: "归档", to: "/archive", icon: "trash", auth: true },
 ];
@@ -70,6 +71,7 @@ const userItems: NavItem[] = [
  */
 function blockedByMode(item: NavItem): boolean {
   if (item.to === "/direct-links") return !session.directLinksEnabled.value;
+  if (item.to === "/api-keys") return !session.apiEnabled.value;
   if (!item.to.startsWith("/mail") && !item.to.startsWith("/admin/mail")) {
     return false;
   }

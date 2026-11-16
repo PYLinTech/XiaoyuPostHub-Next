@@ -25,6 +25,9 @@ const (
 	KeySystemMode Key = "site.system_mode"
 	// KeyDirectLinkEnabled 是否开放直链功能。
 	KeyDirectLinkEnabled Key = "site.direct_link_enabled"
+	// KeyAPIEnabled 是否开放 API 调用。关闭时 API Key 一律不可用，
+	// 管理入口表现为功能不存在。
+	KeyAPIEnabled Key = "site.api_enabled"
 
 	// ---- 跨域访问 ----
 
@@ -226,6 +229,13 @@ var registry = []Descriptor{
 			"已有记录保留，重新启用后按原有状态恢复。" +
 			"直链与分享不同：它的出口由服务器中转解密，全部下行流量走本站，" +
 			"因此这是一个需要显式打开的公开入口。",
+		Kind: KindBool, Default: "false", Scope: ScopeHot,
+	},
+	{
+		Key: KeyAPIEnabled, Section: "site", Title: "启用 API 调用",
+		Help: "总开关。关闭后全部 API Key 立即失效，用户侧隐藏 API 入口；" +
+			"已有 Key 记录保留，重新启用后按原有状态恢复。" +
+			"用户组还需要同时具备「允许 API 调用」权限才能使用。",
 		Kind: KindBool, Default: "false", Scope: ScopeHot,
 	},
 
@@ -633,6 +643,9 @@ type SiteRuntime struct {
 	// DirectLinkEnabled 是直链的总开关。关闭时用户侧一律 404，而不是 403——
 	// 与系统模式关闭邮件同一套语义：不向访客泄露「这里有个被关掉的功能」。
 	DirectLinkEnabled bool
+	// APIEnabled 是 API 调用的总开关。关闭时 API Key 一律拒绝，
+	// 用户侧管理入口返回 404。
+	APIEnabled bool
 }
 
 // MailEnabled 表示邮件侧是否对外提供。文件侧恒常提供，没有对应的判定。
@@ -916,6 +929,7 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			GuestPreview:      boolean(KeyGuestPreview),
 			SystemMode:        systemMode,
 			DirectLinkEnabled: boolean(KeyDirectLinkEnabled),
+			APIEnabled:        boolean(KeyAPIEnabled),
 		},
 		CORS: CORSRuntime{
 			Main:       corsPolicy(KeyCORSMainEnabled, KeyCORSMainOrigins),

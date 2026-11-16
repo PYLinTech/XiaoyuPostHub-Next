@@ -83,6 +83,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_revoked ON sessions(revoked_at, expires_at);
 
+-- API Key：用户自建的长效凭据。
+--
+-- 明文只在创建时返回一次，库里只存 SHA-256；prefix 仅用于界面辨认，
+-- 不能参与认证。删除即硬删，不保留禁用态——回收凭据的动作必须立刻生效。
+CREATE TABLE IF NOT EXISTS api_keys (
+    id           TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    key_hash     TEXT NOT NULL UNIQUE,
+    prefix       TEXT NOT NULL,
+    -- 0 表示永久。
+    expires_at   INTEGER NOT NULL DEFAULT 0,
+    last_used_at INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, created_at);
+
 -- 退避状态：按账号 / IP / 分享 / 取件码等任意键维度记录失败计数与解禁时间。
 -- 独立成表而不是塞进 users，才能覆盖"同一 IP 刷大量账号"这一维度。
 CREATE TABLE IF NOT EXISTS throttle (

@@ -232,6 +232,7 @@ type SetupState struct {
 	// 同一份事实，否则侧栏会显示一个点进去就是 404 的邮件入口。
 	MailReceiveEnabled bool `json:"mailReceiveEnabled"`
 	DirectLinkEnabled  bool `json:"directLinkEnabled"`
+	APIEnabled         bool `json:"apiEnabled"`
 	MinAccountLen      int  `json:"minAccountLen"`
 	MaxAccountLen      int  `json:"maxAccountLen"`
 	MinPasswordLen     int  `json:"minPasswordLen"`
@@ -297,6 +298,7 @@ func (s *Service) SetupState(ctx context.Context) (SetupState, error) {
 		SystemMode:         rt.Site.SystemMode,
 		MailReceiveEnabled: rt.Mail.ReceiveEnabled,
 		DirectLinkEnabled:  rt.Site.DirectLinkEnabled,
+		APIEnabled:         rt.Site.APIEnabled,
 		// 账号与密码的长度规则是固定值（见 accounts.go 的常量），
 		// 不再来自配置；这里回传是为了让界面提示与实际校验一致。
 		MinAccountLen:  AccountMinChars,

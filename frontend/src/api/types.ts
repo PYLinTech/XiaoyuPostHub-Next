@@ -67,6 +67,7 @@ export const Perm = {
   AdminMail: 1 << 16,
   AdminUnbind: 1 << 17,
   DirectLink: 1 << 18,
+  API: 1 << 19,
 } as const;
 
 /** 权限位的展示名，用于用户组编辑界面。 */
@@ -90,6 +91,7 @@ export const PERM_LABELS: ReadonlyArray<{ bit: number; label: string; group: str
   { bit: Perm.AdminMail, label: "管理收件域名与全局邮件", group: "邮件" },
   { bit: Perm.AdminUnbind, label: "审核邮箱解绑申请", group: "邮件" },
   { bit: Perm.DirectLink, label: "创建直链", group: "分享" },
+  { bit: Perm.API, label: "使用 API Key 调用接口", group: "API" },
 ];
 
 export function hasPerm(mask: number, bit: number): boolean {
@@ -226,6 +228,24 @@ export interface DirectLink {
    * 用户删除文件后两者会分叉（链接已停用，但内容在归档暂存期仍可恢复）。
    */
   targetAvailable: boolean;
+}
+
+/** 一枚用户自建 API Key。明文令牌只在创建响应里出现一次。 */
+export interface APIKey {
+  id: string;
+  name: string;
+  /** 令牌前缀，用于列表里辨认是哪一枚。 */
+  prefix: string;
+  /** 0 表示永不过期。 */
+  expiresAt: number;
+  /** 0 表示从未使用。 */
+  lastUsedAt: number;
+  createdAt: number;
+}
+
+export interface CreatedAPIKey {
+  key: APIKey;
+  token: string;
 }
 
 export interface PickupCode {
@@ -754,6 +774,8 @@ export interface SetupState {
    */
   mailReceiveEnabled: boolean;
   directLinkEnabled: boolean;
+  /** 「启用 API 调用」总开关；关闭时 API Key 全部失效，管理面表现为 404。 */
+  apiEnabled: boolean;
   minAccountLen: number;
   maxAccountLen: number;
   minPasswordLen: number;

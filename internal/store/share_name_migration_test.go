@@ -4,6 +4,7 @@ import "testing"
 
 func TestShareNameMigrationEnablesExistingSharesByDefault(t *testing.T) {
 	db := openTestDB(t)
+	rewindAPIKeySchema(t, db)
 	rewindShareDownloadSchema(t, db)
 	rewindTrafficBillingSchema(t, db)
 	rewindDirectLinkSchema(t, db)

@@ -73,6 +73,12 @@ const routes: RouteRecordRaw[] = [
     meta: { auth: true, title: "直链" },
   },
   {
+    path: "/api-keys",
+    name: "api-keys",
+    component: () => import("@/views/ApiKeysView.vue"),
+    meta: { auth: true, perm: Perm.API, title: "API" },
+  },
+  {
     path: "/pickup",
     name: "pickup",
     component: () => import("@/views/PickupView.vue"),
@@ -271,9 +277,12 @@ router.beforeEach(async (to) => {
     }
   }
 
-  if (to.name === "direct-links") {
+  if (to.name === "direct-links" || to.name === "api-keys") {
+    // 两个页面都受站点总开关控制：开关是热更新的，导航前重新取一次，
+    // 避免管理员刚关掉入口、用户还能靠已有页面继续操作。
     await session.reloadSiteInfo();
-    if (!session.directLinksEnabled.value) return { name: "files" };
+    if (to.name === "direct-links" && !session.directLinksEnabled.value) return { name: "files" };
+    if (to.name === "api-keys" && !session.apiEnabled.value) return { name: "files" };
   }
 
   if (to.meta.perm && !session.can(to.meta.perm)) {

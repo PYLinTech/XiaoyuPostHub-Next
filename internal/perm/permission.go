@@ -55,13 +55,19 @@ const (
 	// 代价与暴露面都高于「浏览器本地解密」的分享。它是追加位而不是插在
 	// Share 旁边——改动既有位会让存量组的语义漂移。
 	DirectLink
+	// API 允许用 API Key 调用用户侧接口。
+	//
+	// 与登录会话并列但独立成位：会话凭据由本人登录换取，而 API Key 一旦泄露
+	// 可被长期复用，因此需要单独授予、单独回收。预设的 normal 组不含此位，
+	// 管理员必须显式打开。
+	API
 )
 
 // All 是全部已定义权限的并集。
 const All Bit = Upload | Download | Preview | Share | Pickup | ManageOwnNodes |
 	BypassQuota | AdminFiles | AdminUsers | AdminGroups | AdminAnnouncements |
 	AdminInvites | AdminStorage | AdminSystem | AdminAudit |
-	MailAccess | AdminMail | AdminUnbind | DirectLink
+	MailAccess | AdminMail | AdminUnbind | DirectLink | API
 
 // Has 判断掩码中是否包含指定权限。
 func Has(mask int64, bit Bit) bool {

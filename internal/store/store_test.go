@@ -20,7 +20,7 @@ func openTestDB(t *testing.T) *DB {
 func TestFreshSchemaCreatesAllTables(t *testing.T) {
 	db := openTestDB(t)
 	want := []string{
-		"announcements", "announcement_reads", "announcement_targets", "audit_logs",
+		"announcements", "announcement_reads", "announcement_targets", "api_keys", "audit_logs",
 		"direct_links", "download_tickets", "files", "group_quotas", "invite_codes",
 		"invite_uses", "pickup_codes", "quota_counters", "sessions", "share_accesses",
 		"shares", "system_config", "throttle", "traffic_daily", "traffic_logs",

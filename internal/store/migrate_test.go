@@ -135,9 +135,16 @@ func normalizeSQL(s string) string {
 	return strings.ToUpper(string(out))
 }
 
+// rewindAPIKeySchema 撤销 v12 新增的 API Key 表，供各旧版本迁移夹具共用。
+func rewindAPIKeySchema(t *testing.T, db *DB) {
+	t.Helper()
+	mustExec(t, db, `DROP TABLE IF EXISTS api_keys`)
+}
+
 // rewindToBaselineSchema 把全新库降回已发布的 v2 结构，供测试完整上传平台迁移。
 func rewindToBaselineSchema(t *testing.T, db *DB) {
 	t.Helper()
+	rewindAPIKeySchema(t, db)
 	rewindShareDownloadSchema(t, db)
 	rewindTrafficBillingSchema(t, db)
 	rewindDirectLinkSchema(t, db)

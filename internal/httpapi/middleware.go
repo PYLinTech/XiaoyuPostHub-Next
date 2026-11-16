@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/netip"
@@ -13,6 +14,7 @@ import (
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/clientip"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/config"
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/service"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
 )
@@ -220,11 +222,46 @@ func (s *Server) withIdentity(next http.Handler) http.Handler {
 			fail(w, err)
 			return
 		}
+		if principal.APIKeyID != "" {
+			// API Key 有三道并列的闸门：站点总开关、用户组权限、接口范围。
+			// 前两道在这里统一拦截，而不是交给每个 handler 各判一次。
+			if !rt.Site.APIEnabled {
+				fail(w, fmt.Errorf("%w: 本站未开放 API 调用", service.ErrForbidden))
+				return
+			}
+			if !principal.Can(perm.API) {
+				fail(w, fmt.Errorf("%w: 当前用户组未开放 API 调用", service.ErrForbidden))
+				return
+			}
+			if apiKeyRequestDenied(r.URL.Path) {
+				fail(w, fmt.Errorf("%w: 该接口仅限登录会话调用", service.ErrForbidden))
+				return
+			}
+		}
 		ctx := context.WithValue(r.Context(), ctxKeyPrincipal, principal)
 		ctx = context.WithValue(ctx, ctxKeyClientIP, ip)
 		ctx = context.WithValue(ctx, ctxKeyToken, token)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// apiKeyRequestDenied 列出 API Key 不能调用的接口。
+//
+// 凭据管理与身份管理必须留在登录会话里：一枚泄露的 Key 若能创建新 Key
+// 或删除旧 Key，回收动作就会失效；若它能改密码，攻击者可以顺势接管账号。
+// 管理端整体拒绝，是因为 API 只承诺用户侧能力。
+func apiKeyRequestDenied(path string) bool {
+	switch {
+	case strings.HasPrefix(path, "/api/admin/"),
+		strings.HasPrefix(path, "/api/setup/"),
+		strings.HasPrefix(path, "/api/api-keys"):
+		return true
+	}
+	switch path {
+	case "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/password":
+		return true
+	}
+	return false
 }
 
 // wrap 组合全局中间件。安全头、日志与 panic 捕获包在身份解析之外；CORS 位于

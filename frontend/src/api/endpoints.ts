@@ -1,6 +1,7 @@
-import { getToken, request, requestWithUploadProgress } from "./client";
+import { ApiError, getToken, notifyUnauthorized, request, requestWithUploadProgress } from "./client";
 import type {
   AdminMailListResult,
+  APIKey,
   AdminMailQuery,
   AdminMailboxDetail,
   AdminNodeListResult,
@@ -10,6 +11,7 @@ import type {
   AnnouncementKind,
   AuditLog,
   ConfigEntry,
+  CreatedAPIKey,
   DatabaseStats,
   DeliveryPlan,
   DirectLink,
@@ -312,6 +314,46 @@ export const archiveApi = {
     request<{ cleared: string }>(`/api/archive/${encodeURIComponent(id)}/clear`, { method: "POST" }),
   clearAll: () => request<{ cleared: number }>("/api/archive/clear-all", { method: "POST" }),
 };
+
+// ---------------------------------------------------------------- API Key
+
+export const apiKeyApi = {
+  list: () => request<{ items: APIKey[] }>("/api/api-keys"),
+  create: (name: string, expiresAt = 0) =>
+    request<CreatedAPIKey>("/api/api-keys", { method: "POST", body: { name, expiresAt } }),
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/api/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" }),
+};
+
+/**
+ * 下载示例 SDK 压缩包。
+ *
+ * 不能复用 request()：它按 JSON 解包，而这里的响应体是一段 ZIP 字节。
+ */
+export async function downloadAPIKeySDK(): Promise<Blob> {
+  const token = getToken();
+  let response: Response;
+  try {
+    response = await fetch("/api/api-keys/sdk", {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+  } catch (err) {
+    throw new ApiError(0, "网络连接失败，请检查网络后重试", String(err));
+  }
+  if (!response.ok) {
+    if (response.status === 401) notifyUnauthorized();
+    let message = `下载失败：HTTP ${response.status}`;
+    const text = await response.text();
+    try {
+      const payload = JSON.parse(text) as { error?: { message?: string } };
+      message = payload.error?.message || message;
+    } catch {
+      // 非 JSON 错误页沿用状态码文案。
+    }
+    throw new ApiError(response.status, message);
+  }
+  return response.blob();
+}
 
 // ---------------------------------------------------------------- 邮件
 

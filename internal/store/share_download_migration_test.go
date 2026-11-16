@@ -28,6 +28,7 @@ func TestShareDownloadMigrationPreservesAccessesAndAddsTicketDedupe(t *testing.T
 	mustExec(t, db, `INSERT INTO share_accesses (share_id, actor_type, action, occurred_at)
 		VALUES (?, 'guest', 'download', ?)`, share.ID, Now()-1)
 
+	rewindAPIKeySchema(t, db)
 	rewindShareDownloadSchema(t, db)
 	mustExec(t, db, `PRAGMA user_version = 9`)
 	if err := db.initSchema(); err != nil {
