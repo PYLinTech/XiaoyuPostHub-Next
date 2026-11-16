@@ -81,6 +81,7 @@ func (s *Service) resolveAPIKey(ctx context.Context, token string, ip netip.Addr
 		IPPrefix:        ipPrefix,
 		APIKeyID:        key.ID,
 		APIKeyName:      key.Name,
+		APIKeyScopes:    key.Scopes,
 		APIKeyWorkspace: key.WorkspacePath,
 	}, nil
 }

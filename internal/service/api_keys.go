@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/apikey"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
@@ -17,7 +18,10 @@ import (
 type CreateAPIKeyRequest struct {
 	Name          string `json:"name"`
 	WorkspacePath string `json:"workspacePath"`
-	ExpiresAt     int64  `json:"expiresAt"`
+	// Scopes 为空表示使用默认范围；显式传 0 会被拒绝，避免创建出无法调用
+	// 任何文件侧接口的 Key。
+	Scopes    *int64 `json:"scopes"`
+	ExpiresAt int64  `json:"expiresAt"`
 }
 
 // CreatedAPIKey 是创建结果。Token 只在这里出现一次，之后无法再取回。
@@ -50,6 +54,10 @@ func (s *Service) CreateAPIKey(ctx context.Context, p auth.Principal, req Create
 	if req.ExpiresAt != 0 && req.ExpiresAt <= now {
 		return CreatedAPIKey{}, fmt.Errorf("%w: 有效期必须晚于当前时间", ErrBadRequest)
 	}
+	scopes, err := apiKeyScopesForCreate(p, req.Scopes)
+	if err != nil {
+		return CreatedAPIKey{}, err
+	}
 	id, err := store.NewID("key")
 	if err != nil {
 		return CreatedAPIKey{}, err
@@ -65,6 +73,7 @@ func (s *Service) CreateAPIKey(ctx context.Context, p auth.Principal, req Create
 		Prefix:        prefix,
 		KeyHash:       keyHash,
 		WorkspacePath: workspace,
+		Scopes:        scopes,
 		ExpiresAt:     req.ExpiresAt,
 		CreatedAt:     now,
 	}
@@ -78,8 +87,62 @@ func (s *Service) CreateAPIKey(ctx context.Context, p auth.Principal, req Create
 	}); err != nil {
 		return CreatedAPIKey{}, err
 	}
-	s.audit(ctx, p, "api_key.create", id, fmt.Sprintf("name=%s workspace=%s", name, workspace))
+	s.audit(ctx, p, "api_key.create", id, fmt.Sprintf("name=%s workspace=%s scopes=%d", name, workspace, scopes))
 	return CreatedAPIKey{Key: key, Token: token}, nil
+}
+
+// apiKeyScopesForCreate 校验并收窄新 Key 的能力范围。
+//
+// 请求里没带 scopes 的旧客户端使用默认范围；默认值与用户组权限取交集，
+// 避免普通组缺少某一项时整个创建请求失败。显式选择的能力必须全部是
+// 当前账号已经拥有的权限，否则删除 Key 也回收不了它凭空多出来的能力。
+func apiKeyScopesForCreate(p auth.Principal, requested *int64) (int64, error) {
+	available := availableAPIKeyScopes(p)
+	if requested == nil {
+		scopes := int64(apikey.Default) & available
+		if scopes == 0 {
+			scopes = available
+		}
+		if scopes == 0 {
+			return 0, fmt.Errorf("%w: 当前用户组没有可授予的权限", ErrBadRequest)
+		}
+		return scopes, nil
+	}
+	scopes := *requested
+	if scopes <= 0 {
+		return 0, fmt.Errorf("%w: 请至少选择一项权限", ErrBadRequest)
+	}
+	if !apikey.Valid(scopes) {
+		return 0, fmt.Errorf("%w: 权限选择无效", ErrBadRequest)
+	}
+	if scopes&^available != 0 {
+		return 0, fmt.Errorf("%w: 不能授予当前账号没有的权限", ErrBadRequest)
+	}
+	return scopes, nil
+}
+
+// availableAPIKeyScopes 把当前用户组的权限翻译成可选的 Key 能力。
+func availableAPIKeyScopes(p auth.Principal) int64 {
+	var scopes int64
+	if p.Can(perm.Upload) {
+		scopes |= int64(apikey.Upload)
+	}
+	if p.Can(perm.Download) {
+		scopes |= int64(apikey.Download)
+	}
+	if p.Can(perm.Preview) {
+		scopes |= int64(apikey.Preview)
+	}
+	if p.Can(perm.ManageOwnNodes) {
+		scopes |= int64(apikey.Manage)
+	}
+	if p.Can(perm.Share) || p.Can(perm.Pickup) {
+		scopes |= int64(apikey.Share)
+	}
+	if p.Can(perm.DirectLink) {
+		scopes |= int64(apikey.DirectLink)
+	}
+	return scopes
 }
 
 // ListAPIKeys 返回当前用户的全部 Key。明文令牌不可再取回。

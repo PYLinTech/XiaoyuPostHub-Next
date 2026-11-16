@@ -31,15 +31,12 @@ const (
 
 	// ---- 跨域访问 ----
 
-	// KeyCORSMainEnabled / KeyCORSMainOrigins 主站页面与 API 的跨域策略。
+	// KeyCORSMainEnabled / KeyCORSMainOrigins 主站页面与静态资源的跨域策略。
 	KeyCORSMainEnabled Key = "cors.main_enabled"
 	KeyCORSMainOrigins Key = "cors.main_origins"
-	// KeyCORSShareEnabled / KeyCORSShareOrigins 分享页面及访客接口的跨域策略。
-	KeyCORSShareEnabled Key = "cors.share_enabled"
-	KeyCORSShareOrigins Key = "cors.share_origins"
-	// KeyCORSDirectEnabled / KeyCORSDirectOrigins 直链管理 API 与交付地址的跨域策略。
-	KeyCORSDirectEnabled Key = "cors.direct_link_enabled"
-	KeyCORSDirectOrigins Key = "cors.direct_link_origins"
+	// KeyCORSSDKEnabled / KeyCORSSDKOrigins 全部接口与文件交付的跨域策略。
+	KeyCORSSDKEnabled Key = "cors.sdk_enabled"
+	KeyCORSSDKOrigins Key = "cors.sdk_origins"
 
 	// ---- 分享与取件 ----
 
@@ -240,12 +237,10 @@ var registry = []Descriptor{
 	},
 
 	// ---- 跨域访问 ----
-	corsBoolDescriptor("主站", KeyCORSMainEnabled, "除分享页、直链外的主站页面与 API。"),
+	corsBoolDescriptor("主站", KeyCORSMainEnabled, "浏览器直接打开的页面与静态资源。"),
 	corsOriginsDescriptor("主站", KeyCORSMainOrigins),
-	corsBoolDescriptor("分享", KeyCORSShareEnabled, "分享页面 /s/* 及访客接口 /api/s/*、/api/p/*。"),
-	corsOriginsDescriptor("分享", KeyCORSShareOrigins),
-	corsBoolDescriptor("直链", KeyCORSDirectEnabled, "直链接口 /api/direct-link* 与交付地址 /d/*。"),
-	corsOriginsDescriptor("直链", KeyCORSDirectOrigins),
+	corsBoolDescriptor("SDK", KeyCORSSDKEnabled, "全部 /api/* 接口与 /d/* 文件交付，供 SDK、脚本和第三方前端调用。"),
+	corsOriginsDescriptor("SDK", KeyCORSSDKOrigins),
 
 	// ---- 分享与取件 ----
 	{
@@ -651,11 +646,11 @@ type SiteRuntime struct {
 // MailEnabled 表示邮件侧是否对外提供。文件侧恒常提供，没有对应的判定。
 func (s SiteRuntime) MailEnabled() bool { return s.SystemMode != SystemModeFilesOnly }
 
-// CORSRuntime 是按路由类别拆分的浏览器跨域配置。
+// CORSRuntime 是按“页面 / 接口”二分后的浏览器跨域配置。
+// Main 覆盖页面与静态资源，SDK 覆盖 /api/* 与 /d/*；请求只会命中一边。
 type CORSRuntime struct {
-	Main       CORSPolicy
-	Share      CORSPolicy
-	DirectLink CORSPolicy
+	Main CORSPolicy
+	SDK  CORSPolicy
 }
 
 // CORSPolicy 是一组来源白名单；启用但列表为空时仍拒绝所有来源。
@@ -932,9 +927,8 @@ func buildRuntime(overlays map[Key]string) Runtime {
 			APIEnabled:        boolean(KeyAPIEnabled),
 		},
 		CORS: CORSRuntime{
-			Main:       corsPolicy(KeyCORSMainEnabled, KeyCORSMainOrigins),
-			Share:      corsPolicy(KeyCORSShareEnabled, KeyCORSShareOrigins),
-			DirectLink: corsPolicy(KeyCORSDirectEnabled, KeyCORSDirectOrigins),
+			Main: corsPolicy(KeyCORSMainEnabled, KeyCORSMainOrigins),
+			SDK:  corsPolicy(KeyCORSSDKEnabled, KeyCORSSDKOrigins),
 		},
 		Share: ShareRuntime{
 			PickupTTL:        pickupTTL,

@@ -9,7 +9,13 @@ import ConfirmDialog from "@/components/ui/ConfirmDialog.vue";
 import FolderPicker from "@/components/FolderPicker.vue";
 import FormField from "@/components/ui/FormField.vue";
 import { apiKeyApi, downloadAPIKeySDK } from "@/api/endpoints";
-import type { APIKey } from "@/api/types";
+import {
+  API_KEY_SCOPE_DEFAULT,
+  API_KEY_SCOPE_OPTIONS,
+  apiKeyScopeText,
+  hasPerm,
+  type APIKey,
+} from "@/api/types";
 import { copyText, describeError, logError, useAsync } from "@/lib/async";
 import { dateTimeLocalToUnix, formatTime } from "@/lib/format";
 import { useSession } from "@/stores/session";
@@ -41,6 +47,7 @@ onMounted(() => {
 interface KeyRow {
   key: APIKey;
   workspaceLabel: string;
+  scopeLabel: string;
   statusLabel: string;
   statusClass: string;
   lastUsedLabel: string;
@@ -55,6 +62,7 @@ const rows = computed<KeyRow[]>(() => {
     return {
       key,
       workspaceLabel: workspaceLabel(key.workspacePath),
+      scopeLabel: apiKeyScopeText(key.scopes),
       statusLabel: expired ? "已过期" : "有效",
       statusClass: expired ? "badge--warn" : "badge--success",
       lastUsedLabel: key.lastUsedAt > 0 ? formatTime(key.lastUsedAt) : "从未使用",
@@ -71,6 +79,7 @@ function workspaceLabel(path: string): string {
 const columns: Column[] = [
   { key: "name", label: "名称", mobile: "title" },
   { key: "workspaceLabel", label: "工作区", width: "14rem" },
+  { key: "scopeLabel", label: "权限", width: "15rem" },
   { key: "prefix", label: "前缀", width: "9rem" },
   { key: "statusLabel", label: "状态", width: "6rem" },
   { key: "lastUsedLabel", label: "最近使用", width: "9.5rem" },
@@ -85,18 +94,49 @@ const createOpen = ref(false);
 const pickerOpen = ref(false);
 const saving = ref(false);
 const formError = ref("");
-const form = reactive({ name: "", workspacePath: "", expiresAtLocal: "" });
+const form = reactive({ name: "", workspacePath: "", scopes: 0, expiresAtLocal: "" });
 /** 创建成功后的明文令牌；非空时弹窗切换到"只显示一次"的交付面板。 */
 const createdToken = ref("");
 const createdWorkspace = ref("");
+const createdScopes = ref(0);
+
+/** 当前用户组实际开放的能力；Key 只能在这些能力里收窄。 */
+const availableScopes = computed(() =>
+  API_KEY_SCOPE_OPTIONS.reduce(
+    (mask, option) =>
+      (session.state.permissions & option.permMask) !== 0 ? mask | option.bit : mask,
+    0,
+  ),
+);
+
+/** 默认勾选上传、下载、文件管理、分享与直链；组里一项都没有时退回全部可用能力。 */
+const defaultScopes = computed(() => {
+  const preferred = API_KEY_SCOPE_DEFAULT & availableScopes.value;
+  return preferred || availableScopes.value;
+});
+
+const scopeOptions = computed(() =>
+  API_KEY_SCOPE_OPTIONS.map((option) => ({
+    ...option,
+    disabled: (availableScopes.value & option.bit) === 0,
+  })),
+);
+
+const createdScopeLabel = computed(() => apiKeyScopeText(createdScopes.value));
+
+function toggleScope(bit: number, on: boolean): void {
+  form.scopes = on ? form.scopes | bit : form.scopes & ~bit;
+}
 
 function openCreate(): void {
   form.name = "";
   form.workspacePath = "";
+  form.scopes = defaultScopes.value;
   form.expiresAtLocal = "";
   formError.value = "";
   createdToken.value = "";
   createdWorkspace.value = "";
+  createdScopes.value = 0;
   pickerOpen.value = false;
   createOpen.value = true;
 }
@@ -108,6 +148,7 @@ function closeCreate(): void {
   pickerOpen.value = false;
   createOpen.value = false;
   createdToken.value = "";
+  createdScopes.value = 0;
 }
 
 function selectWorkspace(path: string): void {
@@ -127,16 +168,26 @@ async function submit(): Promise<void> {
     formError.value = "请选择 Key 的工作区";
     return;
   }
+  if (!form.scopes) {
+    formError.value = "请至少选择一项权限";
+    return;
+  }
+  if ((form.scopes & ~availableScopes.value) !== 0) {
+    formError.value = "选择的部分权限当前用户组未开放";
+    return;
+  }
   saving.value = true;
   formError.value = "";
   try {
-    const created = await apiKeyApi.create(
+    const created = await apiKeyApi.create({
       name,
-      workspace,
-      dateTimeLocalToUnix(form.expiresAtLocal),
-    );
+      workspacePath: workspace,
+      scopes: form.scopes,
+      expiresAt: dateTimeLocalToUnix(form.expiresAtLocal),
+    });
     createdToken.value = created.token;
     createdWorkspace.value = created.key.workspacePath;
+    createdScopes.value = created.key.scopes;
     toasts.success("API Key 已创建");
     await loadKeys();
   } catch (err) {
@@ -233,6 +284,9 @@ async function downloadSdk(): Promise<void> {
       <template #workspaceLabel="{ row }">
         <span class="workspace-cell mono" :title="row.workspaceLabel">{{ row.workspaceLabel }}</span>
       </template>
+      <template #scopeLabel="{ row }">
+        <span class="scope-cell" :title="row.scopeLabel">{{ row.scopeLabel }}</span>
+      </template>
       <template #prefix="{ row }">
         <span class="mono">{{ row.key.prefix }}…</span>
       </template>
@@ -270,6 +324,7 @@ async function downloadSdk(): Promise<void> {
           SDK 从环境变量 <span class="mono">XIAOYU_API_KEY</span> 读取令牌，
           不要把令牌写进代码或配置仓库。
         </p>
+        <p class="faint">权限：{{ createdScopeLabel }}。创建后不可更改。</p>
       </div>
       <form v-else id="api-key-form" class="stack" @submit.prevent="submit">
         <FormField label="名称" hint="用于区分用途，例如「自动备份」或「脚本上传」">
@@ -295,6 +350,32 @@ async function downloadSdk(): Promise<void> {
               {{ form.workspacePath ? "更改" : "选择文件夹" }}
             </AppButton>
           </div>
+        </FormField>
+        <FormField
+          label="权限"
+          required
+          hint="默认勾选上传、下载、删除与文件管理、分享、直链；只能授予用户组已开放的能力。"
+        >
+          <div class="scope-grid">
+            <label
+              v-for="option in scopeOptions"
+              :key="option.bit"
+              class="check"
+              :class="{ 'scope-option--disabled': option.disabled }"
+            >
+              <input
+                type="checkbox"
+                :disabled="option.disabled"
+                :checked="hasPerm(form.scopes, option.bit)"
+                @change="toggleScope(option.bit, ($event.target as HTMLInputElement).checked)"
+              />
+              <span class="check__text">
+                <span>{{ option.label }}</span>
+                <span v-if="option.disabled" class="faint">用户组未开放</span>
+              </span>
+            </label>
+          </div>
+          <p v-if="availableScopes === 0" class="field__hint">当前用户组没有可授予的权限。</p>
         </FormField>
         <FormField label="有效期" hint="留空表示永久有效；到期后 Key 自动失效">
           <AppDateTimePicker v-model="form.expiresAtLocal" />
@@ -352,12 +433,36 @@ async function downloadSdk(): Promise<void> {
   text-overflow: ellipsis;
 }
 
-.workspace-cell {
+.workspace-cell,
+.scope-cell {
   display: block;
   max-width: 100%;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.scope-grid {
+  display: grid;
+  gap: var(--sp-1) var(--sp-4);
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+}
+
+.scope-option--disabled {
+  color: var(--c-text-muted);
+  cursor: not-allowed;
+}
+
+/* 列宽只是表格的建议值；长权限列表会把「权限」列撑开，使省略号失效。
+   固定单元格内容宽度后，表格才按预期收窄并在悬停时给出完整内容。 */
+@media (min-width: 721px) {
+  .workspace-cell {
+    width: 14rem;
+  }
+
+  .scope-cell {
+    width: 15rem;
+  }
 }
 
 .workspace-pick {

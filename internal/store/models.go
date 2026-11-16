@@ -571,9 +571,11 @@ type APIKey struct {
 	Prefix        string `json:"prefix"`
 	KeyHash       string `json:"-"`
 	WorkspacePath string `json:"workspacePath"`
-	ExpiresAt     int64  `json:"expiresAt"`
-	LastUsedAt    int64  `json:"lastUsedAt"`
-	CreatedAt     int64  `json:"createdAt"`
+	// Scopes 是这枚 Key 自身的能力位，定义见 internal/apikey。
+	Scopes     int64 `json:"scopes"`
+	ExpiresAt  int64 `json:"expiresAt"`
+	LastUsedAt int64 `json:"lastUsedAt"`
+	CreatedAt  int64 `json:"createdAt"`
 }
 
 // AuditLog 是一条管理动作审计。

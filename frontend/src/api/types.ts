@@ -98,6 +98,47 @@ export function hasPerm(mask: number, bit: number): boolean {
   return (mask & bit) !== 0;
 }
 
+// ---------------------------------------------------------------- API Key 能力
+
+/** 必须与 internal/apikey 的 iota 顺序一致：错一位就是越权。 */
+export const APIKeyScope = {
+  Upload: 1 << 0,
+  Download: 1 << 1,
+  Preview: 1 << 2,
+  Manage: 1 << 3,
+  Share: 1 << 4,
+  DirectLink: 1 << 5,
+} as const;
+
+/** 可授予的 Key 能力。分享能力同时覆盖取件码，但仍受用户组权限收窄。 */
+export const API_KEY_SCOPE_OPTIONS: ReadonlyArray<{
+  bit: number;
+  label: string;
+  permMask: number;
+}> = [
+  { bit: APIKeyScope.Upload, label: "上传", permMask: Perm.Upload },
+  { bit: APIKeyScope.Download, label: "下载", permMask: Perm.Download },
+  { bit: APIKeyScope.Preview, label: "在线预览", permMask: Perm.Preview },
+  { bit: APIKeyScope.Manage, label: "删除与文件管理", permMask: Perm.ManageOwnNodes },
+  { bit: APIKeyScope.Share, label: "分享", permMask: Perm.Share | Perm.Pickup },
+  { bit: APIKeyScope.DirectLink, label: "直链", permMask: Perm.DirectLink },
+];
+
+/** 新建 Key 的默认勾选：上传、下载、删除与文件管理、分享、直链。 */
+export const API_KEY_SCOPE_DEFAULT =
+  APIKeyScope.Upload |
+  APIKeyScope.Download |
+  APIKeyScope.Manage |
+  APIKeyScope.Share |
+  APIKeyScope.DirectLink;
+
+export function apiKeyScopeText(mask: number): string {
+  const labels = API_KEY_SCOPE_OPTIONS.filter((item) => hasPerm(mask, item.bit)).map(
+    (item) => item.label,
+  );
+  return labels.length > 0 ? labels.join(" · ") : "无";
+}
+
 // ---------------------------------------------------------------- 实体
 
 export interface Node {
@@ -238,6 +279,8 @@ export interface APIKey {
   prefix: string;
   /** Key 的可访问文件夹；`/` 表示根目录，即整个账号。 */
   workspacePath: string;
+  /** Key 自身的能力范围，位定义见 APIKeyScope；实际能力仍受用户组权限收窄。 */
+  scopes: number;
   /** 0 表示永不过期。 */
   expiresAt: number;
   /** 0 表示从未使用。 */

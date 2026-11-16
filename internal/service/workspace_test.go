@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/apikey"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
 )
@@ -14,6 +15,7 @@ import (
 func workspaceKey(p auth.Principal, root string) auth.Principal {
 	p.APIKeyID = "key-test"
 	p.APIKeyName = "test"
+	p.APIKeyScopes = int64(apikey.All)
 	p.APIKeyWorkspace = root
 	return p
 }

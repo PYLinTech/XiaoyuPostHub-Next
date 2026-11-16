@@ -1,9 +1,16 @@
-// XiaoyuPostHub-Next Go SDK 示例。
+// XiaoyuPostHub-Next Go SDK 示例（v3）。
 //
-// 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+// 站点地址默认从 ../config.json 读取，可在 NewClient 的 baseURL 参数覆盖；
+// API Key 只来自参数或 XIAOYU_API_KEY。
 // 版本查询是公开接口，不需要 API Key；其余请求都需要 Key。
 // 所有 path 参数都相对于 Key 的工作区，"/" 就是工作区根目录。
-// 下载在本地完成 XPH 解密与 SHA-256 校验。
+// 只做存储集成时直接使用 Upload/Download，无需创建分享或直链。
+// 密文计划在本地完成 XPH 解密与 SHA-256 校验；交付计划为明文时直接落盘。
+//
+// 两类交付示例：
+//
+//	--serve-direct  后端签直链，浏览器直接向站点取文件；
+//	--serve-relay   后端下载（密文计划在本地解密）后，把字节转发给浏览器。
 package main
 
 import (
@@ -180,7 +187,7 @@ func SDKVersion(ctx context.Context, baseURL string) (string, error) {
 	return fetchSDKVersion(ctx, http.DefaultClient, resolved)
 }
 
-// SDKVersion 返回站点当前的示例 SDK 版本；该公开接口不发送 API Key。
+// SDKVersion 使用方法所属 Client 的地址查询版本；该公开接口不发送 API Key。
 func (c *Client) SDKVersion(ctx context.Context) (string, error) {
 	return fetchSDKVersion(ctx, c.HTTP, c.BaseURL)
 }
@@ -212,6 +219,12 @@ func (c *Client) List(ctx context.Context, path string) (map[string]any, error) 
 func (c *Client) Stat(ctx context.Context, path string) (map[string]any, error) {
 	var out map[string]any
 	err := c.do(ctx, http.MethodGet, "/api/fs/stat?path="+url.QueryEscape(path), nil, &out)
+	return out, err
+}
+
+func (c *Client) Stats(ctx context.Context, path string) (map[string]any, error) {
+	var out map[string]any
+	err := c.do(ctx, http.MethodGet, "/api/fs/stats?path="+url.QueryEscape(path), nil, &out)
 	return out, err
 }
 
@@ -350,6 +363,9 @@ type PresignedPart struct {
 }
 
 type DeliveryPlan struct {
+	Purpose     string          `json:"purpose"`
+	FileName    string          `json:"fileName"`
+	MimeType    string          `json:"mimeType"`
 	Mode        string          `json:"mode"`
 	URL         string          `json:"url"`
 	Parts       []PresignedPart `json:"parts"`
@@ -574,6 +590,8 @@ func (c *Client) ShareURL(id string) string { return c.BaseURL + "/s/" + id }
 type DirectLink struct {
 	ID         string `json:"id"`
 	SourceName string `json:"sourceName"`
+	MimeType   string `json:"mimeType"`
+	SizePlain  int64  `json:"size"`
 	ExpiresAt  int64  `json:"expiresAt"`
 	MaxHits    int    `json:"maxHits"`
 	Hits       int    `json:"hits"`
@@ -603,7 +621,12 @@ func (c *Client) DeleteDirectLink(ctx context.Context, id string) error {
 func (c *Client) DirectLinkURL(id string) string { return c.BaseURL + "/d/" + id }
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "--version" {
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "--version":
 		version, err := SDKVersion(context.Background(), "")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -611,10 +634,15 @@ func main() {
 		}
 		fmt.Println(version)
 		return
+	case "--serve-direct":
+		runDirectDeliveryServer(exampleAddr(os.Args[2:], "127.0.0.1:8080"))
+		return
+	case "--serve-relay":
+		runRelayDeliveryServer(exampleAddr(os.Args[2:], "127.0.0.1:8081"))
+		return
 	}
-	if len(os.Args) < 2 {
-		fmt.Println("用法: go run . <本地文件> [目标目录]")
-		fmt.Println("      go run . --version  (公开版本查询，无需 API Key)")
+	if strings.HasPrefix(os.Args[1], "-") {
+		printUsage()
 		os.Exit(2)
 	}
 	client, err := NewClient("", "")

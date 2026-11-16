@@ -190,12 +190,12 @@ func TestCORSDefaultsValidationAndRuntime(t *testing.T) {
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	rt := st.Runtime(ctx).CORS
-	for _, policy := range []CORSPolicy{rt.Main, rt.Share, rt.DirectLink} {
+	for _, policy := range []CORSPolicy{rt.Main, rt.SDK} {
 		if policy.Enabled || len(policy.Origins) != 0 {
-			t.Fatalf("三类跨域策略默认都应关闭: %+v", rt)
+			t.Fatalf("主站与 SDK 跨域策略默认都应关闭: %+v", rt)
 		}
 	}
-	for _, key := range []Key{KeyCORSMainEnabled, KeyCORSShareEnabled, KeyCORSDirectEnabled} {
+	for _, key := range []Key{KeyCORSMainEnabled, KeyCORSSDKEnabled} {
 		if got := st.Get(ctx, key); got != "false" {
 			t.Errorf("%s 默认应关闭，实得 %q", key, got)
 		}
@@ -210,6 +210,9 @@ func TestCORSDefaultsValidationAndRuntime(t *testing.T) {
 	got := st.Runtime(ctx).CORS.Main
 	if !got.Enabled || len(got.Origins) != 2 || got.Origins[0] != "https://app.example.com" || got.Origins[1] != "http://localhost:5173" {
 		t.Fatalf("跨域运行快照错误: %+v", got)
+	}
+	if got := st.Runtime(ctx).CORS.SDK; got.Enabled || len(got.Origins) != 0 {
+		t.Fatalf("配置主站不应影响 SDK: %+v", got)
 	}
 	if err := st.Set(ctx, KeyCORSMainOrigins, "*", 1); err != nil {
 		t.Fatalf("应接受全来源通配符: %v", err)

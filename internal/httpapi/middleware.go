@@ -6,11 +6,13 @@ import (
 	"log"
 	"net/http"
 	"net/netip"
+	"path"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/apikey"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/auth"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/clientip"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/config"
@@ -223,14 +225,18 @@ func (s *Server) withIdentity(next http.Handler) http.Handler {
 			return
 		}
 		if principal.APIKeyID != "" {
-			// API Key 有三道并列的闸门：站点总开关、用户组权限、接口范围。
-			// 前两道在这里统一拦截，而不是交给每个 handler 各判一次。
+			// API Key 有四道并列的闸门：站点总开关、用户组权限、Key 能力范围、
+			// 接口范围。四道都在这里统一拦截，而不是交给每个 handler 各判一次。
 			if !rt.Site.APIEnabled {
 				fail(w, fmt.Errorf("%w: 本站未开放 API 调用", service.ErrForbidden))
 				return
 			}
 			if !principal.Can(perm.API) {
 				fail(w, fmt.Errorf("%w: 当前用户组未开放 API 调用", service.ErrForbidden))
+				return
+			}
+			if apiKeyScopeDenied(principal.APIKeyScopes, r.URL.Path) {
+				fail(w, fmt.Errorf("%w: 该 API Key 未授予此操作权限", service.ErrForbidden))
 				return
 			}
 			if apiKeyRequestDenied(r.URL.Path) {
@@ -269,6 +275,45 @@ func apiKeyRequestDenied(path string) bool {
 		return true
 	}
 	return false
+}
+
+// apiKeyScopeDenied 把用户侧接口映射到 Key 能力范围。
+//
+// 创建分享、改分享、删直链这类入口只要求登录，service 层不会再问一次
+// perm.Share / perm.DirectLink（权限被回收后用户仍要能清理已有记录）。
+// 对 API Key 来说，这会让"没勾分享"的 Key 仍然能删分享，因此能力范围必须
+// 在路由层按接口族兜住，而不能只依赖业务层的权限位检查。
+func apiKeyScopeDenied(scopes int64, path string) bool {
+	required, ok := apiKeyScopeForPath(path)
+	return ok && !apikey.HasAny(scopes, required)
+}
+
+func apiKeyScopeForPath(path string) (apikey.Scope, bool) {
+	// 列目录、属性、用量是只读元数据，任何有效 Key 都可调用：上传、分享、
+	// 直链等操作都要先能看到路径。这里只归类会改变状态或交付内容的接口。
+	switch {
+	case strings.HasPrefix(path, "/api/upload/"):
+		return apikey.Upload, true
+	case path == "/api/fs/mkdir", path == "/api/fs/rename",
+		path == "/api/fs/move", path == "/api/fs/delete":
+		return apikey.Manage, true
+	case path == "/api/archive" || strings.HasPrefix(path, "/api/archive/"):
+		return apikey.Manage, true
+	case path == "/api/fs/download":
+		return apikey.Download, true
+	case path == "/api/fs/preview":
+		return apikey.Preview, true
+	case path == "/api/fs/stream", path == "/api/fs/settle":
+		// 票据本身区分下载与预览，但路径无法区分；两者任一能力即可继续
+		// 使用自己已有的票据，创建票据的入口已分别按 Download / Preview 拦截。
+		return apikey.Download | apikey.Preview, true
+	case path == "/api/share" || strings.HasPrefix(path, "/api/share/"),
+		path == "/api/pickup" || strings.HasPrefix(path, "/api/pickup/"):
+		return apikey.Share, true
+	case path == "/api/direct-link" || strings.HasPrefix(path, "/api/direct-link/"):
+		return apikey.DirectLink, true
+	}
+	return 0, false
 }
 
 // wrap 组合全局中间件。安全头、日志与 panic 捕获包在身份解析之外；CORS 位于
@@ -353,15 +398,16 @@ func (s *Server) cors(next http.Handler) http.Handler {
 	})
 }
 
-func corsPolicyForPath(cfg settings.CORSRuntime, path string) settings.CORSPolicy {
-	switch {
-	case path == "/d" || strings.HasPrefix(path, "/d/") || path == "/api/direct-link" || strings.HasPrefix(path, "/api/direct-link/"):
-		return cfg.DirectLink
-	case path == "/s" || strings.HasPrefix(path, "/s/") || path == "/api/s" || strings.HasPrefix(path, "/api/s/") || path == "/api/p" || strings.HasPrefix(path, "/api/p/"):
-		return cfg.Share
-	default:
-		return cfg.Main
+// corsPolicyForPath 把每个请求唯一归入页面或接口：/api/* 与 /d/* 属于 SDK，
+// 其余路径（包括分享页与静态资源）属于主站。这里不做“两类都命中”的兜底，
+// 也不保留第三类——跨域配置只有主站与 SDK 两张表。
+func corsPolicyForPath(cfg settings.CORSRuntime, rawPath string) settings.CORSPolicy {
+	clean := path.Clean("/" + rawPath)
+	if clean == "/api" || strings.HasPrefix(clean, "/api/") ||
+		clean == "/d" || strings.HasPrefix(clean, "/d/") {
+		return cfg.SDK
 	}
+	return cfg.Main
 }
 
 func corsHeadersAllowed(raw string) bool {

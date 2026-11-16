@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // XiaoyuPostHub-Next Node.js SDK 示例。
-// 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+// 站点地址默认从 ../config.json 读取，可在 Client 的 baseUrl 参数覆盖；
+// API Key 只来自参数或 XIAOYU_API_KEY。
 // 版本查询是公开接口，不需要 API Key；其余请求都需要 Key。
 // 所有路径参数都相对于 Key 的工作区，"/" 就是工作区根目录。
+// 只做存储集成时直接使用 upload/download，无需创建分享或直链。
 
 import {
   createDecipheriv, createHash, constants,
   generateKeyPairSync, privateDecrypt,
 } from "node:crypto";
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
+import { createReadStream, createWriteStream, readFileSync } from "node:fs";
+import { mkdtemp, open, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -27,8 +29,8 @@ export class APIError extends Error {
   }
 }
 
-async function loadBaseUrl() {
-  const cfg = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
+function loadBaseUrl() {
+  const cfg = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
   return String(cfg.baseUrl).replace(/\/+$/, "");
 }
 
@@ -54,7 +56,7 @@ async function readEnvelope(res) {
 
 /** 查询站点公开的示例 SDK 版本；不需要 API Key。 */
 export async function sdkVersion(baseUrl = "") {
-  const base = (baseUrl || await loadBaseUrl()).replace(/\/+$/, "");
+  const base = (baseUrl || loadBaseUrl()).replace(/\/+$/, "");
   const res = await fetch(requireHttpUrl(base + "/api/sdk/version"), { method: "GET" });
   const data = await readEnvelope(res);
   return String(data.version || "");
@@ -64,13 +66,11 @@ export class Client {
   constructor(apiKey = "", baseUrl = "") {
     this.apiKey = apiKey || process.env.XIAOYU_API_KEY || "";
     if (!this.apiKey) throw new Error("缺少 API Key：设置 XIAOYU_API_KEY 或传入 apiKey");
-    this.baseUrl = (baseUrl || "").replace(/\/+$/, "");
-    this.ready = (this.baseUrl ? Promise.resolve() : loadBaseUrl().then((u) => { this.baseUrl = u; }))
-      .then(() => { requireHttpUrl(this.baseUrl); });
+    this.baseUrl = (baseUrl || loadBaseUrl()).replace(/\/+$/, "");
+    requireHttpUrl(this.baseUrl);
   }
 
   async request(method, endpoint, { json, body, headers = {} } = {}) {
-    await this.ready;
     const finalHeaders = { Authorization: `Bearer ${this.apiKey}`, ...headers };
     let payload;
     if (json !== undefined) {
@@ -85,7 +85,6 @@ export class Client {
   }
 
   async _saveStream(url, dest, auth = false, append = false) {
-    await this.ready;
     // 分片地址可能是跨域的预签名地址：绝对地址直接用，且绝不附带 Authorization
     // ——把本站令牌发给 CDN 既没用，也等于主动泄露凭据。
     const target = requireHttpUrl(/^https?:\/\//i.test(url) ? url : this.baseUrl + url);
@@ -105,8 +104,7 @@ export class Client {
   }
 
   // ---------------------------------------------------------------- 版本
-  async sdkVersion() {
-    await this.ready;
+  sdkVersion() {
     return sdkVersion(this.baseUrl);
   }
 
@@ -289,8 +287,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const result = await client.upload(local, parent);
     console.log(JSON.stringify(result, null, 2));
   } else {
-    console.error("用法: node xiaoyuposthub-next-sdk-v2.mjs --version");
-    console.error("      node xiaoyuposthub-next-sdk-v2.mjs <本地文件> [目标目录]");
+    console.error("用法: node xiaoyuposthub-next-sdk-v3.mjs --version");
+    console.error("      node xiaoyuposthub-next-sdk-v3.mjs <本地文件> [目标目录]");
     process.exit(2);
   }
 }

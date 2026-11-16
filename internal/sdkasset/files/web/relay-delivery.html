@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>后端中转交付</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #e8e8e8; color: #202020; }
+    main { max-width: 680px; margin: 8vh auto; padding: 32px; background: #f5f5f5; border: 1px solid #d0d0d0; border-radius: 14px; }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    p { line-height: 1.7; }
+    .muted { color: #666; font-size: 14px; }
+    form { display: grid; gap: 12px; margin: 24px 0; }
+    label { display: grid; gap: 6px; font-size: 14px; }
+    input { padding: 10px 12px; border: 1px solid #c8c8c8; border-radius: 8px; background: #fff; font: inherit; }
+    button { justify-self: start; padding: 10px 18px; border: 0; border-radius: 8px; background: #333; color: #fff; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { min-height: 1.5em; white-space: pre-wrap; }
+    #status.error { color: #a12b2b; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>后端中转交付</h1>
+  <p>浏览器只访问你自己的后端。后端用 SDK 取得明文（密文计划在本地解密），再把字节转发给浏览器；API Key 不出后端，也能在转发前加入自己的登录与业务校验。</p>
+  <form id="delivery-form">
+    <label>工作区路径
+      <input id="path" value="/docs/report.pdf" autocomplete="off">
+    </label>
+    <button type="submit">通过后端中转下载</button>
+  </form>
+  <p id="status" class="muted">等待操作。</p>
+  <p class="muted">示例会把整份文件读入浏览器内存后再保存，适合中小文件。大文件或高并发请在后端做缓存、对象存储或流式转发。演示未包含登录校验，部署前请补上。</p>
+</main>
+<script>
+  const form = document.querySelector("#delivery-form");
+  const input = document.querySelector("#path");
+  const status = document.querySelector("#status");
+  const button = form.querySelector("button");
+
+  function show(text, isError = false) {
+    status.textContent = text;
+    status.classList.toggle("error", isError);
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const path = input.value.trim();
+    if (!path) {
+      show("请填写工作区路径。", true);
+      return;
+    }
+    button.disabled = true;
+    show("后端正在下载并准备文件，随后转发…");
+    try {
+      const res = await fetch("/api/delivery/relay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const name = path.split("/").filter(Boolean).pop() || "download.bin";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      show(`已通过后端中转下载：${name}（${blob.size.toLocaleString("zh-CN")} 字节）`);
+    } catch (err) {
+      show(err.message || "请求失败", true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

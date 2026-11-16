@@ -8,9 +8,9 @@ import (
 // CreateAPIKey 写入一条 API Key 记录。明文令牌不经过这里。
 func CreateAPIKey(ctx context.Context, q Querier, key APIKey) error {
 	_, err := q.ExecContext(ctx, `
-		INSERT INTO api_keys (id, user_id, name, key_hash, prefix, workspace_path, expires_at, last_used_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		key.ID, key.UserID, key.Name, key.KeyHash, key.Prefix, key.WorkspacePath,
+		INSERT INTO api_keys (id, user_id, name, key_hash, prefix, workspace_path, scopes, expires_at, last_used_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		key.ID, key.UserID, key.Name, key.KeyHash, key.Prefix, key.WorkspacePath, key.Scopes,
 		key.ExpiresAt, key.LastUsedAt, key.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("store: 创建 API Key 失败: %w", err)
@@ -21,7 +21,7 @@ func CreateAPIKey(ctx context.Context, q Querier, key APIKey) error {
 // GetAPIKeyByHash 按令牌哈希查找凭据。
 func GetAPIKeyByHash(ctx context.Context, q Querier, keyHash string) (APIKey, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT id, user_id, name, key_hash, prefix, workspace_path, expires_at, last_used_at, created_at
+		SELECT id, user_id, name, key_hash, prefix, workspace_path, scopes, expires_at, last_used_at, created_at
 		FROM api_keys WHERE key_hash = ?`, keyHash)
 	key, err := scanAPIKey(row)
 	if err != nil {
@@ -36,7 +36,7 @@ func GetAPIKeyByHash(ctx context.Context, q Querier, keyHash string) (APIKey, er
 // ListAPIKeys 返回某个用户的全部 API Key，最近创建的在前。
 func ListAPIKeys(ctx context.Context, q Querier, userID int64) ([]APIKey, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, user_id, name, key_hash, prefix, workspace_path, expires_at, last_used_at, created_at
+		SELECT id, user_id, name, key_hash, prefix, workspace_path, scopes, expires_at, last_used_at, created_at
 		FROM api_keys WHERE user_id = ?
 		ORDER BY created_at DESC, id DESC`, userID)
 	if err != nil {
@@ -86,7 +86,7 @@ type apiKeyScanner interface {
 func scanAPIKey(row apiKeyScanner) (APIKey, error) {
 	var key APIKey
 	if err := row.Scan(&key.ID, &key.UserID, &key.Name, &key.KeyHash, &key.Prefix,
-		&key.WorkspacePath, &key.ExpiresAt, &key.LastUsedAt, &key.CreatedAt); err != nil {
+		&key.WorkspacePath, &key.Scopes, &key.ExpiresAt, &key.LastUsedAt, &key.CreatedAt); err != nil {
 		return APIKey{}, err
 	}
 	return key, nil

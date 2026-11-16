@@ -98,7 +98,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
     last_used_at INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL,
     -- Key 的工作区：所有 API 路径都相对这个目录解析，且不能越出它。
-    workspace_path TEXT NOT NULL DEFAULT '/'
+    workspace_path TEXT NOT NULL DEFAULT '/',
+    -- Key 自身的能力范围，位定义见 internal/apikey；旧 Key 升级时补成全部六项。
+    scopes       INTEGER NOT NULL DEFAULT 63
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id, created_at);

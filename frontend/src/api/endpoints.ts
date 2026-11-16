@@ -319,10 +319,15 @@ export const archiveApi = {
 
 export const apiKeyApi = {
   list: () => request<{ items: APIKey[] }>("/api/api-keys"),
-  create: (name: string, workspacePath: string, expiresAt = 0) =>
+  create: (input: {
+    name: string;
+    workspacePath: string;
+    scopes: number;
+    expiresAt?: number;
+  }) =>
     request<CreatedAPIKey>("/api/api-keys", {
       method: "POST",
-      body: { name, workspacePath, expiresAt },
+      body: input,
     }),
   remove: (id: string) =>
     request<{ ok: boolean }>(`/api/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" }),

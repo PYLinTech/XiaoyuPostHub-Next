@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/apikey"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/clientip"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
@@ -45,10 +46,11 @@ type Principal struct {
 	Session  store.Session
 	ClientIP netip.Addr
 	IPPrefix string
-	// APIKeyID / APIKeyName 非空表示本次身份由 API Key 认证。
-	// 二者不参与权限判定，仅用于界面展示与审计归因。
+	// APIKeyID 非空表示本次身份由 API Key 认证；APIKeyName 仅用于展示与审计。
 	APIKeyID   string
 	APIKeyName string
+	// APIKeyScopes 是这枚 Key 自身的能力范围；实际权限仍要与用户组权限取交集。
+	APIKeyScopes int64
 	// APIKeyWorkspace 是这枚 Key 绑定的绝对目录；"/" 表示账号根目录。
 	// 绑定非根目录时，服务层把调用方路径按工作区相对路径解析，并在响应里
 	// 还原成相对路径。
@@ -69,11 +71,45 @@ func (p Principal) UserID() int64 {
 	return p.User.ID
 }
 
+// apiKeyScopedPerms 是会被 Key 自身能力范围收窄的用户组权限位。
+const apiKeyScopedPerms int64 = int64(perm.Upload | perm.Download | perm.Preview |
+	perm.Share | perm.Pickup | perm.ManageOwnNodes | perm.DirectLink)
+
 // Permissions 返回该身份的有效权限掩码。
-func (p Principal) Permissions() int64 { return p.Group.Permissions }
+//
+// API Key 只是在用户组权限之外再加一道收窄：Key 没有的能力一律不可用，
+// 用户组没有的能力也不会因为 Key 勾选了就出现。BypassQuota、邮件与管理位
+// 不属于 Key 能力范围，仍按用户组原样保留。
+func (p Principal) Permissions() int64 {
+	if p.APIKeyID == "" {
+		return p.Group.Permissions
+	}
+	var scoped int64
+	if apikey.Has(p.APIKeyScopes, apikey.Upload) {
+		scoped |= int64(perm.Upload)
+	}
+	if apikey.Has(p.APIKeyScopes, apikey.Download) {
+		scoped |= int64(perm.Download)
+	}
+	if apikey.Has(p.APIKeyScopes, apikey.Preview) {
+		scoped |= int64(perm.Preview)
+	}
+	if apikey.Has(p.APIKeyScopes, apikey.Manage) {
+		scoped |= int64(perm.ManageOwnNodes)
+	}
+	if apikey.Has(p.APIKeyScopes, apikey.Share) {
+		// 取件码是分享的短码别名，与分享共用同一项 Key 能力；用户组的
+		// Pickup 位仍会继续收窄，因此这里不会额外放开。
+		scoped |= int64(perm.Share | perm.Pickup)
+	}
+	if apikey.Has(p.APIKeyScopes, apikey.DirectLink) {
+		scoped |= int64(perm.DirectLink)
+	}
+	return (p.Group.Permissions &^ apiKeyScopedPerms) | (p.Group.Permissions & scoped)
+}
 
 // Can 判断是否具备某个权限。
-func (p Principal) Can(bit perm.Bit) bool { return perm.Has(p.Group.Permissions, bit) }
+func (p Principal) Can(bit perm.Bit) bool { return perm.Has(p.Permissions(), bit) }
 
 // UnlimitedQuota 表示该身份不受配额限制（但仍会记账）。
 func (p Principal) UnlimitedQuota() bool { return perm.Has(p.Group.Permissions, perm.BypassQuota) }

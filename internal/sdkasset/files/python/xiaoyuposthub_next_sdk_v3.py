@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """XiaoyuPostHub-Next Python SDK 示例。
 
-站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+站点地址默认从 ../config.json 读取，可在 Client 的 base_url 参数覆盖；
+API Key 只来自参数或 XIAOYU_API_KEY。
 版本查询是公开接口，不需要 API Key；其余请求都需要 Key。
 所有 path 参数都相对于 Key 的工作区，"/" 就是工作区根目录。
-下载走客户端本地 XPH 解密，明文不会经过服务端额外出口。
+只做存储集成时直接使用 upload/download，无需创建分享或直链。
+密文计划在客户端本地做 XPH 解密；交付计划为明文时直接落盘。
 """
 from __future__ import annotations
 
@@ -310,8 +312,8 @@ if __name__ == "__main__":
         print(sdk_version())
         raise SystemExit(0)
     if len(sys.argv) < 2:
-        print("用法: python xiaoyuposthub_next_sdk_v2.py --version")
-        print("      python xiaoyuposthub_next_sdk_v2.py <本地文件> [目标目录]")
+        print("用法: python xiaoyuposthub_next_sdk_v3.py --version")
+        print("      python xiaoyuposthub_next_sdk_v3.py <本地文件> [目标目录]")
         raise SystemExit(2)
     client = Client()
     local, parent = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "/"

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>后端接入 + 前端直连交付</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #e8e8e8; color: #202020; }
+    main { max-width: 680px; margin: 8vh auto; padding: 32px; background: #f5f5f5; border: 1px solid #d0d0d0; border-radius: 14px; }
+    h1 { margin: 0 0 12px; font-size: 24px; }
+    p { line-height: 1.7; }
+    .muted { color: #666; font-size: 14px; }
+    form { display: grid; gap: 12px; margin: 24px 0; }
+    label { display: grid; gap: 6px; font-size: 14px; }
+    input { padding: 10px 12px; border: 1px solid #c8c8c8; border-radius: 8px; background: #fff; font: inherit; }
+    button { justify-self: start; padding: 10px 18px; border: 0; border-radius: 8px; background: #333; color: #fff; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    #status { min-height: 1.5em; white-space: pre-wrap; }
+    #status.error { color: #a12b2b; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>后端接入 + 前端直连交付</h1>
+  <p>浏览器只向后端要一条直链，文件字节由浏览器直接向 XiaoyuPostHub 请求。API Key 只保存在后端，不会进入浏览器。</p>
+  <form id="delivery-form">
+    <label>工作区路径
+      <input id="path" value="/docs/report.pdf" autocomplete="off">
+    </label>
+    <button type="submit">获取直链并下载</button>
+  </form>
+  <p id="status" class="muted">等待操作。</p>
+  <p class="muted">示例直链默认 1 小时有效。生产环境应复用和管理直链，并按需设置次数上限；直链是 bearer 凭据，拿到链接的人都能下载。演示未包含登录校验，部署前请补上。</p>
+</main>
+<script>
+  const form = document.querySelector("#delivery-form");
+  const input = document.querySelector("#path");
+  const status = document.querySelector("#status");
+  const button = form.querySelector("button");
+
+  function show(text, isError = false) {
+    status.textContent = text;
+    status.classList.toggle("error", isError);
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const path = input.value.trim();
+    if (!path) {
+      show("请填写工作区路径。", true);
+      return;
+    }
+    button.disabled = true;
+    show("正在向后端申请直链…");
+    try {
+      const res = await fetch("/api/delivery/direct", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const size = Number(data.size || 0).toLocaleString("zh-CN");
+      const expiry = data.expiresAt ? new Date(data.expiresAt * 1000).toLocaleString("zh-CN") : "长期";
+      show(`${data.fileName || path}（${size} 字节，${expiry} 到期），开始直接下载…`);
+      const link = document.createElement("a");
+      link.href = data.url;
+      link.rel = "noopener";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      show(err.message || "请求失败", true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

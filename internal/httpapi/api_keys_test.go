@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/apikey"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/perm"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/settings"
 	"github.com/PYLinTech/XiaoyuPostHub-Next/internal/store"
@@ -53,7 +54,7 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 	if res.StatusCode != http.StatusOK || !bytes.HasPrefix(raw, []byte("PK")) {
 		t.Fatalf("SDK 下载应返回 ZIP，实际 %d（%d 字节）", res.StatusCode, len(raw))
 	}
-	if got := res.Header.Get("Content-Disposition"); got != `attachment; filename="XiaoyuPostHub-Next_SDK_v2.zip"` {
+	if got := res.Header.Get("Content-Disposition"); got != `attachment; filename="XiaoyuPostHub-Next_SDK_v3.zip"` {
 		t.Fatalf("SDK 下载文件名不符: %q", got)
 	}
 	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
@@ -68,10 +69,19 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 		"README.md",
 		"config.json",
 		"curl/README.md",
+		"go/examples_direct.go",
+		"go/examples_relay.go",
+		"go/examples_shared.go",
 		"go/go.mod",
 		"go/main.go",
-		"node/xiaoyuposthub-next-sdk-v2.mjs",
-		"python/xiaoyuposthub_next_sdk_v2.py",
+		"node/examples/direct-delivery.mjs",
+		"node/examples/relay-delivery.mjs",
+		"node/xiaoyuposthub-next-sdk-v3.mjs",
+		"python/examples/direct_delivery.py",
+		"python/examples/relay_delivery.py",
+		"python/xiaoyuposthub_next_sdk_v3.py",
+		"web/direct-delivery.html",
+		"web/relay-delivery.html",
 	}
 	allowed := make(map[string]bool, len(wanted))
 	for _, name := range wanted {
@@ -92,8 +102,8 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 		t.Fatalf("SDK 版本查询应公开可用，实际 %d: %v", status, payload)
 	}
 	versionData, _ := payload["data"].(map[string]any)
-	if versionData["version"] != "v2" {
-		t.Fatalf("SDK 版本应为 v2，实际 %v", versionData["version"])
+	if versionData["version"] != "v3" {
+		t.Fatalf("SDK 版本应为 v3，实际 %v", versionData["version"])
 	}
 
 	status, payload = env.do(t, http.MethodPost, "/api/api-keys", map[string]any{
@@ -112,6 +122,9 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 	}
 	if got := keyData["workspacePath"]; got != "/api-workspace" {
 		t.Fatalf("创建结果应回显工作区，实际 %v", got)
+	}
+	if got := keyData["scopes"]; got != float64(apikey.Default) {
+		t.Fatalf("未指定权限时应使用默认范围 %d，实际 %v", apikey.Default, got)
 	}
 
 	// 数据面可用：列目录要求登录身份，能通即证明 API Key 被解析成了同一用户。
@@ -353,6 +366,140 @@ func TestAPIKeyWorkspaceIsolation(t *testing.T) {
 		if entry, _ := remaining[0].(map[string]any); entry["name"] != "根工作区" {
 			t.Fatalf("残留的应是根目录 Key，实际 %v", remaining)
 		}
+	}
+}
+
+// TestAPIKeyScopesRestrictCapabilities 覆盖 Key 能力范围的创建校验与运行期闸门。
+func TestAPIKeyScopesRestrictCapabilities(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	if err := env.settings.SetMany(ctx, map[settings.Key]string{
+		settings.KeyAPIEnabled: "true",
+	}, 0); err != nil {
+		t.Fatalf("打开 API 开关失败: %v", err)
+	}
+	session := env.login(t)
+
+	createKey := func(loginToken, name string, scopes any) (string, map[string]any) {
+		t.Helper()
+		body := map[string]any{"name": name, "workspacePath": "/"}
+		if scopes != nil {
+			body["scopes"] = scopes
+		}
+		status, payload := env.do(t, http.MethodPost, "/api/api-keys", body, loginToken)
+		if status != http.StatusOK {
+			t.Fatalf("创建 Key %s 失败: %d %v", name, status, payload)
+		}
+		data, _ := payload["data"].(map[string]any)
+		token, _ := data["token"].(string)
+		key, _ := data["key"].(map[string]any)
+		if token == "" {
+			t.Fatalf("创建 Key %s 缺少明文令牌: %v", name, payload)
+		}
+		return token, key
+	}
+
+	uploadToken, uploadKey := createKey(session, "只上传", int64(apikey.Upload))
+	if got := uploadKey["scopes"]; got != float64(apikey.Upload) {
+		t.Fatalf("Key 应回显所选能力，实际 %v", got)
+	}
+
+	// 上传能力覆盖上传任务；列目录属于元数据，任何 Key 都可调用。
+	// 文件写、交付、分享、直链与归档都应按各自能力被拦截。
+	if status, payload := env.do(t, http.MethodGet, "/api/upload/tasks", nil, uploadToken); status != http.StatusOK {
+		t.Fatalf("只上传 Key 应能查看上传任务，实际 %d: %v", status, payload)
+	}
+	if status, payload := env.do(t, http.MethodGet, "/api/fs/list?path=/", nil, uploadToken); status != http.StatusOK {
+		t.Fatalf("Key 应能列目录，实际 %d: %v", status, payload)
+	}
+	denied := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{http.MethodPost, "/api/fs/mkdir", map[string]any{"parentPath": "/", "name": "nope"}},
+		{http.MethodPost, "/api/fs/rename", map[string]any{"path": "/a", "newName": "b"}},
+		{http.MethodPost, "/api/fs/move", map[string]any{"path": "/a", "destParent": "/"}},
+		{http.MethodPost, "/api/fs/delete", map[string]any{"path": "/a"}},
+		{http.MethodPost, "/api/fs/download", map[string]any{"path": "/a"}},
+		{http.MethodPost, "/api/fs/preview", map[string]any{"path": "/a"}},
+		{http.MethodGet, "/api/fs/stream?ticket=x", nil},
+		{http.MethodGet, "/api/share", nil},
+		{http.MethodPost, "/api/share", map[string]any{"path": "/a"}},
+		{http.MethodGet, "/api/direct-link", nil},
+		{http.MethodPost, "/api/direct-link", map[string]any{"path": "/a"}},
+		{http.MethodGet, "/api/archive", nil},
+	}
+	for _, tc := range denied {
+		if status, payload := env.do(t, tc.method, tc.path, tc.body, uploadToken); status != http.StatusForbidden {
+			t.Errorf("%s %s 应被 Key 能力范围拦截，实际 %d: %v", tc.method, tc.path, status, payload)
+		}
+	}
+
+	// 未知位、空范围与负数都不是合法选择。
+	for _, scopes := range []int64{0, -1, int64(apikey.All) | 1<<10} {
+		status, payload := env.do(t, http.MethodPost, "/api/api-keys", map[string]any{
+			"name": "坏范围", "workspacePath": "/", "scopes": scopes,
+		}, session)
+		if status != http.StatusBadRequest {
+			t.Errorf("非法能力 %d 应返回 400，实际 %d: %v", scopes, status, payload)
+		}
+	}
+
+	// 用户组没有的能力不能授予：把管理员组收窄成只允许 API 与上传，
+	// 重新登录以避开会话权限缓存。
+	adminGroup, err := store.GetGroup(ctx, env.db.R(), perm.GroupAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := adminGroup.Permissions
+	restore := func() {
+		if err := store.UpdateGroup(ctx, env.db.W(), perm.GroupAdmin, adminGroup.DisplayName,
+			original, adminGroup.Priority, adminGroup.ResourceSchedulingPriority); err != nil {
+			t.Fatalf("恢复管理员组权限失败: %v", err)
+		}
+	}
+	t.Cleanup(restore)
+	if err := store.UpdateGroup(ctx, env.db.W(), perm.GroupAdmin, adminGroup.DisplayName,
+		perm.Of(perm.API, perm.Upload), adminGroup.Priority, adminGroup.ResourceSchedulingPriority); err != nil {
+		t.Fatal(err)
+	}
+	limitedSession := env.login(t)
+	status, payload := env.do(t, http.MethodPost, "/api/api-keys", map[string]any{
+		"name": "越权下载", "workspacePath": "/", "scopes": int64(apikey.Download),
+	}, limitedSession)
+	if status != http.StatusBadRequest {
+		t.Fatalf("授予用户组没有的下载能力应 400，实际 %d: %v", status, payload)
+	}
+	status, payload = env.do(t, http.MethodPost, "/api/api-keys", map[string]any{
+		"name": "默认范围", "workspacePath": "/",
+	}, limitedSession)
+	if status != http.StatusOK {
+		t.Fatalf("默认范围应自动收窄到用户组能力，实际 %d: %v", status, payload)
+	}
+	data, _ := payload["data"].(map[string]any)
+	key, _ := data["key"].(map[string]any)
+	if got := key["scopes"]; got != float64(apikey.Upload) {
+		t.Fatalf("默认范围应只剩上传，实际 %v", got)
+	}
+	restore()
+
+	// 运行期再做一次交集：Key 勾了管理，但用户组没有时仍然不能写。
+	manageToken, _ := createKey(session, "只管理", int64(apikey.Manage))
+	if err := store.UpdateGroup(ctx, env.db.W(), perm.GroupAdmin, adminGroup.DisplayName,
+		original&^int64(perm.ManageOwnNodes), adminGroup.Priority, adminGroup.ResourceSchedulingPriority); err != nil {
+		t.Fatal(err)
+	}
+	if status, payload := env.do(t, http.MethodPost, "/api/fs/mkdir", map[string]any{
+		"parentPath": "/", "name": "blocked",
+	}, manageToken); status != http.StatusForbidden {
+		t.Fatalf("用户组收回管理权限后 Key 应 403，实际 %d: %v", status, payload)
+	}
+	restore()
+	if status, payload := env.do(t, http.MethodPost, "/api/fs/mkdir", map[string]any{
+		"parentPath": "/", "name": "allowed",
+	}, manageToken); status != http.StatusOK {
+		t.Fatalf("恢复用户组权限后 Key 应重新可用，实际 %d: %v", status, payload)
 	}
 }
 
