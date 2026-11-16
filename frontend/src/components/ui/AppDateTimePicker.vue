@@ -336,6 +336,12 @@ function toggle(): void {
   color: var(--c-text-inverse);
 }
 
+/* :hover 的优先级高于单个类名，必须显式覆盖，否则悬停选中日会变成灰色。 */
+.dtp__day--selected:hover {
+  background: var(--c-accent-hover);
+  color: var(--c-text-inverse);
+}
+
 /* 时间与快捷操作各成一块：分隔线划层次，月历是主体、它们是附属。 */
 .dtp__time {
   display: flex;
