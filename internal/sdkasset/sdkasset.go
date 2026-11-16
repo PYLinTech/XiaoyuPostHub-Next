@@ -37,6 +37,11 @@ func Zip() ([]byte, error) {
 			return nil
 		}
 		rel := strings.TrimPrefix(path, "files/")
+		// files/go 里若直接放 go.mod 会变成嵌套模块，//go:embed 会整段跳过，
+		// 下载包里就没有 Go 示例；源文件用 .tmpl 保存，打包时再还原文件名。
+		if rel == "go/go.mod.tmpl" {
+			rel = "go/go.mod"
+		}
 		w, err := zw.Create(rel)
 		if err != nil {
 			return err

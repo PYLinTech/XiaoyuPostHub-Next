@@ -2,6 +2,7 @@
 """XiaoyuPostHub-Next Python SDK 示例。
 
 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+版本查询是公开接口，不需要 API Key；其余请求都需要 Key。
 所有 path 参数都相对于 Key 的工作区，"/" 就是工作区根目录。
 下载走客户端本地 XPH 解密，明文不会经过服务端额外出口。
 """
@@ -44,8 +45,34 @@ def _open_url(url: str, headers: dict[str, str] | None = None) -> urllib.request
     """只允许 http(s)：交付计划里的地址来自服务端，但配置文件也可能被改坏。"""
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):
-        raise ValueError(f"不支持的下载地址协议：{scheme or '空'}")
+        raise ValueError(f"不支持的地址协议：{scheme or '空'}")
     return urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}))
+
+
+def _http_error(exc: urllib.error.HTTPError) -> APIError:
+    raw = exc.read().decode("utf-8", "replace")
+    message, detail = f"HTTP {exc.code}", raw[:500]
+    try:
+        err = json.loads(raw).get("error") or {}
+        message = err.get("message") or message
+        detail = err.get("detail") or detail
+    except Exception:
+        pass
+    return APIError(exc.code, message, detail)
+
+
+def sdk_version(base_url: str = "") -> str:
+    """查询站点公开的示例 SDK 版本；不需要 API Key。"""
+    base = (base_url or load_base_url()).rstrip("/")
+    try:
+        with _open_url(base + "/api/sdk/version") as resp:
+            payload = json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as exc:
+        raise _http_error(exc) from None
+    if payload.get("error"):
+        err = payload["error"]
+        raise APIError(0, err.get("message", "请求失败"), err.get("detail", ""))
+    return str((payload.get("data") or {}).get("version", ""))
 
 
 class Client:
@@ -59,8 +86,8 @@ class Client:
 
     # ---------------------------------------------------------------- 版本
     def sdk_version(self) -> str:
-        """返回站点当前的示例 SDK 版本，例如 v2。"""
-        return str(self.request("GET", "/api/sdk/version").get("version", ""))
+        """返回站点当前的示例 SDK 版本；该公开接口不发送 API Key。"""
+        return sdk_version(self.base_url)
 
     # ---------------------------------------------------------------- HTTP
     def _open(self, method: str, path: str, data: bytes | None = None,
@@ -71,15 +98,7 @@ class Client:
         try:
             return urllib.request.urlopen(req)
         except urllib.error.HTTPError as exc:
-            raw = exc.read().decode("utf-8", "replace")
-            message, detail = f"HTTP {exc.code}", raw[:500]
-            try:
-                err = json.loads(raw).get("error") or {}
-                message = err.get("message") or message
-                detail = err.get("detail") or detail
-            except Exception:
-                pass
-            raise APIError(exc.code, message, detail) from None
+            raise _http_error(exc) from None
 
     def request(self, method: str, path: str, body: dict | None = None,
                 raw: bytes | None = None) -> dict:
@@ -287,8 +306,12 @@ class Client:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "--version":
+        print(sdk_version())
+        raise SystemExit(0)
     if len(sys.argv) < 2:
-        print("用法: python xiaoyu.py <本地文件> [目标目录]")
+        print("用法: python xiaoyuposthub_next_sdk_v2.py --version")
+        print("      python xiaoyuposthub_next_sdk_v2.py <本地文件> [目标目录]")
         raise SystemExit(2)
     client = Client()
     local, parent = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "/"

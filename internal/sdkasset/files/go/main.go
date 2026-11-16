@@ -1,6 +1,7 @@
 // XiaoyuPostHub-Next Go SDK 示例。
 //
 // 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+// 版本查询是公开接口，不需要 API Key；其余请求都需要 Key。
 // 所有 path 参数都相对于 Key 的工作区，"/" 就是工作区根目录。
 // 下载在本地完成 XPH 解密与 SHA-256 校验。
 package main
@@ -59,23 +60,31 @@ func NewClient(apiKey, baseURL string) (*Client, error) {
 	if apiKey == "" {
 		return nil, errors.New("缺少 API Key：设置 XIAOYU_API_KEY 或传入 apiKey")
 	}
+	resolved, err := resolveBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		BaseURL: resolved,
+		APIKey:  apiKey,
+		HTTP:    &http.Client{Timeout: 0},
+	}, nil
+}
+
+func resolveBaseURL(baseURL string) (string, error) {
 	if baseURL == "" {
 		var err error
 		baseURL, err = loadBaseURL()
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	parsed, err := url.Parse(baseURL)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return nil, errors.New("站点地址必须以 http:// 或 https:// 开头")
+		return "", errors.New("站点地址必须以 http:// 或 https:// 开头")
 	}
-	return &Client{
-		BaseURL: baseURL,
-		APIKey:  apiKey,
-		HTTP:    &http.Client{Timeout: 0},
-	}, nil
+	return baseURL, nil
 }
 
 func loadBaseURL() (string, error) {
@@ -105,6 +114,10 @@ type envelope struct {
 }
 
 func (c *Client) do(ctx context.Context, method, endpoint string, body any, out any) error {
+	return requestJSON(ctx, c.HTTP, c.BaseURL, c.APIKey, method, endpoint, body, out)
+}
+
+func requestJSON(ctx context.Context, httpClient *http.Client, baseURL, apiKey, method, endpoint string, body, out any) error {
 	var reader io.Reader
 	contentType := ""
 	switch value := body.(type) {
@@ -120,15 +133,17 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body any, out 
 		reader = bytes.NewReader(data)
 		contentType = "application/json"
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+endpoint, reader)
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+endpoint, reader)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -156,13 +171,28 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body any, out 
 	return nil
 }
 
-// SDKVersion 返回站点当前的示例 SDK 版本，例如 v2。
+// SDKVersion 查询站点公开的示例 SDK 版本，不需要 API Key。
+func SDKVersion(ctx context.Context, baseURL string) (string, error) {
+	resolved, err := resolveBaseURL(baseURL)
+	if err != nil {
+		return "", err
+	}
+	return fetchSDKVersion(ctx, http.DefaultClient, resolved)
+}
+
+// SDKVersion 返回站点当前的示例 SDK 版本；该公开接口不发送 API Key。
 func (c *Client) SDKVersion(ctx context.Context) (string, error) {
+	return fetchSDKVersion(ctx, c.HTTP, c.BaseURL)
+}
+
+func fetchSDKVersion(ctx context.Context, httpClient *http.Client, baseURL string) (string, error) {
 	var out struct {
 		Version string `json:"version"`
 	}
-	err := c.do(ctx, http.MethodGet, "/api/sdk/version", nil, &out)
-	return out.Version, err
+	if err := requestJSON(ctx, httpClient, baseURL, "", http.MethodGet, "/api/sdk/version", nil, &out); err != nil {
+		return "", err
+	}
+	return out.Version, nil
 }
 
 // ---------------------------------------------------------------- 文件树
@@ -573,8 +603,18 @@ func (c *Client) DeleteDirectLink(ctx context.Context, id string) error {
 func (c *Client) DirectLinkURL(id string) string { return c.BaseURL + "/d/" + id }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		version, err := SDKVersion(context.Background(), "")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(version)
+		return
+	}
 	if len(os.Args) < 2 {
 		fmt.Println("用法: go run . <本地文件> [目标目录]")
+		fmt.Println("      go run . --version  (公开版本查询，无需 API Key)")
 		os.Exit(2)
 	}
 	client, err := NewClient("", "")

@@ -9,6 +9,12 @@
 }
 ```
 
+## 版本查询（不需要 API Key）
+
+`GET /api/sdk/version` 是公开接口：不需要 API Key，也不需要登录。SDK 的版本
+查询函数同样不发送 `Authorization` 头，可以在配置 Key 之前调用。三种语言的
+`--version` 命令与下面各节的查询函数都走这个公开接口。
+
 ## 准备 API Key
 
 1. 管理员在「系统配置 → 站点」打开「启用 API 调用」。
@@ -20,8 +26,9 @@
 export XIAOYU_API_KEY="xph_..."
 ```
 
-API Key 只能调用用户侧接口；管理端、初始化、登录注册、改密与 Key 管理本身
-必须使用登录会话。下载采用客户端本地解密，服务端不额外输出明文。
+除公开的版本查询外，API Key 只能调用用户侧接口；管理端、初始化、登录注册、
+改密与 Key 管理本身必须使用登录会话。下载采用客户端本地解密，服务端不额外
+输出明文。
 
 ## 工作区
 
@@ -41,14 +48,18 @@ API Key 只能调用用户侧接口；管理端、初始化、登录注册、改
 ```bash
 pip install cryptography
 cd python
-python xiaoyu.py /path/to/file.pdf /
+python xiaoyuposthub_next_sdk_v2.py --version  # 无需 API Key
+python xiaoyuposthub_next_sdk_v2.py /path/to/file.pdf /
 ```
 
-```python
-from xiaoyu import Client
+Python 模块名不能包含连字符，因此文件名用下划线；Node 与 Go 使用
+`xiaoyuposthub-next-sdk-v2`。
 
+```python
+from xiaoyuposthub_next_sdk_v2 import Client, sdk_version
+
+print(sdk_version())  # 公开接口，不需要 API Key
 client = Client()  # 读取 XIAOYU_API_KEY 与 ../config.json
-print(client.sdk_version())  # 站点当前的示例 SDK 版本
 client.list("/")
 client.upload("./report.pdf", parent="/docs")
 plan = client.download("/docs/report.pdf", "./report.out.pdf")
@@ -65,14 +76,15 @@ client.delete("/docs/old.txt")
 
 ```bash
 cd node
-node xiaoyu.mjs /path/to/file.pdf /
+node xiaoyuposthub-next-sdk-v2.mjs --version  # 无需 API Key
+node xiaoyuposthub-next-sdk-v2.mjs /path/to/file.pdf /
 ```
 
 ```js
-import { Client } from "./xiaoyu.mjs";
+import { Client, sdkVersion } from "./xiaoyuposthub-next-sdk-v2.mjs";
 
+console.log(await sdkVersion()); // 公开接口，不需要 API Key
 const client = new Client();
-console.log(await client.sdkVersion()); // 站点当前的示例 SDK 版本
 await client.list("/");
 await client.upload("./report.pdf", "/docs");
 await client.download("/docs/report.pdf", "./report.out.pdf");
@@ -89,12 +101,15 @@ await client.remove("/docs/old.txt");
 
 ```bash
 cd go
+go run . --version  # 无需 API Key
 go run . /path/to/file.pdf /
 ```
 
 ```go
+version, err := SDKVersion(context.Background(), "")
+fmt.Println(version)
+
 client, err := NewClient("", "")
-version, err := client.SDKVersion(context.Background())
 plan, err := client.Download("/docs/report.pdf", "./report.out.pdf", false)
 share, err := client.CreateShare("/docs/report.pdf", "file", "public", "", 0)
 fmt.Println(share.ID, client.ShareURL(share.ID))
@@ -110,7 +125,7 @@ fmt.Println(link.ID, client.DirectLinkURL(link.ID))
 - 分享：创建、列表、删除
 - 直链：创建、列表、删除（站点与用户组需先开启直链）
 - 账号：读取当前身份与配额
-- 版本：查询站点当前示例 SDK 版本（`GET /api/sdk/version`，公开接口）
+- 版本：查询站点当前示例 SDK 版本（`GET /api/sdk/version`，公开接口，不需要 API Key）
 
 所有接口沿用站点现有的 `/api/*` 用户侧接口。响应统一为
 `{"data": ...}` / `{"error": {"message": "...", "detail": "..."}}`。

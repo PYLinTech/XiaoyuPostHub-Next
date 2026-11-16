@@ -6,6 +6,9 @@
 export XIAOYU_API_KEY="xph_..."
 BASE="https://ph.pylin.cn"
 
+# 版本查询（公开接口，不需要 API Key）
+curl -sS "$BASE/api/sdk/version"
+
 # 当前身份与配额
 curl -sS "$BASE/api/auth/profile" -H "Authorization: Bearer $XIAOYU_API_KEY"
 

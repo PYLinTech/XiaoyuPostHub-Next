@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // XiaoyuPostHub-Next Node.js SDK 示例。
 // 站点地址只来自 ../config.json；API Key 只来自参数或 XIAOYU_API_KEY。
+// 版本查询是公开接口，不需要 API Key；其余请求都需要 Key。
 // 所有路径参数都相对于 Key 的工作区，"/" 就是工作区根目录。
 
 import {
@@ -40,6 +41,25 @@ function requireHttpUrl(raw) {
   return raw;
 }
 
+async function readEnvelope(res) {
+  const text = await res.text();
+  let parsed = {};
+  try { parsed = text ? JSON.parse(text) : {}; } catch { /* 保留原文 */ }
+  if (!res.ok || parsed.error) {
+    const err = parsed.error || {};
+    throw new APIError(res.status, err.message || `HTTP ${res.status}`, err.detail || text.slice(0, 300));
+  }
+  return parsed.data ?? {};
+}
+
+/** 查询站点公开的示例 SDK 版本；不需要 API Key。 */
+export async function sdkVersion(baseUrl = "") {
+  const base = (baseUrl || await loadBaseUrl()).replace(/\/+$/, "");
+  const res = await fetch(requireHttpUrl(base + "/api/sdk/version"), { method: "GET" });
+  const data = await readEnvelope(res);
+  return String(data.version || "");
+}
+
 export class Client {
   constructor(apiKey = "", baseUrl = "") {
     this.apiKey = apiKey || process.env.XIAOYU_API_KEY || "";
@@ -61,14 +81,7 @@ export class Client {
       payload = body;
     }
     const res = await fetch(this.baseUrl + endpoint, { method, headers: finalHeaders, body: payload });
-    const text = await res.text();
-    let parsed = {};
-    try { parsed = text ? JSON.parse(text) : {}; } catch { /* 保留原文 */ }
-    if (!res.ok || parsed.error) {
-      const err = parsed.error || {};
-      throw new APIError(res.status, err.message || `HTTP ${res.status}`, err.detail || text.slice(0, 300));
-    }
-    return parsed.data ?? {};
+    return readEnvelope(res);
   }
 
   async _saveStream(url, dest, auth = false, append = false) {
@@ -93,7 +106,8 @@ export class Client {
 
   // ---------------------------------------------------------------- 版本
   async sdkVersion() {
-    return String((await this.request("GET", "/api/sdk/version")).version || "");
+    await this.ready;
+    return sdkVersion(this.baseUrl);
   }
 
   // ---------------------------------------------------------------- 文件树
@@ -266,13 +280,17 @@ export class Client {
   directLinkUrl(linkId) { return `${this.baseUrl}/d/${linkId}`; }
 }
 
-if (process.argv[1] && process.argv[1].endsWith("xiaoyu.mjs")) {
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [local, parent = "/"] = process.argv.slice(2);
-  if (!local) {
-    console.error("用法: node xiaoyu.mjs <本地文件> [目标目录]");
+  if (local === "--version") {
+    console.log(await sdkVersion());
+  } else if (local) {
+    const client = new Client();
+    const result = await client.upload(local, parent);
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    console.error("用法: node xiaoyuposthub-next-sdk-v2.mjs --version");
+    console.error("      node xiaoyuposthub-next-sdk-v2.mjs <本地文件> [目标目录]");
     process.exit(2);
   }
-  const client = new Client();
-  const result = await client.upload(local, parent);
-  console.log(JSON.stringify(result, null, 2));
 }

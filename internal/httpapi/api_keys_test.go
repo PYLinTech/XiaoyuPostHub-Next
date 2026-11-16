@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -55,6 +56,35 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 	if got := res.Header.Get("Content-Disposition"); got != `attachment; filename="XiaoyuPostHub-Next_SDK_v2.zip"` {
 		t.Fatalf("SDK 下载文件名不符: %q", got)
 	}
+	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("SDK 下载内容不是有效 ZIP: %v", err)
+	}
+	files := make(map[string]bool, len(archive.File))
+	for _, entry := range archive.File {
+		files[entry.Name] = true
+	}
+	wanted := []string{
+		"README.md",
+		"config.json",
+		"curl/README.md",
+		"go/go.mod",
+		"go/main.go",
+		"node/xiaoyuposthub-next-sdk-v2.mjs",
+		"python/xiaoyuposthub_next_sdk_v2.py",
+	}
+	allowed := make(map[string]bool, len(wanted))
+	for _, name := range wanted {
+		allowed[name] = true
+		if !files[name] {
+			t.Fatalf("SDK 压缩包缺少 %s", name)
+		}
+	}
+	for name := range files {
+		if !allowed[name] {
+			t.Fatalf("SDK 压缩包包含未预期文件 %s", name)
+		}
+	}
 
 	// 版本查询公开：已分发脚本不需要凭据也能判断是否需要更新。
 	status, payload := env.do(t, http.MethodGet, "/api/sdk/version", nil, "")
@@ -101,6 +131,10 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 		settings.KeyAPIEnabled: "false",
 	}, 0); err != nil {
 		t.Fatal(err)
+	}
+	// 版本查询是公开接口：站点关闭 API 后，不带 Key 仍应可读。
+	if status, payload := env.do(t, http.MethodGet, "/api/sdk/version", nil, ""); status != http.StatusOK {
+		t.Fatalf("关闭站点 API 后版本查询仍应公开可用，实际 %d: %v", status, payload)
 	}
 	if status, _ := env.do(t, http.MethodGet, "/api/auth/profile", nil, keyToken); status != http.StatusForbidden {
 		t.Fatalf("关闭站点 API 后 Key 应 403，实际 %d", status)
