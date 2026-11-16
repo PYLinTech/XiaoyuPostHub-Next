@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// 后端中转交付示例。
-// 本示例后端用 SDK 下载文件，密文计划在本地解密，再把字节转发给浏览器；API Key 不出后端。
+// 后端直连，由后端做中转的示例。
+// 本示例后端用 SDK 取回文件，密文计划在本地解密，再把明文字节转发给浏览器；API Key 不出后端。
 // 示例使用临时文件承载解密结果，生产环境可按需改为缓存、对象存储或流式实现。
 
 import http from "node:http";
@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { Client } from "../xiaoyuposthub-next-sdk-v3.mjs";
+import { Client } from "../xiaoyuposthub-next-sdk-v4.mjs";
 
 const port = Number(process.env.PORT || 8081);
 const pagePath = fileURLToPath(new URL("../../web/relay-delivery.html", import.meta.url));
@@ -90,11 +90,11 @@ const server = http.createServer(async (req, res) => {
       await rm(tempDir, { recursive: true, force: true });
     }
   } catch (err) {
-    console.error("中转交付示例失败:", err.message);
+    console.error("方式 1 示例失败:", err.message);
     if (!res.headersSent) sendJSON(res, 502, { error: err.message || "请求失败" });
   }
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`中转交付示例已启动：http://127.0.0.1:${port}（文件字节经本服务转发）`);
+  console.log(`方式 1 示例（后端直连，由后端做中转）已启动：http://127.0.0.1:${port}`);
 });

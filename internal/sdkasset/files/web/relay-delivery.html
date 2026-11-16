@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>后端中转交付</title>
+  <title>后端直连，由后端做中转</title>
   <style>
     :root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
     body { margin: 0; background: #e8e8e8; color: #202020; }
@@ -22,8 +22,8 @@
 </head>
 <body>
 <main>
-  <h1>后端中转交付</h1>
-  <p>浏览器只访问你自己的后端。后端用 SDK 取得明文（密文计划在本地解密），再把字节转发给浏览器；API Key 不出后端，也能在转发前加入自己的登录与业务校验。</p>
+  <h1>后端直连，由后端做中转</h1>
+  <p>浏览器只访问你自己的后端。后端用 SDK 取回文件（密文计划在本地解密），再把明文字节转发给浏览器；API Key 不出后端，也能在转发前加入自己的登录与业务校验。</p>
   <form id="delivery-form">
     <label>工作区路径
       <input id="path" value="/docs/report.pdf" autocomplete="off">
@@ -42,6 +42,20 @@
   function show(text, isError = false) {
     status.textContent = text;
     status.classList.toggle("error", isError);
+  }
+
+  function attachmentName(res, fallback) {
+    const header = res.headers.get("Content-Disposition") || "";
+    const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
+    if (utf8) {
+      try {
+        return decodeURIComponent(utf8[1]);
+      } catch {
+        /* 解码失败时退回路径推断 */
+      }
+    }
+    const plain = /filename="([^"]+)"/i.exec(header);
+    return plain ? plain[1] : fallback;
   }
 
   form.addEventListener("submit", async (event) => {
@@ -63,14 +77,17 @@
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${res.status}`);
       }
+      const name = attachmentName(res, path.split("/").filter(Boolean).pop() || "download.bin");
       const blob = await res.blob();
-      const name = path.split("/").filter(Boolean).pop() || "download.bin";
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
       link.download = name;
+      link.rel = "noopener";
+      document.body.append(link);
       link.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
       show(`已通过后端中转下载：${name}（${blob.size.toLocaleString("zh-CN")} 字节）`);
     } catch (err) {
       show(err.message || "请求失败", true);

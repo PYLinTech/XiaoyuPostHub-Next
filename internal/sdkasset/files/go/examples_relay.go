@@ -13,8 +13,8 @@ type relayDeliveryRequest struct {
 	Path string `json:"path"`
 }
 
-// runRelayDeliveryServer 演示「后端中转交付」：
-// 后端用 SDK 下载文件，密文计划在本地解密，再把明文字节转发给浏览器；API Key 不出后端。
+// runRelayDeliveryServer 演示「后端直连，由后端做中转」：
+// 后端用 SDK 取回文件，密文计划在本地解密，再把明文字节转发给浏览器；API Key 不出后端。
 func runRelayDeliveryServer(addr string) {
 	client, err := NewClient("", "")
 	if err != nil {
@@ -75,6 +75,6 @@ func runRelayDeliveryServer(addr string) {
 		w.Header().Set("Cache-Control", "private, no-store")
 		http.ServeContent(w, r, name, time.Now(), file)
 	})
-	log.Printf("中转交付示例已启动：http://%s（文件字节经本服务转发）", addr)
+	log.Printf("方式 1 示例（后端直连，由后端做中转）已启动：http://%s（后端取回并解密，文件字节经本服务转发）", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

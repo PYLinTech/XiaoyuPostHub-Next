@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""后端中转交付示例。
+"""后端直连，由后端做中转的示例。
 
-本示例后端用 SDK 下载文件，密文计划在本地解密，再把字节转发给浏览器；API Key 不出后端。
+本示例后端用 SDK 取回文件，密文计划在本地解密，再把明文字节转发给浏览器；API Key 不出后端。
 示例使用临时文件承载解密结果，生产环境可按需改为缓存、对象存储或流式实现。
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ SDK_DIR = Path(__file__).resolve().parents[1]
 PAGE = Path(__file__).resolve().parents[2] / "web" / "relay-delivery.html"
 sys.path.insert(0, str(SDK_DIR))
 
-from xiaoyuposthub_next_sdk_v3 import Client  # noqa: E402
+from xiaoyuposthub_next_sdk_v4 import Client  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "8081"))
 MAX_BODY = 1 << 20
@@ -80,7 +80,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 plan = client.download(file_path, temp_path)
             except Exception as exc:  # noqa: BLE001 - 示例统一把上游失败返回 502
-                print(f"中转交付示例失败: {exc}", file=sys.stderr)
+                print(f"方式 1 示例失败: {exc}", file=sys.stderr)
                 self._json(502, {"error": str(exc) or "下载失败"})
                 return
 
@@ -97,7 +97,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:  # noqa: BLE001 - 响应已开始写出时只能记录
-            print(f"中转交付示例失败: {exc}", file=sys.stderr)
+            print(f"方式 1 示例失败: {exc}", file=sys.stderr)
             if not started:
                 self._json(502, {"error": str(exc) or "请求失败"})
         finally:
@@ -107,14 +107,14 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def log_message(self, fmt: str, *args: object) -> None:
-        print(f"中转交付示例: {fmt % args}", file=sys.stderr)
+        print(f"方式 1 示例: {fmt % args}", file=sys.stderr)
 
 
 def main() -> None:
     global client
     client = Client()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"中转交付示例已启动：http://127.0.0.1:{PORT}（文件字节经本服务转发）")
+    print(f"方式 1 示例（后端直连，由后端做中转）已启动：http://127.0.0.1:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

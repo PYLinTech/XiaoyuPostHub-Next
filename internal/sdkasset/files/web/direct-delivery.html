@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>后端接入 + 前端直连交付</title>
+  <title>后端请求得到地址后，前端直接去拿</title>
   <style>
     :root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
     body { margin: 0; background: #e8e8e8; color: #202020; }
@@ -22,18 +22,27 @@
 </head>
 <body>
 <main>
-  <h1>后端接入 + 前端直连交付</h1>
-  <p>浏览器只向后端要一条直链，文件字节由浏览器直接向 XiaoyuPostHub 请求。API Key 只保存在后端，不会进入浏览器。</p>
+  <h1>后端请求得到地址后，前端直接去拿</h1>
+  <p>浏览器只向后端要一份交付计划，再拿计划里的 123 地址直接取密文，并在浏览器本地解密、校验后保存。API Key 只保存在后端，文件字节不经过站点，也不经过你的后端。</p>
   <form id="delivery-form">
     <label>工作区路径
       <input id="path" value="/docs/report.pdf" autocomplete="off">
     </label>
-    <button type="submit">获取直链并下载</button>
+    <button type="submit">获取计划并下载</button>
   </form>
   <p id="status" class="muted">等待操作。</p>
-  <p class="muted">示例直链默认 1 小时有效。生产环境应复用和管理直链，并按需设置次数上限；直链是 bearer 凭据，拿到链接的人都能下载。演示未包含登录校验，部署前请补上。</p>
+  <p class="muted">本地解密需要 HTTPS 或 localhost，并依赖 WebCrypto。示例后端没有登录校验，部署到公网前请补上自己的鉴权与访问控制。</p>
 </main>
-<script>
+<script type="module">
+  import {
+    createClientKeyPair,
+    encryptionSupported,
+    receiveDelivery,
+    reportSettlement,
+    requestDeliveryPlan,
+    saveDelivery,
+  } from "./browser-delivery.mjs";
+
   const form = document.querySelector("#delivery-form");
   const input = document.querySelector("#path");
   const status = document.querySelector("#status");
@@ -44,6 +53,12 @@
     status.classList.toggle("error", isError);
   }
 
+  function progressText(event) {
+    if (!event || !event.bytesTotal) return event?.message || "处理中…";
+    const percent = Math.min(100, Math.floor((event.bytesDone / event.bytesTotal) * 100));
+    return `${event.message} ${percent}%（${event.bytesDone.toLocaleString("zh-CN")} / ${event.bytesTotal.toLocaleString("zh-CN")} 字节）`;
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const path = input.value.trim();
@@ -51,27 +66,37 @@
       show("请填写工作区路径。", true);
       return;
     }
+    if (!encryptionSupported()) {
+      show("当前环境不支持本地解密：请通过 HTTPS（或 localhost）打开本页。", true);
+      return;
+    }
+
     button.disabled = true;
-    show("正在向后端申请直链…");
+    let plan = null;
     try {
-      const res = await fetch("/api/delivery/direct", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
+      show("正在生成临时密钥并申请交付计划…");
+      const pair = await createClientKeyPair();
+      plan = await requestDeliveryPlan("/api/delivery/plan", path, pair);
+
+      show("正在直接向 123 取密文并本地解密…");
+      const result = await receiveDelivery(plan, pair, {
+        onProgress: (progress) => show(progressText(progress)),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      const size = Number(data.size || 0).toLocaleString("zh-CN");
-      const expiry = data.expiresAt ? new Date(data.expiresAt * 1000).toLocaleString("zh-CN") : "长期";
-      show(`${data.fileName || path}（${size} 字节，${expiry} 到期），开始直接下载…`);
-      const link = document.createElement("a");
-      link.href = data.url;
-      link.rel = "noopener";
-      document.body.append(link);
-      link.click();
-      link.remove();
+
+      const settled = await reportSettlement("/api/delivery/settle", plan, true);
+      saveDelivery(result);
+      const saved = result.savedAs ? `已保存为 ${result.savedAs}` : "已交给浏览器下载";
+      show(
+        `${result.fileName || path} 下载完成，共 ${result.bytes.toLocaleString("zh-CN")} 字节，` +
+          `SHA-256 ${result.checksum}；${saved}。` +
+          (settled ? "" : "\n交付票据回执失败，站点可能稍后按超时处理。"),
+      );
     } catch (err) {
-      show(err.message || "请求失败", true);
+      if (plan?.ticketId) {
+        await reportSettlement("/api/delivery/settle", plan, false);
+      }
+      const message = err?.name === "AbortError" ? "已取消。" : err?.message || "请求失败";
+      show(message, true);
     } finally {
       button.disabled = false;
     }

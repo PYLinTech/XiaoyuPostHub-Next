@@ -14,8 +14,8 @@ import (
 func printUsage() {
 	fmt.Println("用法: go run . <本地文件> [目标目录]")
 	fmt.Println("      go run . --version  (公开版本查询，无需 API Key)")
-	fmt.Println("      go run . --serve-direct [监听地址]  (后端签直链，浏览器直接取文件)")
-	fmt.Println("      go run . --serve-relay [监听地址]   (后端下载，密文计划本地解密后中转给浏览器)")
+	fmt.Println("      go run . --serve-relay [监听地址]   (方式 1：后端直连，由后端做中转)")
+	fmt.Println("      go run . --serve-direct [监听地址]  (方式 2：后端请求得到地址后，前端直接去拿)")
 }
 
 func exampleAddr(args []string, fallback string) string {
