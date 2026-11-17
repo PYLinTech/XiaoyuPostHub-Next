@@ -36,6 +36,9 @@ type deliveryRequest struct {
 	// ClientPublicKey 是前端现场生成的临时公钥（base64 SPKI DER）。
 	// 提供时内容密钥以 RSA-OAEP 信封下发，私钥不出浏览器内存。
 	ClientPublicKey string `json:"clientPublicKey"`
+	// ClientIP 是后端代传的终端用户真实地址，仅 API Key 调用生效。
+	// 「后端申请计划、前端直取」时票据按它绑定网段，123 回源鉴权才放行。
+	ClientIP string `json:"clientIp"`
 }
 
 // handleDownload 准备一次下载。
@@ -65,6 +68,7 @@ func (s *Server) prepareDelivery(w http.ResponseWriter, r *http.Request, purpose
 	}, service.DeliveryRequest{
 		Purpose:         purpose,
 		ClientPublicKey: req.ClientPublicKey,
+		ClientIP:        req.ClientIP,
 	})
 	if err != nil {
 		fail(w, err)

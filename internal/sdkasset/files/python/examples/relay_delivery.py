@@ -19,7 +19,7 @@ SDK_DIR = Path(__file__).resolve().parents[1]
 PAGE = Path(__file__).resolve().parents[2] / "web" / "relay-delivery.html"
 sys.path.insert(0, str(SDK_DIR))
 
-from xiaoyuposthub_next_sdk_v4 import Client  # noqa: E402
+from xiaoyuposthub_next_sdk_v5 import Client  # noqa: E402
 
 PORT = int(os.environ.get("PORT", "8081"))
 MAX_BODY = 1 << 20

@@ -1,4 +1,4 @@
-# curl 速查（v4）
+# curl 速查（v5）
 
 站点地址在根目录 `config.json` 里统一维护，下面的 `$BASE` 请从那里取值。
 
@@ -109,13 +109,32 @@ curl -sS "$BASE/api/announcements?kinds=announcement,message" \
 ## 交付计划
 
 `/api/fs/download` 与 `/api/fs/preview` 在请求体里带 `path`，可选带 `clientPublicKey`
-（base64 SPKI DER）时返回交付计划，不下载文件字节：
+（base64 SPKI DER）时返回交付计划，不下载文件字节。`/api/fs/download` 需要 Key 的
+「下载」能力，`/api/fs/preview` 需要「在线预览」能力：
 
 ```bash
 curl -sS "$BASE/api/fs/download" -H "Authorization: Bearer $XIAOYU_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"path":"/docs/a.txt","clientPublicKey":""}'
 ```
+
+- **代传访客 IP（`clientIp`，仅 API Key 生效）**：API 调用方通常是后端，站点看到的是
+  后端 IP，而方式 2 真正去 123 取字节的是浏览器用户。后端把终端用户真实 IP 放进
+  `clientIp`，票据按它的网段绑定，123 回源鉴权才放行；不传则按后端 IP 绑定，
+  「后端申请、前端直取」在真实部署会 403。登录会话/访客传了也会被忽略。
+  `clientIp` 只接受单个 IP；把整段 `X-Forwarded-For` 原样传入会返回 400。
+
+```bash
+curl -sS "$BASE/api/fs/download" -H "Authorization: Bearer $XIAOYU_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/docs/a.txt","clientPublicKey":"<base64 SPKI>","clientIp":"<终端用户真实 IP>"}'
+```
+
+绑定前缀默认 IPv4 /24、IPv6 /64（固定平台参数）。后端在反向代理后时，必须由**后端
+自己**配置可信代理并解析转发头：只有 TCP 对端属于受信代理时才采信
+`X-Forwarded-For`，并从右往左跳过受信代理取真实访客；默认不信任该头。不加限制地取
+首段等于让任何客户端伪造 `clientIp`。站点「可信代理」只作用于站点自身的入站请求，
+不会替你的后端判断。回源鉴权缺 `remote_addr` 一律拒绝；地址不在绑定前缀内拒绝。
 
 - 不带公钥时只能走 `mode=proxy_decrypt`：`contentForm=plaintext`，
   `streamUrl` 由站点中转并解密。可以带 API Key 取回明文：
@@ -125,7 +144,9 @@ curl -fSL "$BASE/api/fs/stream?ticket=<ticket>" \
   -H "Authorization: Bearer $XIAOYU_API_KEY" -o a.txt
 ```
 
-  这种票据由服务端在流式输出时自行结算，不需要再回执。
+无 Range 的整文件请求由服务端在流式输出结束时按实测字节结算；带 Range 的请求不
+结算，票据到期退款。客户端回执会被拒绝，不需要再回执。
+
 - 带浏览器公钥且站点打开「优先直链交付」时，计划是 `mode=direct`、
   `contentForm=ciphertext`，`url` 或 `parts` 指向 123 密文直链。下载后还要做 XPH
   解密，curl 不负责这一步；请用 `web/browser-delivery.mjs` 或语言 SDK。
@@ -137,6 +158,24 @@ curl -fSL "$BASE/api/fs/stream?ticket=<ticket>" \
 ```bash
 curl -sS "$BASE/api/fs/settle" -H "Authorization: Bearer $XIAOYU_API_KEY" \
   -H "Content-Type: application/json" -d '{"ticketId":"<ticket>","completed":true}'
+```
+
+结算语义（反直觉）：密文票据一旦回执，**无论 `completed` 真假都按预扣全额结算**，
+`completed` 只标记是否完整接收，不能折减配额；完全不回执的票据到期后由维护任务删除并
+**退回预扣额度**。因此失败且不想计费时不要回执（让它到期退款），「失败上报
+`completed=false`」反而比「不上报」更贵。`proxy_decrypt` 的无 Range 整文件请求由服务端
+在流结束时实测结算；带 Range 的请求不结算，票据到期退款。客户端回执一律被拒绝（403）。
+票据默认有效期 15 分钟、鉴权次数上限 4096（均后台可配）。
+
+## 节点属性（stat）
+
+`stat` 的节点字段在 **`data.node`** 下，不是顶层：`size`（明文字节）、`nodeType`
+（0 文件 / 1 文件夹）、`name`、`path`、`checksum`、`mtime` 等。「上传后校验大小再删
+本地」务必读 `data.node.size`，按顶层 `size` 读会恒为空。`stats` 则是目录子树聚合，
+返回 `data.{path,files,folders,bytes}`。
+
+```bash
+curl -sS "$BASE/api/fs/stat?path=/docs/a.txt" -H "Authorization: Bearer $XIAOYU_API_KEY"
 ```
 
 ## 直链（/d）
@@ -201,8 +240,8 @@ curl -sS "$BASE/api/direct-link/nodes?checksums=<sha256>,<sha256>" \
 请直接运行本包的 `go/`、`node/` 或 `python/` 示例，并参考根目录 README 中
 「1. 后端直连，由后端做中转」一节。SDK 内生成的临时 RSA 私钥只留在客户端进程里，
 服务端不会拿到它。若服务端返回 `contentForm=plaintext` 的明文计划，`streamUrl` 已经是
-明文字节，可以带 API Key 用 curl 取回；这类票据在打开中转流时由服务端实测结算，
-未开流则到期后删除票据并退回预扣额度。
+明文字节，可以带 API Key 用 curl 取回；无 Range 的整文件请求由服务端在流结束时实测
+结算，带 Range 的请求不结算。未开流则到期后删除票据并退回预扣额度。
 
 ## 跨域提醒
 

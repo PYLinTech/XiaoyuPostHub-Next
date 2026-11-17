@@ -1,4 +1,4 @@
-# XiaoyuPostHub-Next SDK 示例（v4）
+# XiaoyuPostHub-Next SDK 示例（v5）
 
 本压缩包提供 Python、Node.js、Go 三种语言的客户端示例、curl 速查，以及两套可运行的
 交付演示。所有路径都相对于 API Key 绑定的工作区，API Key 只放在后端。
@@ -61,8 +61,10 @@
 - 代价是后端要承担下载、临时存储、必要时的本地解密和转发的带宽与磁盘开销。
 - 需要站点打开「启用 API 调用」，用户组拥有「使用 API Key 调用接口」与「下载」权限，
   并且 API Key 勾选「下载」能力；预览接口还要求用户组和 Key 都具备「在线预览」能力。
-- SDK 的 `download` 会自动回执密文票据；`proxy_decrypt` 由服务端在打开中转流时自行
-  结算，SDK 不会重复回执。只有直接调用 `prepare_download` 时才需要自己调用 `settle`。
+- SDK 的 `download` 在成功时自动回执密文票据；密文计划失败时不回执，票据到期后退款。
+  明文计划由服务端按实际输出结算（带 Range 的中转流不结算），SDK 不会回执。只有直接
+  调用 `prepare_download` 且计划为密文时才需要自己调用 `settle`：成功后再回执，失败不要
+  回执；明文计划由服务端结算，不要回执。
 
 示例位置：
 
@@ -96,8 +98,9 @@
    SHA-256 和票据。
 4. 浏览器直接向 123 发 Range 请求取密文，用私钥解开内容密钥，按 XPH 分块做
    AES-GCM 解密，同时计算明文的 SHA-256；校验通过后交给浏览器保存。
-5. 浏览器把交付票据回执给你的后端（`settle`）；回执成功即按预扣全额结算，失败则票据
-   到期后由维护任务删除并退回预扣额度。
+5. 浏览器把交付票据回执给你的后端（`settle`）；密文票据一旦回执即按预扣全额结算
+   （与 `completed` 真假无关），不回执则票据到期后由维护任务删除并退回预扣额度。
+   详见下文「结算语义」。
 
 要点：
 
@@ -110,10 +113,10 @@
 - 123 直链域名必须允许你的页面 origin 跨域读取；站内前端走的是同一条路径。若浏览器报
   跨域错误，或计划被降级为 `proxy` / `proxy_decrypt`，请改用第 1 种方式。
 - 计划被降级时，浏览器无法访问站点中转流：`streamUrl` 是票据地址，但取流需要 API Key
-  或登录会话，而这两种凭据都不能进入浏览器。示例后端会以 409 拒绝并停止交付；可由客户端
-  回执的密文票据会尝试按未完成结算。`proxy_decrypt` 的计划在浏览器没有打开中转流时不会产生
-  服务端结算，票据到期后由维护任务删除并退回预扣额度；只有实际打开中转流时，服务端才按
-  实测产出结算。
+  或登录会话，而这两种凭据都不能进入浏览器。示例后端会以 409 拒绝并停止交付，且不回执
+  票据；密文票据到期后由维护任务删除并退回预扣额度。`proxy_decrypt` 的计划在浏览器没有
+  打开中转流时同样不产生服务端结算；只有实际打开无 Range 的整文件中转流时，服务端才按
+  实测产出结算（带 Range 的中转流不结算，票据到期退款）。
 - 支持单个文件，不支持目录；多卷文件会按 `parts` 自动跨卷取数。
 - 达到 256 MiB 且浏览器支持 File System Access 时，示例会先让用户选择保存位置并流式落盘；
   浏览器不支持该接口时回落到内存 Blob，用户取消保存选择则按取消处理。
@@ -128,7 +131,8 @@
 示例后端提供两个接口：
 
 - `POST /api/delivery/plan`：接收 `{path, clientPublicKey}`，调用 SDK 取得交付计划并原样
-  返回；不是 `direct` + `ciphertext` 时返回 409。
+  返回；后端会从请求里观测访客真实 IP 并经 `clientIp` 代传给站点（见「后端 IP ≠ 访客 IP」）。
+  不是 `direct` + `ciphertext` 时返回 409。
 - `POST /api/delivery/settle`：接收 `{ticketId, completed}`，回执交付票据。
 
 `web/browser-delivery.mjs` 是独立模块，不依赖本包的其它文件；你可以把它复制到自己的
@@ -152,6 +156,109 @@
 如果你的页面面向不受信任的访问者，或者文件能否下载必须由你自己的登录态决定，
 选第 1 种。第 2 种的计划虽然不带 API Key，但 123 地址在有效期内可被拿到的人使用；
 需要更严格的控制时，用第 1 种。
+
+## 交付票据与来源绑定（集成必读）
+
+### 后端 IP ≠ 访客 IP：代传 clientIp
+
+票据默认绑定**申请计划那一方**的网段。API 调用方通常是后端，站点看到的是后端出口
+IP；而方式 2 里真正去 123 取字节的是后端服务的浏览器用户。两者不是同一个地址，
+若不处理，真实部署（后端在服务器、用户在别处）直连回源鉴权必然 403
+「请求来源与票据不一致」。只有「后端与浏览器落在同一绑定前缀」（IPv4 /24、IPv6 /64；
+例如本机演示）才碰巧成立。
+
+解决办法：后端申请计划时把终端用户的真实 IP 通过 `clientIp` 传给站点，票据据此绑定
+网段，123 回源校验即可放行。
+
+- 仅对 **API Key 身份**生效；登录会话/访客的真实 IP 已由站点中间件解析，传了也会被忽略。
+- `clientIp` 只接受单个 IP；把整段 `X-Forwarded-For` 原样传入会返回 400。
+- 只有**方式 2 的计划申请**接受代传：三端 SDK 的 `prepare_download` / `prepareDownload` /
+  `PrepareDownload` 加了末位参数（Python `client_ip`、Node.js `clientIp`，默认空串可省略；
+  Go `clientIP ...string` 为可变参数，旧的四个参数调用仍可用，省略或传空串表示不代传）。
+  不代传则维持按后端 IP 绑定的旧行为。
+- **方式 1 的 `download` / `Download` 不接受代传**：那是后端自己取字节，取数方就是后端，
+  票据必须按后端网段绑定；若计划落到 `mode=direct` 却绑到访客网段，后端取数时回源鉴权会
+  403。需要前端直取时改用 `prepareDownload`。
+- 计费归属不变：流量仍记 Key 绑定的后端属主，`clientIp` 只改来源绑定与流量明细里的
+  访客地址。后端代申请后票据可能绑在访客网段，但后端自己回执 `settle` / 开中转流时
+  站点按 API Key 属主认证，不再要求与申请网段一致，跨网段回执正常。
+
+后端如何拿到真实访客 IP：直连时用 TCP 对端地址；后端在反向代理之后时，**只有 TCP 对端
+属于本后端信任的代理网段，才采信 `X-Forwarded-For`**，并从右往左跳过受信代理，取第一个
+非代理地址；整条链都在受信网段内时取最左端。转发链中出现无法解析的条目时回退到 TCP
+对端，不继续相信更左侧的值。
+
+- 示例后端（`examples_direct.go` / `direct-delivery.mjs` / `direct_delivery.py`）通过
+  `TRUSTED_PROXIES` 声明代理网段（逗号分隔的 IP 或 CIDR，默认空）；默认不信任该头，
+  直接使用 TCP 对端地址。边缘代理应追加而非覆盖该头，否则链路里只剩代理地址。
+- 站点配置的「系统配置 → 安全 → 可信代理」只作用于**站点自身的入站请求**，不会替你的
+  后端判断转发头；不要把两者混为一谈。
+- 不加限制地取 XFF 首段等于让任何客户端伪造 `clientIp`，会把票据绑到攻击者指定的网段。
+
+### 来源绑定规则（回源鉴权）
+
+- 绑定前缀默认 **IPv4 /24、IPv6 /64**，是固定平台参数（不在后台开放配置）。按前缀
+  而非精确地址绑定，是为了容忍移动网络 4G↔Wi-Fi 切换、以及同一 NAT 下多设备共用额度。
+  CGNAT 下 /24 会把多个用户放进同一个桶，配额与绑定偏粗；代传 `clientIp` 仍按 /24
+  聚合，需要更细粒度时应评估业务影响。
+- 123 回源鉴权（`/api/cdn/auth`）用 123 观测到的访客地址（`$remote_addr`）校验是否落在
+  票据绑定前缀内（以下规则针对已绑定来源的票据，即 `IPPrefix` 非空）：
+  - 票据 `IPPrefix` 为空 → 不校验来源，缺地址也放行；
+  - 缺 `remote_addr`（上报地址为空）→ **拒绝**「无法确认请求来源」。部署侧必须让
+    123 带上 `$remote_addr`，否则已绑定来源的用户直连票据一律拒绝；
+  - 地址不在绑定前缀内 → 拒绝「请求来源与票据不一致」；
+  - 绑定前缀非法（如申请方地址无法解析时落下的 `unknown`）→ 返回 403 拒绝；详细原因
+    只写服务端日志（提示检查可信代理与 X-Forwarded-For 配置），123 与客户端只会看到
+    通用拒绝。按来源/配置错误处理，不是可重试的服务故障。
+
+### 票据有效期与鉴权上限
+
+- 默认有效期 **15 分钟**（`delivery.ticket_ttl`，后台可配），单票据鉴权次数上限
+  **4096**（`delivery.ticket_max_uses`，后台可配）。一次播放的大量 Range 请求各可能
+  触发鉴权，因此上限不能太小。
+- 慢速移动网络下大文件可能在下载中途票据过期。浏览器端应在取数失败（403 / 票据失效）
+  时向自己的后端**重新申请计划并从头取**，而不是无限重试旧地址；当前
+  `browser-delivery.mjs` 不支持断点续取。
+
+### 结算语义（反直觉，务必看清）
+
+- 直链加密 / 中转加密票据（`contentForm=ciphertext`）：一旦调用客户端 `settle`，
+  **无论 `completed` 真假都按预扣全额结算**。`completed` 只标记本次是否完整接收，
+  不能折减配额，也不能证明文件已实际保存。
+- 完全不调 `settle` 的密文票据：到期后由维护任务删除并**退回预扣额度**。
+- 因此「失败时上报 `completed=false`」反而比「不上报」更贵。失败且不想计费时，
+  **不要回执**，让票据自然到期退款；只有确认完成（或愿意按全额计费）时才回执。
+- 中转解密票据（`proxy_decrypt` / `contentForm=plaintext`）：无 Range 的整文件中转流由
+  服务端在流结束时按实测产出结算；带 Range 的中转流（预览、拖动）不结算，票据到期退款。
+  客户端 `settle` 一律会被拒绝（403「该票据由服务端结算，无需客户端上报」），SDK 的
+  `download` 不会重复回执。
+
+### 降级必须自己判 mode
+
+「优先直链交付」开启时，仍可能因直链空间不可用、上游签发失败或未提供
+`clientPublicKey` 而**自动降级**为 `proxy`（密文中转）或 `proxy_decrypt`（明文中转）。
+要保证「字节不经过后端 / 站点」，集成方必须自己判
+`plan.mode == "direct" && plan.contentForm == "ciphertext"`；否则改用方式 1。
+示例后端对非直连计划返回 409 并停止交付。
+
+### 能力与端点映射
+
+- `/api/fs/download` 需要 Key 的「下载」能力；`/api/fs/preview` 需要「在线预览」能力。
+  Key 只有「下载」时调预览会 403。
+- `/api/fs/stream`、`/api/fs/settle` 任一「下载」或「在线预览」能力即可继续使用已有票据
+  （创建票据的入口已分别按 Download / Preview 拦截）。
+- 用户组权限与 Key 能力是交集：组没有「在线预览」权限时，Key 勾了也调不通预览。
+
+### stat / stats 响应结构
+
+- `stat` 返回 `{"data": {"node": {...}}}`，节点字段在 **`data.node`** 下：`size`
+  （明文字节）、`nodeType`（0 文件 / 1 文件夹）、`name`、`path`、`parentPath`、
+  `checksum`、`mtime`、`nodeStatus`、`createdAt`。SDK 原样返回 `data` 部分，
+  **不要按顶层 `size` 读**（恒为 undefined / None）。
+- 「迁移上传后校验大小再删本地」务必读 `data.node.size`
+  （Python `result["node"]["size"]`、Node `result.node.size`、Go `out["node"].(map[string]any)["size"]`）。
+- `stats` 返回 `{"data": {"path", "files", "folders", "bytes"}}`，是目录子树聚合，
+  与 `stat` 的单节点结构不同。
 
 ## 准备工作
 
@@ -208,7 +315,9 @@ Key 的实际能力是 **用户组权限** 与 **创建时勾选的能力范围*
 
 先设置 `XIAOYU_API_KEY`，再在对应语言目录启动示例。三个语言都会打印实际监听地址，
 打开页面、填写工作区路径即可看到两类交付的差异。方式 2 的示例页面必须通过 `localhost`
-或 HTTPS 打开才能使用 WebCrypto；示例默认监听 `127.0.0.1`，满足这一条件。
+或 HTTPS 打开才能使用 WebCrypto；示例默认监听 `127.0.0.1`，满足这一条件。方式 2 的
+示例后端默认只认 TCP 对端地址；若它自己在反向代理之后，启动时用 `TRUSTED_PROXIES`
+（如 `127.0.0.1/32,::1/128`，按实际网段填写）声明代理，才会采信 `X-Forwarded-For`。
 
 ### Go
 
@@ -242,8 +351,8 @@ PORT=9000 node examples/relay-delivery.mjs
 SDK 本身也提供上传与版本查询命令：
 
 ```bash
-node xiaoyuposthub-next-sdk-v4.mjs --version
-node xiaoyuposthub-next-sdk-v4.mjs /path/to/file.pdf /
+node xiaoyuposthub-next-sdk-v5.mjs --version
+node xiaoyuposthub-next-sdk-v5.mjs /path/to/file.pdf /
 ```
 
 ### Python
@@ -261,19 +370,19 @@ PORT=9000 python examples/relay_delivery.py
 SDK 本身也提供上传与版本查询命令：
 
 ```bash
-python xiaoyuposthub_next_sdk_v4.py --version
-python xiaoyuposthub_next_sdk_v4.py /path/to/file.pdf /
+python xiaoyuposthub_next_sdk_v5.py --version
+python xiaoyuposthub_next_sdk_v5.py /path/to/file.pdf /
 ```
 
 Python 模块名不能包含连字符，因此文件名用下划线；Node 的文件名与 Go 的模块名使用
-连字符形式 `xiaoyuposthub-next-sdk-v4`。
+连字符形式 `xiaoyuposthub-next-sdk-v5`。
 
 ## 语言 SDK 速览
 
 ### Python
 
 ```python
-from xiaoyuposthub_next_sdk_v4 import Client, sdk_version
+from xiaoyuposthub_next_sdk_v5 import Client, sdk_version
 
 print(sdk_version())  # 公开接口，不需要 API Key
 client = Client()     # 读取 XIAOYU_API_KEY 与 ../config.json
@@ -283,7 +392,8 @@ plan = client.download("/docs/report.pdf", "./report.out.pdf")
 print(plan["fileName"], plan["mimeType"])
 
 # 方式 2：后端只请求地址，浏览器拿计划直接去 123 取密文
-plan = client.prepare_download("/docs/report.pdf", client_public_key_from_browser)
+# client_ip 代传终端用户真实地址（仅 API Key 生效），票据据此绑定网段
+plan = client.prepare_download("/docs/report.pdf", client_public_key_from_browser, client_ip=visitor_ip)
 print(plan["mode"], plan.get("url"), plan.get("parts"))
 
 client.list("/")
@@ -295,7 +405,7 @@ client.remove("/docs/old.txt")
 ### Node.js
 
 ```js
-import { Client, sdkVersion } from "./xiaoyuposthub-next-sdk-v4.mjs";
+import { Client, sdkVersion } from "./xiaoyuposthub-next-sdk-v5.mjs";
 
 console.log(await sdkVersion()); // 公开接口，不需要 API Key
 const client = new Client();     // 读取 XIAOYU_API_KEY 与 ../config.json
@@ -305,7 +415,8 @@ const relayed = await client.download("/docs/report.pdf", "./report.out.pdf");
 console.log(relayed.fileName, relayed.mimeType);
 
 // 方式 2：后端只请求地址，浏览器拿计划直接去 123 取密文
-const plan = await client.prepareDownload("/docs/report.pdf", clientPublicKeyFromBrowser);
+// clientIp 代传终端用户真实地址（仅 API Key 生效），票据据此绑定网段
+const plan = await client.prepareDownload("/docs/report.pdf", clientPublicKeyFromBrowser, false, visitorIp);
 console.log(plan.mode, plan.url, plan.parts);
 
 await client.list("/");
@@ -336,7 +447,8 @@ if err != nil {
 fmt.Println(relayed.FileName, relayed.MimeType)
 
 // 方式 2：后端只请求地址，浏览器拿计划直接去 123 取密文
-plan, err := client.PrepareDownload(ctx, "/docs/report.pdf", clientPublicKeyFromBrowser, false)
+// 末位 clientIP 为可变参数，代传终端用户真实地址（仅 API Key 生效）；不代传可省略或传 ""
+plan, err := client.PrepareDownload(ctx, "/docs/report.pdf", clientPublicKeyFromBrowser, false, visitorIP)
 if err != nil {
 	log.Fatal(err)
 }
@@ -353,9 +465,12 @@ fmt.Println(share.ID, client.ShareURL(share.ID))
 
 三种语言的方法名分别使用 snake_case、camelCase 与 PascalCase，参数与接口一一对应：
 
-- 交付：`prepare_download` / `prepareDownload` / `PrepareDownload`（只申请计划，不取字节），
-  `download` / `download` / `Download`（取回并在需要时本地解密），
-  `settle` / `settle` / `Settle`（回执密文票据）。
+- 交付：`prepare_download` / `prepareDownload` / `PrepareDownload`（只申请计划，不取字节；
+  末位参数代传终端用户 `clientIp`，仅 API Key 生效；三端均可省略，Go 用可变参数，
+  旧的四参调用仍可用），
+  `download` / `download` / `Download`（后端自己取回并在需要时本地解密；票据按后端网段绑定，
+  不接受代传 `clientIp`），
+  `settle` / `settle` / `Settle`（回执密文票据，按预扣全额结算，详见「结算语义」）。
 - 文件树：`profile` / `profile` / `Profile`，`list` / `list` / `List`，`stat` / `stat` /
   `Stat`，`stats` / `stats` / `Stats`，`mkdir` / `mkdir` / `Mkdir`，`rename` / `rename` /
   `Rename`，`move` / `move` / `Move`，`remove` / `remove` / `Remove`。
@@ -397,7 +512,7 @@ fmt.Println(share.ID, client.ShareURL(share.ID))
 `--version` 命令、`sdk_version()` / `sdkVersion()` / `SDKVersion()` 都走这个接口，
 不会发送 `Authorization` 头，可以在配置 Key 之前调用。
 
-当前包版本为 **v4**。站点升级 SDK 后，可用这个接口判断已分发的脚本是否需要更新。
+当前包版本为 **v5**。站点升级 SDK 后，可用这个接口判断已分发的脚本是否需要更新。
 
 ## 已覆盖的能力
 

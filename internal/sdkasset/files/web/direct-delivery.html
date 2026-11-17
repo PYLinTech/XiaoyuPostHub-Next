@@ -31,7 +31,7 @@
     <button type="submit">获取计划并下载</button>
   </form>
   <p id="status" class="muted">等待操作。</p>
-  <p class="muted">本地解密需要 HTTPS 或 localhost，并依赖 WebCrypto。示例后端没有登录校验，部署到公网前请补上自己的鉴权与访问控制。</p>
+  <p class="muted">本地解密需要 HTTPS 或 localhost，并依赖 WebCrypto。示例后端没有登录校验，部署到公网前请补上自己的鉴权与访问控制。直连交付的票据按访客网段绑定：示例后端已代传你的真实 IP。若示例后端在反向代理后，用 TRUSTED_PROXIES（逗号分隔的 IP 或 CIDR）声明代理网段，示例会从 X-Forwarded-For 右侧跳过受信代理取真实访客；默认不信任该头，直接使用 TCP 对端地址。站点侧「可信代理」只作用于站点自身的入站请求，不会替示例后端判断转发头。</p>
 </main>
 <script type="module">
   import {
@@ -72,11 +72,10 @@
     }
 
     button.disabled = true;
-    let plan = null;
     try {
       show("正在生成临时密钥并申请交付计划…");
       const pair = await createClientKeyPair();
-      plan = await requestDeliveryPlan("/api/delivery/plan", path, pair);
+      const plan = await requestDeliveryPlan("/api/delivery/plan", path, pair);
 
       show("正在直接向 123 取密文并本地解密…");
       const result = await receiveDelivery(plan, pair, {
@@ -92,9 +91,7 @@
           (settled ? "" : "\n交付票据回执失败，站点可能稍后按超时处理。"),
       );
     } catch (err) {
-      if (plan?.ticketId) {
-        await reportSettlement("/api/delivery/settle", plan, false);
-      }
+      // 失败或取消时不回执：密文票据一旦回执即按预扣全额结算，不回执则到期退款。
       const message = err?.name === "AbortError" ? "已取消。" : err?.message || "请求失败";
       show(message, true);
     } finally {

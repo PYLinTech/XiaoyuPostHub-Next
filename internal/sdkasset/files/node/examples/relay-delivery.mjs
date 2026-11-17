@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
-import { Client } from "../xiaoyuposthub-next-sdk-v4.mjs";
+import { Client } from "../xiaoyuposthub-next-sdk-v5.mjs";
 
 const port = Number(process.env.PORT || 8081);
 const pagePath = fileURLToPath(new URL("../../web/relay-delivery.html", import.meta.url));

@@ -76,7 +76,8 @@ export async function createClientKeyPair() {
 
 /**
  * 向你自己的后端请求交付计划。后端应调用站点 /api/fs/download，
- * 把浏览器公钥放进 clientPublicKey，再把计划原样返回（其中没有 API Key）。
+ * 把浏览器公钥放进 clientPublicKey，并代传观测到的访客真实 IP（clientIp，
+ * 仅 API Key 生效），再把计划原样返回（其中没有 API Key）。
  */
 export async function requestDeliveryPlan(endpoint, path, pair, { signal } = {}) {
   const res = await fetch(endpoint, {
@@ -92,7 +93,10 @@ export async function requestDeliveryPlan(endpoint, path, pair, { signal } = {})
   return data;
 }
 
-/** 回执交付票据。密文通道按预扣额度结算；明文通道由服务端在开流时实测结算。 */
+/**
+ * 回执交付票据。密文通道按预扣额度结算；明文通道由服务端结算，
+ * 带 Range 的中转流不结算，票据到期退款。
+ */
 export async function reportSettlement(endpoint, plan, completed, { signal } = {}) {
   if (!endpoint || !plan?.ticketId || plan.mode === "proxy_decrypt") {
     return true;
@@ -511,7 +515,28 @@ async function fetchUrlRange(url, start, endInclusive, signal) {
     signal,
   });
   if (!response.ok && response.status !== 206) {
-    throw new DeliveryError(`取密文失败：HTTP ${response.status}`);
+    // 取密文失败时，上游（123，或其转述的本端回源鉴权结果）可能给出 JSON 错误体
+    // （如 code 1051 / message）。只抛 HTTP 状态会把「票据过期 / IP 不符 /
+    // 缺 remote_addr」混为一谈，集成方无从诊断；这里尽量把码与说明带出来，
+    // 非 JSON 时退回首段文本，读体失败也不影响抛出状态码。
+    let detail = "";
+    try {
+      const text = await response.text();
+      try {
+        const body = JSON.parse(text);
+        const code = body?.code ?? body?.error?.code;
+        const message = body?.message ?? body?.error?.message ?? body?.error;
+        if (code !== undefined || message) {
+          detail = [code !== undefined ? `code ${code}` : "", typeof message === "string" ? message : ""]
+            .filter(Boolean).join("：");
+        }
+      } catch {
+        if (text) detail = text.slice(0, 200);
+      }
+    } catch {
+      /* 读体失败不影响抛出状态码 */
+    }
+    throw new DeliveryError(`取密文失败：HTTP ${response.status}${detail ? `（${detail}）` : ""}`);
   }
   const buffer = await response.arrayBuffer();
   const expected = endInclusive - start + 1;

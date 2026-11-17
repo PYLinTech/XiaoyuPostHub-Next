@@ -54,7 +54,7 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 	if res.StatusCode != http.StatusOK || !bytes.HasPrefix(raw, []byte("PK")) {
 		t.Fatalf("SDK 下载应返回 ZIP，实际 %d（%d 字节）", res.StatusCode, len(raw))
 	}
-	if got := res.Header.Get("Content-Disposition"); got != `attachment; filename="XiaoyuPostHub-Next_SDK_v4.zip"` {
+	if got := res.Header.Get("Content-Disposition"); got != `attachment; filename="XiaoyuPostHub-Next_SDK_v5.zip"` {
 		t.Fatalf("SDK 下载文件名不符: %q", got)
 	}
 	archive, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
@@ -76,10 +76,10 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 		"go/main.go",
 		"node/examples/direct-delivery.mjs",
 		"node/examples/relay-delivery.mjs",
-		"node/xiaoyuposthub-next-sdk-v4.mjs",
+		"node/xiaoyuposthub-next-sdk-v5.mjs",
 		"python/examples/direct_delivery.py",
 		"python/examples/relay_delivery.py",
-		"python/xiaoyuposthub_next_sdk_v4.py",
+		"python/xiaoyuposthub_next_sdk_v5.py",
 		"web/browser-delivery.mjs",
 		"web/direct-delivery.html",
 		"web/relay-delivery.html",
@@ -103,8 +103,8 @@ func TestAPIKeyLifecycleAndGates(t *testing.T) {
 		t.Fatalf("SDK 版本查询应公开可用，实际 %d: %v", status, payload)
 	}
 	versionData, _ := payload["data"].(map[string]any)
-	if versionData["version"] != "v4" {
-		t.Fatalf("SDK 版本应为 v4，实际 %v", versionData["version"])
+	if versionData["version"] != "v5" {
+		t.Fatalf("SDK 版本应为 v5，实际 %v", versionData["version"])
 	}
 
 	status, payload = env.do(t, http.MethodPost, "/api/api-keys", map[string]any{

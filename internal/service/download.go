@@ -127,6 +127,13 @@ type DeliveryRequest struct {
 	ClientPublicKey string
 	// ForceProxy 表示调用方要求走本机中转。
 	ForceProxy bool
+	// ClientIP 是调用方代传的终端用户地址，仅对 API Key 身份生效。
+	//
+	// API 调用方通常是后端：站点观测到的是后端 IP，而真正去 123 取字节的是
+	// 后端服务的浏览器用户。后端把该用户的真实 IP 声明进来，票据就按它的网段
+	// 绑定，123 回源鉴权（AuthorizeCDN）才能放行；否则直连交付必然 403。
+	// 登录会话/访客的真实 IP 已由中间件解析，声明会被忽略。
+	ClientIP string
 }
 
 // PrepareDelivery 是下载与预览共用的准备接口。
@@ -267,13 +274,26 @@ func (s *Service) prepareDeliveryForFile(ctx context.Context, actor auth.Princip
 		// 此时尚未预扣配额、亦未创建票据，没有需要回滚的东西。
 		return DeliveryPlan{}, fmt.Errorf("%w: 交付票据参数配置无效", ErrUnavailable)
 	}
+	// 票据默认绑定申请方网段。API Key 调用方代传了终端用户地址时改绑它：
+	// 直连交付的字节由该用户的浏览器向 123 取，回源鉴权校验的是他的地址。
+	// 计费归属不变（仍记后端属主），只改来源绑定与流量明细里的访客地址。
+	bindIP := actor.ClientIP
+	bindPrefix := actor.IPPrefix
+	if declared := strings.TrimSpace(req.ClientIP); declared != "" && actor.APIKeyID != "" {
+		addr, err := netip.ParseAddr(declared)
+		if err != nil || !addr.IsValid() {
+			return DeliveryPlan{}, fmt.Errorf("%w: clientIp 不是有效的 IP 地址", ErrBadRequest)
+		}
+		bindIP = addr.Unmap()
+		bindPrefix = s.Auth.IPPrefix(ctx, bindIP)
+	}
 	ticket := store.Ticket{
 		ID:            ticketID,
 		FileChecksum:  file.Checksum,
 		ActorType:     actor.Actor,
 		UserID:        actor.UserID(),
-		ClientIP:      actor.ClientIP.String(),
-		IPPrefix:      actor.IPPrefix,
+		ClientIP:      bindIP.String(),
+		IPPrefix:      bindPrefix,
 		GroupName:     actor.GroupName(),
 		Purpose:       purpose,
 		DeliveryMode:  mode,
@@ -536,7 +556,11 @@ func (s *Service) checkTicketIP(_ context.Context, ticket store.Ticket, claimedI
 	}
 	bound, err := netip.ParsePrefix(ticket.IPPrefix)
 	if err != nil {
-		return fmt.Errorf("%w: 票据来源绑定无效", ErrUnavailable)
+		// 绑定前缀非法（如申请方地址无法解析时落下的 "unknown"）属于部署侧
+		// 来源解析/可信代理配置问题，不是可重试的服务故障：按 403 拒绝并给出
+		// 排查提示，避免按 503 口径让上游反复重试一个注定失败的鉴权。回源鉴权
+		// 端点只把原因写进服务端日志，123 与访客看到的是通用拒绝。
+		return fmt.Errorf("%w: 票据来源绑定无效，请检查可信代理与 X-Forwarded-For 配置", ErrForbidden)
 	}
 	addr, err := netip.ParseAddr(strings.TrimSpace(claimedIP))
 	if err != nil {
@@ -1000,9 +1024,13 @@ func (s *Service) authorizeTicketActor(ctx context.Context, ticket store.Ticket,
 	}
 	if ticket.IPPrefix != "" {
 		if _, err := netip.ParsePrefix(ticket.IPPrefix); err != nil {
-			return fmt.Errorf("%w: 票据来源绑定无效", ErrUnavailable)
+			return fmt.Errorf("%w: 票据来源绑定无效，请检查可信代理与 X-Forwarded-For 配置", ErrForbidden)
 		}
-		if actor.IPPrefix == "" || ticket.IPPrefix != actor.IPPrefix {
+		// API Key 属主已由凭据认证，且票据可能按代传的终端用户网段绑定
+		// （供 123 回源校验）；后端自身结算/开流不再要求与申请网段一致，
+		// 否则「后端申请、前端直取」的票据会在后端回执时被自己的绑定挡下。
+		// 会话/访客身份仍按网段一致校验，防止票据被带到另一网络使用。
+		if actor.APIKeyID == "" && (actor.IPPrefix == "" || ticket.IPPrefix != actor.IPPrefix) {
 			return fmt.Errorf("%w: 请求来源与票据不一致", ErrForbidden)
 		}
 	}

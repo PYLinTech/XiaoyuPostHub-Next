@@ -1,4 +1,4 @@
-// XiaoyuPostHub-Next Go SDK 示例（v4）。
+// XiaoyuPostHub-Next Go SDK 示例（v5）。
 //
 // 站点地址默认从 ../config.json 读取，可在 NewClient 的 baseURL 参数覆盖；
 // API Key 只来自参数或 XIAOYU_API_KEY。
@@ -474,23 +474,36 @@ type DeliveryPlan struct {
 //
 // clientPublicKey 是调用方现场生成的临时公钥（base64 SPKI DER）。密文计划会
 // 附带用该公钥封装的内容密钥信封；明文计划不含密钥材料。
-func (c *Client) PrepareDownload(ctx context.Context, path, clientPublicKey string, preview bool) (DeliveryPlan, error) {
+//
+// clientIP 代传终端用户的真实地址（仅 API Key 身份生效），可省略或传空串表示不代传。
+// 「后端申请计划、前端直取」时，后端把自己观测到的访客 IP 传进来，票据按它的
+// 网段绑定，123 回源鉴权才放行；不传则按后端自身 IP 绑定，前端直取会 403。
+func (c *Client) PrepareDownload(ctx context.Context, path, clientPublicKey string, preview bool, clientIP ...string) (DeliveryPlan, error) {
 	endpoint := "/api/fs/download"
 	if preview {
 		endpoint = "/api/fs/preview"
 	}
-	var plan DeliveryPlan
-	if err := c.do(ctx, http.MethodPost, endpoint, map[string]any{
+	body := map[string]any{
 		"path":            path,
 		"clientPublicKey": clientPublicKey,
-	}, &plan); err != nil {
+	}
+	var declaredIP string
+	if len(clientIP) > 0 {
+		declaredIP = strings.TrimSpace(clientIP[0])
+	}
+	if declaredIP != "" {
+		body["clientIp"] = declaredIP
+	}
+	var plan DeliveryPlan
+	if err := c.do(ctx, http.MethodPost, endpoint, body, &plan); err != nil {
 		return DeliveryPlan{}, err
 	}
 	return plan, nil
 }
 
 // Settle 回执一张交付票据。密文通道按预扣额度结算，completed 只标记本次
-// 客户端是否完整接收；明文通道在开流时由服务端实测结算，无需调用。
+// 客户端是否完整接收；明文通道由服务端结算（带 Range 的中转流不结算），
+// 客户端回执会被拒绝。
 func (c *Client) Settle(ctx context.Context, ticketID string, completed bool) error {
 	ticketID = strings.TrimSpace(ticketID)
 	if ticketID == "" {
@@ -502,6 +515,9 @@ func (c *Client) Settle(ctx context.Context, ticketID string, completed bool) er
 }
 
 // Download 下载并（除服务端明文交付外）在本地解密，返回交付计划。
+// 本方法由后端自己取字节，票据按后端自身网段绑定，不接受代传访客 IP：
+// 若计划落到 mode=direct，取数方就是后端，绑到访客网段会让回源鉴权 403。
+// 需要「后端申请、前端直取」时改用 PrepareDownload 并代传 clientIP。
 func (c *Client) Download(ctx context.Context, path, dest string, preview bool) (DeliveryPlan, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -511,7 +527,7 @@ func (c *Client) Download(ctx context.Context, path, dest string, preview bool) 
 	if err != nil {
 		return DeliveryPlan{}, err
 	}
-	plan, err := c.PrepareDownload(ctx, path, base64.StdEncoding.EncodeToString(pub), preview)
+	plan, err := c.PrepareDownload(ctx, path, base64.StdEncoding.EncodeToString(pub), preview, "")
 	if err != nil {
 		return DeliveryPlan{}, err
 	}
@@ -531,34 +547,29 @@ func (c *Client) Download(ctx context.Context, path, dest string, preview bool) 
 	tempPath := temp.Name()
 	_ = temp.Close()
 	defer os.Remove(tempPath)
-	fail := func(err error) (DeliveryPlan, error) {
-		if plan.TicketID != "" {
-			_ = c.Settle(ctx, plan.TicketID, false)
-		}
-		return DeliveryPlan{}, err
-	}
+	// 失败时不回执：密文票据一旦回执即按预扣全额结算，不回执则到期退款。
 	parts, err := orderedParts(plan.Parts, plan.Encryption.CipherSize)
 	if err != nil {
-		return fail(err)
+		return DeliveryPlan{}, err
 	}
 	switch {
 	case plan.Mode == "direct" && len(parts) > 0:
 		if err := c.saveParts(ctx, parts, tempPath); err != nil {
-			return fail(err)
+			return DeliveryPlan{}, err
 		}
 	case plan.Mode == "direct" && plan.URL != "":
 		if err := c.saveURL(ctx, plan.URL, tempPath, false); err != nil {
-			return fail(err)
+			return DeliveryPlan{}, err
 		}
 	case plan.StreamURL != "":
 		if err := c.saveURL(ctx, plan.StreamURL, tempPath, true); err != nil {
-			return fail(err)
+			return DeliveryPlan{}, err
 		}
 	default:
-		return fail(errors.New("交付计划缺少可下载地址"))
+		return DeliveryPlan{}, errors.New("交付计划缺少可下载地址")
 	}
 	if err := decryptFile(tempPath, dest, plan, privateKey); err != nil {
-		return fail(err)
+		return DeliveryPlan{}, err
 	}
 	if plan.TicketID != "" {
 		_ = c.Settle(ctx, plan.TicketID, true)

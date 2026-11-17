@@ -306,18 +306,23 @@ class Client:
             "POST", f"/api/upload/{_path(session)}/resolve", {"checksum": checksum})
 
     # ---------------------------------------------------------------- 下载
-    def prepare_download(self, path: str, client_public_key: str, preview: bool = False) -> dict:
+    def prepare_download(self, path: str, client_public_key: str, preview: bool = False, client_ip: str = "") -> dict:
         """请求交付计划：只协商通道与密钥，不下载任何字节。
 
         client_public_key 是 base64 SPKI DER；密文计划会附带用该公钥封装的内容密钥。
+        client_ip 可选，代传终端用户真实地址（仅 API Key 身份生效）：「后端申请、
+        前端直取」时票据按它的网段绑定，123 回源鉴权才放行；不传则按后端 IP 绑定。
         """
-        return self.request("POST", "/api/fs/preview" if preview else "/api/fs/download", {
-            "path": path,
-            "clientPublicKey": client_public_key,
-        })
+        body = {"path": path, "clientPublicKey": client_public_key}
+        if isinstance(client_ip, str) and client_ip.strip():
+            body["clientIp"] = client_ip.strip()
+        return self.request("POST", "/api/fs/preview" if preview else "/api/fs/download", body)
 
     def settle(self, ticket_id: str, completed: bool = True) -> dict:
-        """回执交付票据；密文通道按预扣额度结算，completed 只表示是否完整接收。"""
+        """回执交付票据；密文通道按预扣额度结算，completed 只表示是否完整接收。
+
+        明文通道由服务端结算（带 Range 的中转流不结算），客户端回执会被拒绝。
+        """
         if not ticket_id:
             return {}
         return self.request("POST", "/api/fs/settle", {
@@ -383,6 +388,10 @@ class Client:
             Path(temp_path).unlink(missing_ok=True)
 
     def download(self, path: str, dest: str, preview: bool = False) -> dict:
+        """后端自己取字节并（密文计划）本地解密。票据按后端自身网段绑定，不接受
+        代传访客 IP：若计划落到 mode=direct，取数方就是后端，绑到访客网段会让回源
+        鉴权 403。需要「后端申请、前端直取」时改用 prepare_download 并代传 client_ip。
+        """
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         pub = private_key.public_key().public_bytes(
             serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -412,14 +421,8 @@ class Client:
             else:
                 raise APIError(0, "交付计划缺少可下载地址", "")
             self._decrypt_file(temp_path, dest, plan, private_key)
-        except Exception:
-            if plan.get("ticketId"):
-                try:
-                    self.settle(plan["ticketId"], False)
-                except APIError:
-                    pass
-            raise
         finally:
+            # 失败时不回执：密文票据一旦回执即按预扣全额结算，不回执则到期退款。
             Path(temp_path).unlink(missing_ok=True)
 
         ticket = plan.get("ticketId")
@@ -642,8 +645,8 @@ if __name__ == "__main__":
         print(sdk_version())
         raise SystemExit(0)
     if len(sys.argv) < 2:
-        print("用法: python xiaoyuposthub_next_sdk_v4.py --version")
-        print("      python xiaoyuposthub_next_sdk_v4.py <本地文件> [目标目录]")
+        print("用法: python xiaoyuposthub_next_sdk_v5.py --version")
+        print("      python xiaoyuposthub_next_sdk_v5.py <本地文件> [目标目录]")
         raise SystemExit(2)
     client = Client()
     local, parent = sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else "/"

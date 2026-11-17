@@ -284,19 +284,27 @@ export class Client {
   /**
    * 请求交付计划：只协商通道与密钥，不下载任何字节。
    * clientPublicKey 是 base64 SPKI DER；密文计划会附带用该公钥封装的内容密钥。
+   * clientIp 可选，代传终端用户真实地址（仅 API Key 身份生效）：「后端申请、
+   * 前端直取」时票据按它的网段绑定，123 回源鉴权才放行；不传则按后端 IP 绑定。
    */
-  prepareDownload(filePath, clientPublicKey, preview = false) {
-    return this.request("POST", preview ? "/api/fs/preview" : "/api/fs/download", {
-      json: { path: filePath, clientPublicKey },
-    });
+  prepareDownload(filePath, clientPublicKey, preview = false, clientIp = "") {
+    const json = { path: filePath, clientPublicKey };
+    if (typeof clientIp === "string" && clientIp.trim()) json.clientIp = clientIp.trim();
+    return this.request("POST", preview ? "/api/fs/preview" : "/api/fs/download", { json });
   }
 
-  /** 回执交付票据；密文通道按预扣额度结算，completed 只表示是否完整接收。 */
+  /**
+   * 回执交付票据；密文通道按预扣额度结算，completed 只表示是否完整接收。
+   * 明文通道由服务端结算（带 Range 的中转流不结算），客户端回执会被拒绝。
+   */
   settle(ticketId, completed = true) {
     if (!ticketId) return Promise.resolve();
     return this.request("POST", "/api/fs/settle", { json: { ticketId, completed } });
   }
 
+  // 本方法由后端自己取字节，票据按后端自身网段绑定，不接受代传访客 IP：
+  // 若计划落到 mode=direct，取数方就是后端，绑到访客网段会让回源鉴权 403。
+  // 需要「后端申请、前端直取」时改用 prepareDownload 并代传 clientIp。
   async download(filePath, dest, preview = false) {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
@@ -328,12 +336,8 @@ export class Client {
         throw new APIError(0, "交付计划缺少可下载地址");
       }
       await this._decryptFile(cipherPath, dest, plan, privateKey);
-    } catch (err) {
-      if (plan.ticketId) {
-        try { await this.settle(plan.ticketId, false); } catch { /* 失败回执不覆盖原始错误 */ }
-      }
-      throw err;
     } finally {
+      // 失败时不回执：密文票据一旦回执即按预扣全额结算，不回执则到期退款。
       await rm(tempDir, { recursive: true, force: true });
     }
     if (plan.ticketId) {
@@ -620,8 +624,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const result = await client.upload(local, parent);
     console.log(JSON.stringify(result, null, 2));
   } else {
-    console.error("用法: node xiaoyuposthub-next-sdk-v4.mjs --version");
-    console.error("      node xiaoyuposthub-next-sdk-v4.mjs <本地文件> [目标目录]");
+    console.error("用法: node xiaoyuposthub-next-sdk-v5.mjs --version");
+    console.error("      node xiaoyuposthub-next-sdk-v5.mjs <本地文件> [目标目录]");
     process.exit(2);
   }
 }
